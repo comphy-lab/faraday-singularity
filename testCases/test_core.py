@@ -93,3 +93,65 @@ def test_initial_value_response_matches_floquet_and_normal_mode():
     mu = fl.mu_KT(Gamma, Omega, 20, Oh, 0.0, d, "free-slip", fold=fold)
     Z = iv.response(t, Oh=Oh, Bo=0.0, d=d, Gamma=Gamma, Omega=Omega)
     assert floquet_exponent(t, Z, period=T, t_start=10 * T)["mu"] == pytest.approx(mu, abs=1e-5)
+
+
+def test_bdf2_response_is_second_order():
+    d, Oh = 2 * math.pi, 0.04
+    T = 2 * math.pi / (2 * fl.omega0(0.0, d))
+    t_end = 4 * T
+    errs = []
+    for n in (50, 100, 200):
+        tb, Zb = iv.response_bdf2(T / n, 4 * n, Oh=Oh, Bo=0.0, d=d, N=32)
+        Z = iv.response(tb, Oh=Oh, Bo=0.0, d=d, N=32)
+        assert tb[-1] == pytest.approx(t_end, rel=1e-12)
+        errs.append(np.max(np.abs(Zb - Z)))
+    assert errs[0] / errs[1] == pytest.approx(4.0, rel=0.15)
+    assert errs[1] / errs[2] == pytest.approx(4.0, rel=0.15)
+
+
+def _synthetic_run(tmp_path: Path, Gamma: float, a0: float, periods: int, n: int) -> Path:
+    """A run directory whose amplitude is the exact BDF2 linear response."""
+    import json
+
+    d, Oh = 2 * math.pi, 0.04
+    nd = nondimensionalise(CaseParameters(fluid=Fluid(Oh=Oh), container=Container(depth=d),
+                                          forcing=Forcing(Gamma=Gamma)))
+    dt = nd.forcing_period / n
+    t, Z = iv.response_bdf2(dt, periods * n, Oh=Oh, Bo=0.0, d=d, Gamma=Gamma, Omega=nd.Omega)
+    run = tmp_path / f"G{Gamma}"
+    run.mkdir()
+    cols = ["time", "z_axis", "w_axis", "amp", "volume", "area", "kinetic_energy", "dissipation",
+            "remesh_count"]
+    data = np.zeros((t.size, len(cols)))
+    data[:, 0], data[:, 1], data[:, 3] = t, d + a0 * Z, a0 * Z
+    data[:, 4] = 1.0
+    data[:, 5] = math.pi * nd.radius**2 * (1 + 1e-6)
+    with (run / "diagnostics.txt").open("w") as fh:
+        fh.write("# " + "\t".join(cols) + "\n")
+        np.savetxt(fh, data, delimiter="\t")
+    params = {"dimensionless": nd.to_dict() | {"a0": a0},
+              "case": {"case_id": f"synthetic-G{Gamma}",
+                       "time_stepping": {"steps_per_forcing_period": n}},
+              "mesh": {"h_interface": 1.0, "h_axis": 1.0, "h_max": 1.0, "grading": 1.0},
+              "time_stepping": {"dt": dt, "t_end": t[-1]}}
+    (run / "parameters.json").write_text(json.dumps(params))
+    (run / "run_status.json").write_text(json.dumps({"state": "completed", "remesh_count": 0}))
+    return run
+
+
+def test_comparison_pipeline_on_synthetic_runs(tmp_path):
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import compare_linear as cl
+
+    out = tmp_path / "analysis"
+    out.mkdir()
+    free = cl.analyse(_synthetic_run(tmp_path, 0.0, -0.01, 12, 50), out, 4.0, None, False)
+    assert abs(free["rate_rel_error_spatial"]) < 1e-9
+    assert abs(free["frequency_rel_error_spatial"]) < 1e-9
+    assert free["max_abs_diff_bdf2_over_a0"] < 1e-9
+    forced = [cl.analyse(_synthetic_run(tmp_path, G, -0.001, 20, 50), out, 4.0, None, False)
+              for G in (0.2, 0.3)]
+    for r in forced:
+        assert abs(r["modes_mu_error_spatial"]) < 1e-8
+    (th,) = cl.thresholds(forced)
+    assert th["floquet_exact"] == pytest.approx(th["Gamma_c_exact"], rel=2e-3)

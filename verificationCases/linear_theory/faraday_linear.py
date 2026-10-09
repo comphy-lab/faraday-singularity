@@ -61,7 +61,7 @@ def _coth(x):
 
 
 def D_free_slip_closed(s, Oh, d):
-    """Closed-form D(s) for the free-slip bottom (derived in README, eq. D1)."""
+    """Closed-form D(s) for the free-slip bottom (module docstring)."""
     s = np.asarray(s, dtype=complex)
     q = np.sqrt(1.0 + s / Oh)
     cothd = 1.0 if np.isinf(d) else 1.0 / np.tanh(d)

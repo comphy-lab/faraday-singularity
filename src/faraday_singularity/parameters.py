@@ -96,7 +96,7 @@ class Dimensionless:
 
     @property
     def forcing_period(self) -> float:
-        """Forcing period ``2 pi/Omega``; equals the mode period when forced at the tongue centre."""
+        """Forcing period ``2 pi/Omega``; half the mode period when forced at the tongue centre."""
         return 2 * math.pi / self.Omega
 
     @property

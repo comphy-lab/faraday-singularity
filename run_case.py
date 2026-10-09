@@ -4,7 +4,7 @@
 Example::
 
     .venv-pyoomph-f912ac10-py313/bin/python run_case.py \
-        verificationCases/free-decay/free-decay-h0.05.json --outdir /path/to/run
+        verificationCases/free-decay/free-decay-h0.025-n100.json --outdir /path/to/run
 
 Times in the case file are in forcing periods ``2 pi/Omega``. Unrecognised options are left for
 pyoomph's own command-line parser (e.g. ``--omp 4``). Each output directory receives
@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -62,9 +63,28 @@ def load_case(path: Path) -> dict:
     case = json.loads(path.read_text())
     if case.get("schema") != "pyoomph-case-v1":
         raise SystemExit(f"{path}: not a pyoomph-case-v1 file")
-    if case.get("geometry", {}).get("kind") != "axisymmetric":
-        raise SystemExit(f"{path}: geometry.kind must be axisymmetric")
+    expected = {
+        ("geometry", "kind"): "axisymmetric",
+        ("time_stepping", "scheme"): "BDF2",
+        ("output", "cadence_unit"): "forcing periods",
+        ("completion", "kind"): "time",
+        ("completion", "unit"): "forcing periods",
+    }
+    for (block, key), value in expected.items():
+        if case.get(block, {}).get(key) != value:
+            raise SystemExit(f"{path}: {block}.{key} must be {value!r}")
+    steps = case["time_stepping"].get("steps_per_forcing_period")
+    if not isinstance(steps, int) or steps < 1:
+        raise SystemExit(f"{path}: time_stepping.steps_per_forcing_period must be a positive integer")
     return case
+
+
+class Terminated(Exception):
+    """Raised from the SIGTERM handler so that the run status records the interruption."""
+
+
+def _raise_terminated(signum, _frame):
+    raise Terminated(f"signal {signum}")
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -74,13 +94,20 @@ def write_json(path: Path, data: dict) -> None:
 
 
 def provenance(case_path: Path) -> dict:
-    def git(*args: str) -> str:
-        return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True,
-                              check=False).stdout.strip()
+    def git(*args: str) -> str | None:
+        try:
+            out = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True,
+                                 check=False, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
 
+    commit = git("rev-parse", "HEAD")
+    status = git("status", "--porcelain") if commit else None
     info = {"case_sha256": hashlib.sha256(case_path.read_bytes()).hexdigest(),
-            "component_commit": git("rev-parse", "HEAD") or None,
-            "component_dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
+            "component_commit": commit,
+            # None when the state cannot be determined; untracked files count as dirty
+            "component_dirty": None if status is None else bool(status)}
     try:
         from importlib.metadata import distribution
 
@@ -110,7 +137,7 @@ def main() -> int:
     ts = case["time_stepping"]
     period = nd.forcing_period
     periods = args.periods if args.periods is not None else float(case["completion"]["value"])
-    dt = period / int(ts["steps_per_forcing_period"])
+    dt = period / ts["steps_per_forcing_period"]
     dt_out = period * float(case["output"]["cadence"])
     t_end = periods * period
 
@@ -132,10 +159,12 @@ def main() -> int:
 
     from faraday_singularity.problem import FaradayProblem
 
+    signal.signal(signal.SIGTERM, _raise_terminated)
     status = {"state": "running", "started": time.time()}
     write_json(args.outdir / "run_status.json", status)
-    problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, mesh_output=args.mesh_output)
+    problem = None
     try:
+        problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, mesh_output=args.mesh_output)
         problem.set_output_directory(str(args.outdir))
         problem.write_states = bool(case["output"]["write_states"])
         with problem:
@@ -144,13 +173,16 @@ def main() -> int:
             problem.run(t_end, timestep=dt, outstep=dt_out,
                         newton_solver_tolerance=float(case["tolerances"]["newton"]))
         status["state"] = "completed"
-    except Exception as exc:  # record the failure, then re-raise for a non-zero exit
-        status.update(state="failed", detail=f"{type(exc).__name__}: {exc}", ended=time.time(),
-                      remesh_count=problem.remesh_count)
+    except BaseException as exc:  # record failures and interrupts, then re-raise
+        interrupted = isinstance(exc, (Terminated, KeyboardInterrupt))
+        state = "interrupted" if interrupted or not isinstance(exc, Exception) else "failed"
+        status.update(state=state, detail=f"{type(exc).__name__}: {exc}", ended=time.time(),
+                      remesh_count=getattr(problem, "remesh_count", None))
         write_json(args.outdir / "run_status.json", status)
         raise
     finally:
-        problem.close_diagnostics()
+        if problem is not None:
+            problem.close_diagnostics()
     status["ended"] = time.time()
     status["wall_seconds"] = status["ended"] - status["started"]
     status["remesh_count"] = problem.remesh_count

@@ -158,3 +158,26 @@ def response(t, *, Oh, Bo, d, bottom="free-slip", Gamma=0.0, Omega=1.0, N=48,
     if not sol.success:
         raise RuntimeError(f"linear initial-value integration failed: {sol.message}")
     return sol.y[-1]
+
+
+def response_bdf2(dt: float, steps: int, *, Oh, Bo, d, bottom="free-slip", Gamma=0.0,
+                  Omega=1.0, N=48) -> tuple[np.ndarray, np.ndarray]:
+    """``Z`` at ``t_n = n dt`` from the same time discretisation as the simulations.
+
+    pyoomph starts from rest with one implicit Euler (BDF1) step and continues with constant-step
+    BDF2, ``(3 y_{n+1} - 4 y_n + y_{n-1})/(2 dt) = A(t_{n+1}) y_{n+1}``. Applying the identical scheme
+    to the linear system leaves only the spatial error in the difference between a simulation and
+    this response, so mesh convergence can be measured separately from the time-step error.
+    """
+    A0, A1 = reduced_ode(Oh, Bo, d, bottom, N)
+    m = A0.shape[0]
+    eye = np.eye(m)
+    y = np.zeros((steps + 1, m))
+    y[0, -1] = 1.0
+    for n in range(steps):
+        A = A0 + Gamma * np.cos(Omega * (n + 1) * dt) * A1
+        if n == 0:
+            y[1] = np.linalg.solve(eye - dt * A, y[0])
+        else:
+            y[n + 1] = np.linalg.solve(3.0 * eye - 2.0 * dt * A, 4.0 * y[n] - y[n - 1])
+    return dt * np.arange(steps + 1), y[:, -1]
