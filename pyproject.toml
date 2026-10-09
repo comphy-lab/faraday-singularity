@@ -1,0 +1,43 @@
+[project]
+name = "faraday-singularity"
+version = "0.1.0"
+description = "Axisymmetric sharp-interface FEM of singular Faraday-wave collapse and Worthington jets"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Vatsal Sanjay", email = "vatsal.sanjay@comphy-lab.org" }]
+
+dependencies = [
+    "pyoomph",
+    "numpy>=1.24.4",
+    "scipy>=1.10.1",
+    "matplotlib>=3.7.5",
+    # pyoomph is built with PYOOMPH_USE_MPI=ON (see below) and imports mpi4py at runtime.
+    "mpi4py>=3.1",
+]
+
+# pyoomph comes from an immutable CoMPhy release commit (tag comphy-2026.09.21.1), not PyPI.
+# It is a source build: CMake compiles the vendored oomph-lib plus downloaded CLN/GiNaC.
+[tool.uv.sources]
+pyoomph = { git = "https://github.com/comphy-lab/pyoomph", rev = "f912ac10cdbb170e58aca3a337f0aa4ed13cf1e0" }
+
+[tool.uv]
+# Simulation cases and analysis scripts, not an installable library. Runners put src/ on sys.path.
+package = false
+config-settings-package = { pyoomph = { "cmake.define.PYOOMPH_USE_MPI" = "ON", "build.tool-args" = "-j16" } }
+
+[dependency-groups]
+dev = [
+    "imageio>=2.37.4",
+    "imageio-ffmpeg>=0.6.0",
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+pyoomph-build = [
+    "nanobind==2.9.2",
+    "scikit-build-core==0.11.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
