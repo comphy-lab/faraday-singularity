@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-GB"
+early_access: false
+
+reviews:
+  profile: "chill"
+  high_level_summary: true
+  path_filters:
+    - "!**/*.lock"
+    - "!dist/**"
+    - "!build/**"
+    - "!**/__pycache__/**"
+    - "!**/*.ipynb_checkpoints/**"
+    - "!**/*.mp4"
+    - "!**/*.png"
+    - "!**/*.pdf"
+  path_instructions:
+    - path: "src/**/*.py"
+      instructions: |
+        pyoomph finite-element formulation of a Faraday-wave free surface driven to a
+        singular conical collapse and Worthington jet. Weak forms follow pyoomph
+        conventions: weak(a, b) is the inner product, interface equations act on the
+        free surface, and var("normal") points out of the bulk. In axisymmetric code,
+        pyoomph already applies the 2*pi*r measure; flag any second multiplication.
+        Check sign conventions, the nondimensionalisation in the parameters module,
+        and that the jet-base, jet-speed and cone-angle observables are defined as
+        documented.
+    - path: "simulationCases/**"
+      instructions: |
+        Simulation entry points and pyoomph-case-v1 case files. Check unit
+        consistency between case files and the parameters module, and that run
+        status and stopping reasons (for example, approach to topology change) are
+        recorded truthfully.
+    - path: "{testCases,verificationCases,validationCases,modelComparisonCases}/**"
+      instructions: |
+        Evidence cases. Check that each comparator is what the folder claims:
+        verification compares with exact or independently computed solutions,
+        validation with independent experimental or numerical data, model
+        comparison with a reduced or similarity model in its stated regime.
+    - path: "postProcess/**"
+      instructions: |
+        Analysis and rendering. Check data loading robustness, that fitted
+        exponents report their fitting window and resolution, and that plotted
+        quantities match their labels.
+    - path: "AGENTS.md"
+      instructions: |
+        Canonical repo operating manual. Check for stale state and contradictions
+        with the actual repository layout.
+  tools:
+    ruff:
+      enabled: true
+    markdownlint:
+      enabled: true
+    shellcheck:
+      enabled: true
