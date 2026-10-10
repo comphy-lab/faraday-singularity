@@ -14,7 +14,8 @@ For each run, the simulated amplitude ``a(t)`` (the Hankel projection of the fre
 * forced runs: the Floquet exponent ``mu`` from ``a(t + T) = -exp(mu T) a(t)``, applied to both
   histories over the same window, and the Kumar-Tuckerman exponent ``mu(Gamma)``. A
   three-component Floquet fit (``floquet_multipliers``) is reported as a supplementary diagnostic,
-  and forced runs that share mesh and time step give the neutral forcing by interpolation.
+  and forced runs that share physics, mesh and time step give the neutral forcing by
+  interpolation.
 
 Each comparison is also made against the linear system advanced with the solver's own time scheme
 (``initial_value.response_bdf2``); that difference contains only the spatial error.
@@ -150,24 +151,29 @@ def analyse(run: Path, out_dir: Path, fit_start_periods: float, fit_end_periods:
 
 
 def thresholds(results: list[dict]) -> list[dict]:
-    """Neutral forcing from forced runs that share mesh and time step, by linear interpolation.
+    """Neutral forcing from forced runs that share physics, mesh and time step, by interpolation.
 
-    For each estimator, ``mu(Gamma)`` is interpolated to zero between the two bracketing amplitudes,
-    for the simulations and for the exact linear response analysed identically; the exact
-    ``Gamma_c`` is the Floquet value. Like-for-like comparison isolates the solver from the
-    estimator and interpolation bias.
+    Runs are grouped by ``(Oh, Bo, depth, Omega)`` (``Omega`` carries the detuning) and by mesh and
+    time step. For each estimator, ``mu(Gamma)`` is interpolated linearly to zero between the first
+    pair of adjacent amplitudes whose exponents are both finite and of opposite sign, for the
+    simulations and for the exact linear response analysed identically; the exact ``Gamma_c`` is
+    the Floquet value. Like-for-like comparison isolates the solver from the estimator and
+    interpolation bias.
     """
     groups: dict[tuple, list[dict]] = {}
     for r in results:
         if r["Gamma"] != 0.0:
             m = r["mesh"]
-            key = (m["h_interface"], m["h_axis"], m["h_max"], m["grading"], r["dt"])
+            key = ((r["Oh"], r["Bo"], r["depth"], r["Omega"]),
+                   (m["h_interface"], m["h_axis"], m["h_max"], m["grading"], r["dt"]))
             groups.setdefault(key, []).append(r)
     out = []
-    for key, rs in groups.items():
+    for (physics, mesh_and_dt), rs in groups.items():
         rs = sorted(rs, key=lambda r: r["Gamma"])
         G = np.array([r["Gamma"] for r in rs])
-        entry = {"mesh_and_dt": list(key), "Gammas": G.tolist(), "Gamma_c_exact": rs[0]["Gamma_c"]}
+        entry = {"physics": dict(zip(("Oh", "Bo", "depth", "Omega"), physics)),
+                 "mesh_and_dt": list(mesh_and_dt), "Gammas": G.tolist(),
+                 "Gamma_c_exact": rs[0]["Gamma_c"]}
         series = {
             "single_simulation": [r["fit_simulation"]["mu"] for r in rs],
             "single_linear_response": [r["fit_linear_response"]["mu"] for r in rs],
@@ -176,8 +182,12 @@ def thresholds(results: list[dict]) -> list[dict]:
             "floquet_exact": [r["mu_floquet"] for r in rs],
         }
         for name, mu in series.items():
-            mu = np.array(mu)
-            idx = np.nonzero(np.diff(np.sign(mu)) != 0)[0]
+            mu = np.array(mu, dtype=float)
+            # a non-finite exponent (no locked subharmonic Floquet exponent below the multiplier
+            # collision, or no subharmonic multiplier in a fit) cannot end a bracket
+            ok = np.isfinite(mu)
+            sg = np.sign(mu)
+            idx = np.nonzero(ok[:-1] & ok[1:] & (sg[:-1] != sg[1:]))[0]
             if idx.size == 0:
                 entry[name] = None
                 continue

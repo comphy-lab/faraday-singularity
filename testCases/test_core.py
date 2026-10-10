@@ -155,3 +155,61 @@ def test_comparison_pipeline_on_synthetic_runs(tmp_path):
         assert abs(r["modes_mu_error_spatial"]) < 1e-8
     (th,) = cl.thresholds(forced)
     assert th["floquet_exact"] == pytest.approx(th["Gamma_c_exact"], rel=2e-3)
+
+
+def _threshold_input(Gamma: float, mu: float, *, Oh: float = 0.04, Bo: float = 0.0,
+                     depth: float = 2 * math.pi, Omega: float = 2.0,
+                     Gamma_c: float = 0.3) -> dict:
+    """A forced-run result with the fields that ``thresholds`` reads; every estimator gives ``mu``."""
+    return {"Gamma": Gamma, "Oh": Oh, "Bo": Bo, "depth": depth, "Omega": Omega,
+            "mesh": {"h_interface": 0.05, "h_axis": 0.05, "h_max": 0.4, "grading": 0.3},
+            "dt": 0.0625, "Gamma_c": Gamma_c, "mu_floquet": mu,
+            "fit_simulation": {"mu": mu}, "fit_linear_response": {"mu": mu},
+            "modes_fit_simulation": {"mu": mu}, "modes_fit_linear_response": {"mu": mu}}
+
+
+ESTIMATORS = ("single_simulation", "single_linear_response", "modes_simulation",
+              "modes_linear_response", "floquet_exact")
+
+
+@pytest.mark.parametrize("field, other", [("Oh", 0.08), ("Bo", 1.0), ("depth", 1.0),
+                                          ("Omega", 2.1)])
+def test_thresholds_do_not_mix_physics(field, other):
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import compare_linear as cl
+
+    # same mesh and dt; mu = Gamma - 0.3 for one system and Gamma - 0.5 for the other. Mixed, the
+    # first sign change would lie between Gamma = 0.3 (second system) and 0.4 (first system).
+    first = [_threshold_input(G, G - 0.3) for G in (0.2, 0.4)]
+    second = [_threshold_input(G, G - 0.5, Gamma_c=0.5, **{field: other}) for G in (0.3, 0.6)]
+    entries = cl.thresholds(first + second)
+    assert len(entries) == 2
+    by_value = {e["physics"][field]: e for e in entries}
+    for value, Gammas, Gamma_c in ((first[0][field], [0.2, 0.4], 0.3), (other, [0.3, 0.6], 0.5)):
+        e = by_value[value]
+        assert e["Gammas"] == Gammas
+        assert e["Gamma_c_exact"] == Gamma_c
+        for name in ESTIMATORS:
+            assert e[name] == pytest.approx(Gamma_c, rel=1e-12)
+
+
+def test_thresholds_skip_non_finite_endpoints():
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import compare_linear as cl
+
+    nan = float("nan")
+    # below the multiplier collision mu_floquet is NaN; a fit without a subharmonic multiplier
+    # also gives NaN. The bracket (0.1, 0.2) has a NaN end and must not be used.
+    (e,) = cl.thresholds([_threshold_input(0.1, nan)]
+                         + [_threshold_input(G, G - 0.25) for G in (0.2, 0.3, 0.4)])
+    for name in ESTIMATORS:
+        assert e[name] == pytest.approx(0.25, rel=1e-12)
+    assert math.isfinite(e["single_like_for_like_rel_error"])
+    assert math.isfinite(e["modes_rel_error_vs_exact"])
+    # a sign change across a NaN has no finite bracket: no threshold rather than a non-finite one
+    (e,) = cl.thresholds([_threshold_input(0.2, -0.05), _threshold_input(0.3, nan),
+                          _threshold_input(0.4, 0.15)])
+    for name in ESTIMATORS:
+        assert e[name] is None
+    assert "single_like_for_like_rel_error" not in e
+    assert "modes_rel_error_vs_exact" not in e
