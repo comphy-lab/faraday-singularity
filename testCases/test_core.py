@@ -149,14 +149,20 @@ def test_comparison_pipeline_on_synthetic_runs(tmp_path):
     assert abs(free["rate_rel_error_spatial"]) < 1e-9
     assert abs(free["frequency_rel_error_spatial"]) < 1e-9
     assert free["max_abs_diff_bdf2_over_a0"] < 1e-9
-    forced = [cl.analyse(_synthetic_run(tmp_path, G, -0.001, 20, 50), out, 4.0, None, False)
-              for G in (0.2, 0.3)]
+    runs = [_synthetic_run(tmp_path, G, -0.001, 20, 50) for G in (0.2, 0.3)]
+    forced = [cl.analyse(run, out, 4.0, None, False) for run in runs]
     for r in forced:
         assert abs(r["modes_mu_error_spatial"]) < 1e-8
         assert r["radius"] == pytest.approx(jn_zeros(1, 1)[0], rel=1e-14)
+        # without --fit-end each run is fitted to its own end
+        assert r["fit_window"] == pytest.approx([8 * math.pi / r["Omega"], r["t_end"]], rel=1e-14)
     (th,) = cl.thresholds(forced)
     assert th["problem"] == {"a0": -0.001, "radius": forced[0]["radius"]}
+    assert th["fit_window"] == forced[0]["fit_window"]
     assert th["physics"]["Oh"] == 0.04
+    # a --fit-end beyond the run's end fits only to that end
+    clipped = cl.analyse(runs[0], out, 4.0, 40.0, False)
+    assert clipped["fit_window"] == forced[0]["fit_window"]
     assert th["floquet_exact"] == pytest.approx(th["Gamma_c_exact"], rel=2e-3)
 
 
@@ -200,10 +206,12 @@ MESH = {"h_interface": 0.05, "h_axis": 0.05, "h_max": 0.4, "grading": 0.3,
 def _threshold_input(Gamma: float, mu: float, *, Oh: float = 0.04, Bo: float = 0.0,
                      depth: float = 2 * math.pi, Omega: float = 2.0, a0: float = -0.001,
                      radius: float | None = float(jn_zeros(1, 1)[0]), mesh: dict = MESH,
-                     dt: float = 0.0625, Gamma_c: float = 0.3, case_id: str | None = None) -> dict:
+                     dt: float = 0.0625, Gamma_c: float = 0.3, case_id: str | None = None,
+                     fit_window: tuple | None = (4 * math.pi, 20 * math.pi)) -> dict:
     """A forced-run result with the fields that ``thresholds`` reads; every estimator gives ``mu``.
 
-    ``radius=None`` omits the field, as in results stored before it was recorded.
+    ``radius=None`` or ``fit_window=None`` omits the field, as in results stored before it was
+    recorded.
     """
     out = {"case_id": case_id or f"G{Gamma:g}",
            "Gamma": Gamma, "Oh": Oh, "Bo": Bo, "depth": depth, "Omega": Omega, "a0": a0,
@@ -212,6 +220,8 @@ def _threshold_input(Gamma: float, mu: float, *, Oh: float = 0.04, Bo: float = 0
            "modes_fit_simulation": {"mu": mu}, "modes_fit_linear_response": {"mu": mu}}
     if radius is not None:
         out["radius"] = radius
+    if fit_window is not None:
+        out["fit_window"] = list(fit_window)
     return out
 
 
@@ -244,12 +254,15 @@ def test_thresholds_do_not_mix_physics(field, other):
     {"a0": -0.002}, {"radius": float(jn_zeros(1, 2)[-1])}, {"radius": None},
     {"mesh": MESH | {"h_interface": 0.025}}, {"mesh": MESH | {"interface_points": 801}},
     {"mesh": MESH | {"remeshing": False}}, {"dt": 0.03125},
-], ids=["a0", "radius", "radius-missing", "h_interface", "interface_points", "remeshing", "dt"])
+    {"fit_window": (4 * math.pi, 12 * math.pi)}, {"fit_window": None},
+], ids=["a0", "radius", "radius-missing", "h_interface", "interface_points", "remeshing", "dt",
+        "fit_window", "fit_window-missing"])
 def test_thresholds_do_not_mix_problem_mesh_or_dt(change):
     sys.path.insert(0, str(ROOT / "verificationCases"))
     import compare_linear as cl
 
-    # same physics; one other part of the simulated problem, the mesh or the time step differs.
+    # same physics; one other part of the simulated problem, the fitting window (a run stopped
+    # early, or run for fewer periods, fitted to its own end), the mesh or the time step differs.
     # mu = Gamma - 0.3 for one series and Gamma - 0.5 for the other: mixed, the first sign change
     # would lie between Gamma = 0.3 (second series) and 0.4 (first series).
     first = [_threshold_input(G, G - 0.3) for G in (0.2, 0.4)]
@@ -262,11 +275,13 @@ def test_thresholds_do_not_mix_problem_mesh_or_dt(change):
     for runs, zero in ((first, 0.3), (second, 0.5)):
         e = by_gammas[tuple(r["Gamma"] for r in runs)]
         assert e["problem"] == {"a0": runs[0]["a0"], "radius": runs[0].get("radius")}
+        assert e["fit_window"] == runs[0].get("fit_window")
         assert e["mesh_and_dt"] == runs[0]["mesh"] | {"dt": runs[0]["dt"]}
         for name in ESTIMATORS:
             assert e[name] == pytest.approx(zero, rel=1e-12)
     a, b = forward
-    assert (a["problem"], a["mesh_and_dt"]) != (b["problem"], b["mesh_and_dt"])
+    assert ((a["problem"], a["fit_window"], a["mesh_and_dt"])
+            != (b["problem"], b["fit_window"], b["mesh_and_dt"]))
 
 
 def test_thresholds_reject_repeated_gamma():
