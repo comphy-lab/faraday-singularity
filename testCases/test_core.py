@@ -153,7 +153,10 @@ def test_comparison_pipeline_on_synthetic_runs(tmp_path):
               for G in (0.2, 0.3)]
     for r in forced:
         assert abs(r["modes_mu_error_spatial"]) < 1e-8
+        assert r["radius"] == pytest.approx(jn_zeros(1, 1)[0], rel=1e-14)
     (th,) = cl.thresholds(forced)
+    assert th["problem"] == {"a0": -0.001, "radius": forced[0]["radius"]}
+    assert th["physics"]["Oh"] == 0.04
     assert th["floquet_exact"] == pytest.approx(th["Gamma_c_exact"], rel=2e-3)
 
 
