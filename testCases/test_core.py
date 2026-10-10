@@ -157,15 +157,25 @@ def test_comparison_pipeline_on_synthetic_runs(tmp_path):
     assert th["floquet_exact"] == pytest.approx(th["Gamma_c_exact"], rel=2e-3)
 
 
+MESH = {"h_interface": 0.05, "h_axis": 0.05, "h_max": 0.4, "grading": 0.3,
+        "interface_points": 401, "remeshing": True}  # as run_case.py writes params["mesh"]
+
+
 def _threshold_input(Gamma: float, mu: float, *, Oh: float = 0.04, Bo: float = 0.0,
-                     depth: float = 2 * math.pi, Omega: float = 2.0,
-                     Gamma_c: float = 0.3) -> dict:
-    """A forced-run result with the fields that ``thresholds`` reads; every estimator gives ``mu``."""
-    return {"Gamma": Gamma, "Oh": Oh, "Bo": Bo, "depth": depth, "Omega": Omega,
-            "mesh": {"h_interface": 0.05, "h_axis": 0.05, "h_max": 0.4, "grading": 0.3},
-            "dt": 0.0625, "Gamma_c": Gamma_c, "mu_floquet": mu,
-            "fit_simulation": {"mu": mu}, "fit_linear_response": {"mu": mu},
-            "modes_fit_simulation": {"mu": mu}, "modes_fit_linear_response": {"mu": mu}}
+                     depth: float = 2 * math.pi, Omega: float = 2.0, a0: float = -0.001,
+                     radius: float | None = float(jn_zeros(1, 1)[0]), mesh: dict = MESH,
+                     dt: float = 0.0625, Gamma_c: float = 0.3) -> dict:
+    """A forced-run result with the fields that ``thresholds`` reads; every estimator gives ``mu``.
+
+    ``radius=None`` omits the field, as in results stored before it was recorded.
+    """
+    out = {"Gamma": Gamma, "Oh": Oh, "Bo": Bo, "depth": depth, "Omega": Omega, "a0": a0,
+           "mesh": dict(mesh), "dt": dt, "Gamma_c": Gamma_c, "mu_floquet": mu,
+           "fit_simulation": {"mu": mu}, "fit_linear_response": {"mu": mu},
+           "modes_fit_simulation": {"mu": mu}, "modes_fit_linear_response": {"mu": mu}}
+    if radius is not None:
+        out["radius"] = radius
+    return out
 
 
 ESTIMATORS = ("single_simulation", "single_linear_response", "modes_simulation",
@@ -191,6 +201,46 @@ def test_thresholds_do_not_mix_physics(field, other):
         assert e["Gamma_c_exact"] == Gamma_c
         for name in ESTIMATORS:
             assert e[name] == pytest.approx(Gamma_c, rel=1e-12)
+
+
+@pytest.mark.parametrize("change", [
+    {"a0": -0.002}, {"radius": float(jn_zeros(1, 2)[-1])}, {"radius": None},
+    {"mesh": MESH | {"h_interface": 0.025}}, {"mesh": MESH | {"interface_points": 801}},
+    {"mesh": MESH | {"remeshing": False}}, {"dt": 0.03125},
+], ids=["a0", "radius", "radius-missing", "h_interface", "interface_points", "remeshing", "dt"])
+def test_thresholds_do_not_mix_problem_mesh_or_dt(change):
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import compare_linear as cl
+
+    # same physics; one other part of the simulated problem, the mesh or the time step differs.
+    # mu = Gamma - 0.3 for one series and Gamma - 0.5 for the other: mixed, the first sign change
+    # would lie between Gamma = 0.3 (second series) and 0.4 (first series).
+    first = [_threshold_input(G, G - 0.3) for G in (0.2, 0.4)]
+    second = [_threshold_input(G, G - 0.5, **change) for G in (0.3, 0.6)]
+    forward = cl.thresholds(first + second)
+    backward = cl.thresholds(second[::-1] + first[::-1])
+    assert len(forward) == 2
+    by_gammas = {tuple(e["Gammas"]): e for e in forward}
+    assert by_gammas == {tuple(e["Gammas"]): e for e in backward}
+    for runs, zero in ((first, 0.3), (second, 0.5)):
+        e = by_gammas[tuple(r["Gamma"] for r in runs)]
+        assert e["problem"] == {"a0": runs[0]["a0"], "radius": runs[0].get("radius")}
+        assert e["mesh_and_dt"] == runs[0]["mesh"] | {"dt": runs[0]["dt"]}
+        for name in ESTIMATORS:
+            assert e[name] == pytest.approx(zero, rel=1e-12)
+    a, b = forward
+    assert (a["problem"], a["mesh_and_dt"]) != (b["problem"], b["mesh_and_dt"])
+
+
+def test_thresholds_reject_repeated_gamma():
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import compare_linear as cl
+
+    # the same run passed twice, or runs that differ only in a field outside the key, would make
+    # the bracket depend on the order of the inputs
+    runs = [_threshold_input(G, G - 0.3) for G in (0.2, 0.4)]
+    with pytest.raises(ValueError, match="repeated Gamma"):
+        cl.thresholds(runs + runs[:1])
 
 
 def test_thresholds_skip_non_finite_endpoints():
