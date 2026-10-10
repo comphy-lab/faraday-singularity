@@ -160,6 +160,39 @@ def test_comparison_pipeline_on_synthetic_runs(tmp_path):
     assert th["floquet_exact"] == pytest.approx(th["Gamma_c_exact"], rel=2e-3)
 
 
+def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import json
+
+    import compare_linear as cl
+
+    # two runs of one recorded problem at one Gamma whose amplitudes differ (as from two solver
+    # revisions): the threshold group is ambiguous, but each run's comparison stands
+    runs = []
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        runs.append(_synthetic_run(tmp_path / name, 0.3, -0.001, 12, 50))
+    params = json.loads((runs[1] / "parameters.json").read_text())
+    params["case"]["case_id"] += "-b"
+    (runs[1] / "parameters.json").write_text(json.dumps(params))
+    diag = runs[1] / "diagnostics.txt"
+    header = diag.read_text().splitlines()[0]
+    data = np.loadtxt(diag, comments="#")
+    data[:, 3] *= np.exp(1e-3 * data[:, 0])
+    with diag.open("w") as fh:
+        fh.write(header + "\n")
+        np.savetxt(fh, data, delimiter="\t")
+
+    out = tmp_path / "analysis"
+    monkeypatch.setattr(sys, "argv", ["compare_linear.py", *map(str, runs), "--out", str(out)])
+    monkeypatch.setattr(cl, "plot", lambda *args: None)
+    assert cl.main() == 1
+    summary = json.loads((out / "linear_comparison.json").read_text())
+    assert [r["case_id"] for r in summary["runs"]] == ["synthetic-G0.3", "synthetic-G0.3-b"]
+    assert "thresholds" not in summary
+    assert "synthetic-G0.3-b" in summary["thresholds_error"]
+
+
 MESH = {"h_interface": 0.05, "h_axis": 0.05, "h_max": 0.4, "grading": 0.3,
         "interface_points": 401, "remeshing": True}  # as run_case.py writes params["mesh"]
 
@@ -167,12 +200,13 @@ MESH = {"h_interface": 0.05, "h_axis": 0.05, "h_max": 0.4, "grading": 0.3,
 def _threshold_input(Gamma: float, mu: float, *, Oh: float = 0.04, Bo: float = 0.0,
                      depth: float = 2 * math.pi, Omega: float = 2.0, a0: float = -0.001,
                      radius: float | None = float(jn_zeros(1, 1)[0]), mesh: dict = MESH,
-                     dt: float = 0.0625, Gamma_c: float = 0.3) -> dict:
+                     dt: float = 0.0625, Gamma_c: float = 0.3, case_id: str | None = None) -> dict:
     """A forced-run result with the fields that ``thresholds`` reads; every estimator gives ``mu``.
 
     ``radius=None`` omits the field, as in results stored before it was recorded.
     """
-    out = {"Gamma": Gamma, "Oh": Oh, "Bo": Bo, "depth": depth, "Omega": Omega, "a0": a0,
+    out = {"case_id": case_id or f"G{Gamma:g}",
+           "Gamma": Gamma, "Oh": Oh, "Bo": Bo, "depth": depth, "Omega": Omega, "a0": a0,
            "mesh": dict(mesh), "dt": dt, "Gamma_c": Gamma_c, "mu_floquet": mu,
            "fit_simulation": {"mu": mu}, "fit_linear_response": {"mu": mu},
            "modes_fit_simulation": {"mu": mu}, "modes_fit_linear_response": {"mu": mu}}
@@ -239,11 +273,29 @@ def test_thresholds_reject_repeated_gamma():
     sys.path.insert(0, str(ROOT / "verificationCases"))
     import compare_linear as cl
 
-    # the same run passed twice, or runs that differ only in a field outside the key, would make
-    # the bracket depend on the order of the inputs
+    # runs at one Gamma that differ in a field outside the key (a solver revision, say) give
+    # different exponents; which of them brackets the zero would depend on the order of the inputs
     runs = [_threshold_input(G, G - 0.3) for G in (0.2, 0.4)]
-    with pytest.raises(ValueError, match="repeated Gamma"):
-        cl.thresholds(runs + runs[:1])
+    rerun = _threshold_input(0.2, -0.05, case_id="G0.2-rerun")
+    for inputs in (runs + [rerun], [rerun] + runs):
+        with pytest.raises(ValueError, match=r"repeated Gamma 0\.2 in threshold group physics=.*"
+                                             r"(?:'G0\.2', 'G0\.2-rerun'|'G0\.2-rerun', 'G0\.2')"):
+            cl.thresholds(inputs)
+
+
+def test_thresholds_collapse_exact_duplicates():
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import copy
+
+    import compare_linear as cl
+
+    # the same run passed twice is not ambiguous, also where an exponent is NaN
+    runs = [_threshold_input(0.1, float("nan"))] + [_threshold_input(G, G - 0.3)
+                                                   for G in (0.2, 0.4)]
+    single = cl.thresholds(runs)
+    assert single[0]["Gammas"] == [0.1, 0.2, 0.4]
+    assert cl.thresholds(runs + copy.deepcopy(runs[:2])) == single
+    assert cl.thresholds(runs[1:2] + runs) == single
 
 
 def test_thresholds_skip_non_finite_endpoints():

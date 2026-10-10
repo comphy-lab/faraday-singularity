@@ -151,16 +151,28 @@ def analyse(run: Path, out_dir: Path, fit_start_periods: float, fit_end_periods:
     return out
 
 
+# the Floquet exponent of each threshold estimator, read from a forced-run result
+ESTIMATES = {
+    "single_simulation": lambda r: r["fit_simulation"]["mu"],
+    "single_linear_response": lambda r: r["fit_linear_response"]["mu"],
+    "modes_simulation": lambda r: r["modes_fit_simulation"]["mu"],
+    "modes_linear_response": lambda r: r["modes_fit_linear_response"]["mu"],
+    "floquet_exact": lambda r: r["mu_floquet"],
+}
+
+
 def thresholds(results: list[dict]) -> list[dict]:
     """Neutral forcing, by interpolation, from forced runs of one problem, mesh and time step.
 
     Runs are grouped by the physics ``(Oh, Bo, depth, Omega)`` (``Omega`` carries the detuning), on
     which the exact ``Gamma_c`` depends, by the rest of the simulated problem ``(a0, radius)``,
     which the linear theory ignores but the finite-element solution does not, and by every mesh
-    setting and the time step. A group with a repeated ``Gamma`` is ambiguous and rejected. For each
-    estimator, ``mu(Gamma)`` is interpolated linearly to zero between the first pair of adjacent
-    amplitudes whose exponents are both finite and of opposite sign, for the simulations and for
-    the exact linear response analysed identically; the exact ``Gamma_c`` is the Floquet value.
+    setting and the time step. Runs of one group at the same ``Gamma`` with identical estimates
+    (the same run analysed twice) count once; if their estimates differ, the group is ambiguous
+    and rejected with ``ValueError``. For each estimator, ``mu(Gamma)`` is interpolated linearly
+    to zero between the first pair of adjacent amplitudes whose exponents are both finite and of
+    opposite sign, for the simulations and for the exact linear response analysed identically;
+    the exact ``Gamma_c`` is the Floquet value.
     Like-for-like comparison isolates the solver from the estimator and interpolation bias.
     """
     groups: dict[tuple, list[dict]] = {}
@@ -172,23 +184,27 @@ def thresholds(results: list[dict]) -> list[dict]:
             groups.setdefault(key, []).append(r)
     out = []
     for (physics, (a0, radius), mesh, dt), rs in groups.items():
-        rs = sorted(rs, key=lambda r: r["Gamma"])
-        G = np.array([r["Gamma"] for r in rs])
-        if np.any(np.diff(G) == 0):
-            raise ValueError(f"repeated Gamma in one threshold group: {G.tolist()}")
-        entry = {"physics": dict(zip(("Oh", "Bo", "depth", "Omega"), physics)),
-                 "problem": {"a0": a0, "radius": radius},
+        physics = dict(zip(("Oh", "Bo", "depth", "Omega"), physics))
+        by_gamma: dict[float, list[dict]] = {}
+        for r in rs:
+            by_gamma.setdefault(r["Gamma"], []).append(r)
+        for g, same in by_gamma.items():
+            # the same run passed twice is harmless; runs that disagree leave the bracket to the
+            # order of the inputs
+            mus = np.array([[get(r) for get in ESTIMATES.values()] for r in same], dtype=float)
+            if not all(np.array_equal(m, mus[0], equal_nan=True) for m in mus[1:]):
+                raise ValueError(
+                    f"repeated Gamma {g} in threshold group physics={physics}, a0={a0}, "
+                    f"radius={radius}, mesh={dict(mesh)}, dt={dt}: runs "
+                    f"{[r.get('case_id') for r in same]} give different exponents")
+        gammas = sorted(by_gamma)
+        G = np.array(gammas)
+        rs = [by_gamma[g][0] for g in gammas]
+        entry = {"physics": physics, "problem": {"a0": a0, "radius": radius},
                  "mesh_and_dt": dict(mesh) | {"dt": dt}, "Gammas": G.tolist(),
                  "Gamma_c_exact": rs[0]["Gamma_c"]}
-        series = {
-            "single_simulation": [r["fit_simulation"]["mu"] for r in rs],
-            "single_linear_response": [r["fit_linear_response"]["mu"] for r in rs],
-            "modes_simulation": [r["modes_fit_simulation"]["mu"] for r in rs],
-            "modes_linear_response": [r["modes_fit_linear_response"]["mu"] for r in rs],
-            "floquet_exact": [r["mu_floquet"] for r in rs],
-        }
-        for name, mu in series.items():
-            mu = np.array(mu, dtype=float)
+        for name, get in ESTIMATES.items():
+            mu = np.array([get(r) for r in rs], dtype=float)
             # a non-finite exponent (no locked subharmonic Floquet exponent below the multiplier
             # collision, or no subharmonic multiplier in a fit) cannot end a bracket
             ok = np.isfinite(mu)
@@ -266,10 +282,17 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     results = [analyse(run, args.out, args.fit_start, args.fit_end, args.allow_incomplete)
                for run in args.runs]
-    summary = {"runs": results, "thresholds": thresholds(results)}
+    summary = {"runs": results}
+    try:
+        summary["thresholds"] = thresholds(results)
+    except ValueError as err:  # an ambiguous group must not discard the per-run comparison
+        summary["thresholds_error"] = str(err)
     (args.out / f"{args.name}.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
     plot(results, args.out / args.name)
+    if "thresholds_error" in summary:
+        print(f"thresholds: {summary['thresholds_error']}", file=sys.stderr)
+        return 1
     return 0
 
 
