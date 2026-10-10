@@ -53,6 +53,10 @@ add a second top-level `cases/` tree.
   the verification comparator no longer applies.
 - `testCases/` holds contract tests (`pytest testCases`); `verificationCases/README.md` states the
   verification acceptance criteria.
+- For a mesh study, scale every mesh length together (surface and axis size, growth rate and the
+  bulk cap); refining only the surface size leaves the bulk discretisation unchanged. Separate
+  spatial from time-step error with `initial_value.response_bdf2`, since BDF2 dispersion
+  otherwise dominates the linear comparison.
 - The observable decides the solver. Before any production run, confirm that the solver writes
   the interface near the axis, the jet-base radius and position, the jet speed, the cone
   semi-angle β and the singular time, at the cadence needed for the intended exponent fit.
