@@ -54,8 +54,8 @@ The observable is the Hankel amplitude `a(t)` of the free surface on `J0`, writt
   `t >= 4 T_f`, applied identically to both histories. Accept if `|mu_sim - mu_lin| <= 2e-3` (3 % of
   the viscous decay rate `2 Oh`) for every `Gamma` on the finer setting, and if the threshold
   obtained by interpolating `mu_sim(Gamma)` to zero lies within 2 % of `Gamma_c`.
-- Both: the largest pointwise difference `|a - a0 Z|/|a0|`, the volume drift and, for free decay,
-  the energy-budget residual are reported alongside.
+- For both, the script also reports the largest pointwise difference `|a - a0 Z|/|a0|`, the volume
+  drift and, for free decay, the energy-budget residual.
 
 ### Additions after the first evidence runs (2026-10-10)
 

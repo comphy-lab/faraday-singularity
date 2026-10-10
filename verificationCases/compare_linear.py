@@ -124,6 +124,8 @@ def analyse(run: Path, out_dir: Path, fit_start_periods: float, fit_end_periods:
         s_th = fl.normal_mode(Oh, Bo, d, BOTTOM)
         fold = fl.fold_point(Omega, 20, Oh, Bo, d, BOTTOM, s_th)
         mu_th = fl.mu_KT(Gamma, Omega, 20, Oh, Bo, d, BOTTOM, fold=fold)
+        if mu_th is None:  # below the multiplier collision: no locked subharmonic exponent
+            mu_th = float("nan")
         fit_sim = floquet_exponent(t, a, period=T, t_start=t_start, t_end=t_end)
         fit_lin = floquet_exponent(t, a_lin, period=T, t_start=t_start, t_end=t_end)
         out["Gamma_c"] = fl.gamma_c(Oh, Bo, d, BOTTOM, Omega, alpha=1)
