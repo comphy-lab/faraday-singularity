@@ -7,6 +7,7 @@ finite-element solver, which lives in ``verificationCases``.
 from __future__ import annotations
 
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -173,7 +174,8 @@ def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch):
     import compare_linear as cl
 
     # two runs of one recorded problem at one Gamma whose amplitudes differ (as from two solver
-    # revisions): the threshold group is ambiguous, but each run's comparison stands
+    # revisions): that threshold group is ambiguous, but each run's comparison stands, and so does
+    # the threshold of another group (here another a0) analysed in the same call
     runs = []
     for name in ("a", "b"):
         (tmp_path / name).mkdir()
@@ -188,15 +190,31 @@ def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch):
     with diag.open("w") as fh:
         fh.write(header + "\n")
         np.savetxt(fh, data, delimiter="\t")
+    (tmp_path / "c").mkdir()
+    runs += [_synthetic_run(tmp_path / "c", G, -0.002, 12, 50) for G in (0.2, 0.4)]
 
     out = tmp_path / "analysis"
     monkeypatch.setattr(sys, "argv", ["compare_linear.py", *map(str, runs), "--out", str(out)])
-    monkeypatch.setattr(cl, "plot", lambda *args: None)
+    calls = []
+    monkeypatch.setattr(cl, "plot", lambda results, stem: calls.append(
+        ([r["case_id"] for r in results], stem)))
     assert cl.main() == 1
+    case_ids = ["synthetic-G0.3", "synthetic-G0.3-b", "synthetic-G0.2", "synthetic-G0.4"]
+    assert calls == [(case_ids, out / "linear_comparison")]
     summary = json.loads((out / "linear_comparison.json").read_text())
-    assert [r["case_id"] for r in summary["runs"]] == ["synthetic-G0.3", "synthetic-G0.3-b"]
-    assert "thresholds" not in summary
-    assert "synthetic-G0.3-b" in summary["thresholds_error"]
+    assert [r["case_id"] for r in summary["runs"]] == case_ids
+    by_a0 = {e["problem"]["a0"]: e for e in summary["thresholds"]}
+    assert len(by_a0) == len(summary["thresholds"]) == 2
+    ambiguous, kept = by_a0[-0.001], by_a0[-0.002]
+    assert ambiguous["Gammas"] == [0.3]
+    assert all(ambiguous[name] is None for name in ESTIMATORS)
+    assert "synthetic-G0.3-b" in ambiguous["error"]
+    assert summary["thresholds_error"] == [ambiguous["error"]]
+    assert "error" not in kept
+    assert kept["Gammas"] == [0.2, 0.4]
+    for name in ESTIMATORS:
+        assert math.isfinite(kept[name])
+    assert kept["floquet_exact"] == pytest.approx(GAMMA_C_C1, rel=1e-2)
 
 
 MESH = {"h_interface": 0.05, "h_axis": 0.05, "h_max": 0.4, "grading": 0.3,
@@ -289,13 +307,25 @@ def test_thresholds_reject_repeated_gamma():
     import compare_linear as cl
 
     # runs at one Gamma that differ in a field outside the key (a solver revision, say) give
-    # different exponents; which of them brackets the zero would depend on the order of the inputs
+    # different exponents; which of them brackets the zero would depend on the order of the inputs,
+    # so that group gives no threshold. Another group (a finer mesh) keeps its threshold.
     runs = [_threshold_input(G, G - 0.3) for G in (0.2, 0.4)]
     rerun = _threshold_input(0.2, -0.05, case_id="G0.2-rerun")
-    for inputs in (runs + [rerun], [rerun] + runs):
-        with pytest.raises(ValueError, match=r"repeated Gamma 0\.2 in threshold group physics=.*"
-                                             r"(?:'G0\.2', 'G0\.2-rerun'|'G0\.2-rerun', 'G0\.2')"):
-            cl.thresholds(inputs)
+    fine = [_threshold_input(G, G - 0.5, mesh=MESH | {"h_interface": 0.025}) for G in (0.3, 0.6)]
+    for inputs in (runs + [rerun] + fine, fine + [rerun] + runs):
+        entries = {tuple(e["Gammas"]): e for e in cl.thresholds(inputs)}
+        assert len(entries) == 2
+        e = entries[(0.2, 0.4)]
+        assert re.fullmatch(r"repeated Gamma 0\.2 in threshold group physics=.*"
+                            r"(?:'G0\.2', 'G0\.2-rerun'|'G0\.2-rerun', 'G0\.2').*", e["error"])
+        for name in ESTIMATORS:
+            assert e[name] is None
+        assert "single_like_for_like_rel_error" not in e
+        assert "modes_rel_error_vs_exact" not in e
+        e = entries[(0.3, 0.6)]
+        assert "error" not in e
+        for name in ESTIMATORS:
+            assert e[name] == pytest.approx(0.5, rel=1e-12)
 
 
 def test_thresholds_collapse_exact_duplicates():

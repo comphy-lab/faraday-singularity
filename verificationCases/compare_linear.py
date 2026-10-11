@@ -171,12 +171,12 @@ def thresholds(results: list[dict]) -> list[dict]:
     which the linear theory ignores but the finite-element solution does not, by the fitting
     window, on which the fitted exponents depend, and by every mesh setting and the time step.
     Runs of one group at the same ``Gamma`` with identical estimates (the same run analysed twice)
-    count once; if their estimates differ, the group is ambiguous and rejected with
-    ``ValueError``. For each estimator, ``mu(Gamma)`` is interpolated linearly to zero between the
-    first pair of adjacent amplitudes whose exponents are both finite and of opposite sign, for the
-    simulations and for the exact linear response analysed identically; the exact ``Gamma_c`` is
-    the Floquet value. Like-for-like comparison isolates the solver from the estimator and
-    interpolation bias.
+    count once; if their estimates differ, the group is ambiguous: its entry gives no threshold
+    (every estimator None) and an ``error`` naming the runs, and the other groups are unaffected.
+    For each estimator, ``mu(Gamma)`` is interpolated linearly to zero between the first pair of
+    adjacent amplitudes whose exponents are both finite and of opposite sign, for the simulations
+    and for the exact linear response analysed identically; the exact ``Gamma_c`` is the Floquet
+    value. Like-for-like comparison isolates the solver from the estimator and interpolation bias.
     """
     groups: dict[tuple, list[dict]] = {}
     for r in results:
@@ -193,21 +193,25 @@ def thresholds(results: list[dict]) -> list[dict]:
         by_gamma: dict[float, list[dict]] = {}
         for r in rs:
             by_gamma.setdefault(r["Gamma"], []).append(r)
-        for g, same in by_gamma.items():
-            # the same run passed twice is harmless; runs that disagree leave the bracket to the
-            # order of the inputs
-            mus = np.array([[get(r) for get in ESTIMATES.values()] for r in same], dtype=float)
-            if not all(np.array_equal(m, mus[0], equal_nan=True) for m in mus[1:]):
-                raise ValueError(
-                    f"repeated Gamma {g} in threshold group physics={physics}, a0={a0}, "
-                    f"radius={radius}, fit_window={window}, mesh={dict(mesh)}, dt={dt}: runs "
-                    f"{[r.get('case_id') for r in same]} give different exponents")
         gammas = sorted(by_gamma)
         G = np.array(gammas)
         rs = [by_gamma[g][0] for g in gammas]
         entry = {"physics": physics, "problem": {"a0": a0, "radius": radius},
                  "fit_window": window, "mesh_and_dt": dict(mesh) | {"dt": dt},
                  "Gammas": G.tolist(), "Gamma_c_exact": rs[0]["Gamma_c"]}
+        for g, same in by_gamma.items():
+            # the same run passed twice is harmless; runs that disagree would leave the bracket to
+            # the order of the inputs, so the group gives no threshold
+            mus = np.array([[get(r) for get in ESTIMATES.values()] for r in same], dtype=float)
+            if not all(np.array_equal(m, mus[0], equal_nan=True) for m in mus[1:]):
+                entry["error"] = (
+                    f"repeated Gamma {g} in threshold group physics={physics}, a0={a0}, "
+                    f"radius={radius}, fit_window={window}, mesh={dict(mesh)}, dt={dt}: runs "
+                    f"{[r.get('case_id') for r in same]} give different exponents")
+                break
+        if "error" in entry:
+            out.append(entry | dict.fromkeys(ESTIMATES))
+            continue
         for name, get in ESTIMATES.items():
             mu = np.array([get(r) for r in rs], dtype=float)
             # a non-finite exponent (no locked subharmonic Floquet exponent below the multiplier
@@ -287,18 +291,18 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     results = [analyse(run, args.out, args.fit_start, args.fit_end, args.allow_incomplete)
                for run in args.runs]
-    summary = {"runs": results}
-    try:
-        summary["thresholds"] = thresholds(results)
-    except ValueError as err:  # an ambiguous group must not discard the per-run comparison
-        summary["thresholds_error"] = str(err)
+    summary = {"runs": results, "thresholds": thresholds(results)}
+    # an ambiguous group gives no threshold but discards neither the per-run comparison nor the
+    # other groups
+    errors = [e["error"] for e in summary["thresholds"] if "error" in e]
+    if errors:
+        summary["thresholds_error"] = errors
     (args.out / f"{args.name}.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
     plot(results, args.out / args.name)
-    if "thresholds_error" in summary:
-        print(f"thresholds: {summary['thresholds_error']}", file=sys.stderr)
-        return 1
-    return 0
+    for err in errors:
+        print(f"thresholds: {err}", file=sys.stderr)
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
