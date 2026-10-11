@@ -102,8 +102,6 @@ def analyse(run: Path, out_dir: Path, fit_start_periods: float, fit_end_periods:
     }
     t_start = fit_start_periods * T
     t_end = None if fit_end_periods is None else fit_end_periods * T
-    # the window actually fitted: without --fit-end, or for a run shorter than it, the run's end
-    out["fit_window"] = [t_start, float(t[-1]) if t_end is None else min(t_end, float(t[-1]))]
     if Gamma == 0.0:
         s_th = fl.normal_mode(Oh, Bo, d, BOTTOM)
         kw = dict(t_start=t_start, t_end=t_end, omega_guess=s_th.imag, rate_guess=s_th.real)
@@ -148,6 +146,9 @@ def analyse(run: Path, out_dir: Path, fit_start_periods: float, fit_end_periods:
         out["modes_fit_linear_response_bdf2"] = modes_bdf2
         out["modes_mu_error_vs_floquet"] = modes_sim["mu"] - mu_th
         out["modes_mu_error_spatial"] = modes_sim["mu"] - modes_bdf2["mu"]
+    # the window actually fitted, as the fits report it: the outputs from --fit-start to --fit-end
+    # (or the run's end), cut to whole forcing periods for the Floquet fits, which share one grid
+    out["fit_window"] = [out["fit_simulation"]["t_start"], out["fit_simulation"]["t_end"]]
     out["linear_response_file"] = f"{case_id}_linear_response.txt"
     np.savetxt(out_dir / out["linear_response_file"], np.column_stack([t, a, a_lin]),
                header="time  amp_simulation  amp_linear_response")

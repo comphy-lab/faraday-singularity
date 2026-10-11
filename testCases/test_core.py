@@ -110,15 +110,16 @@ def test_bdf2_response_is_second_order():
     assert errs[1] / errs[2] == pytest.approx(4.0, rel=0.15)
 
 
-def _synthetic_run(tmp_path: Path, Gamma: float, a0: float, periods: int, n: int) -> Path:
-    """A run directory whose amplitude is the exact BDF2 linear response."""
+def _synthetic_run(tmp_path: Path, Gamma: float, a0: float, periods: float, n: int) -> Path:
+    """A run directory whose amplitude is the exact BDF2 linear response over ``periods`` T_f."""
     import json
 
     d, Oh = 2 * math.pi, 0.04
     nd = nondimensionalise(CaseParameters(fluid=Fluid(Oh=Oh), container=Container(depth=d),
                                           forcing=Forcing(Gamma=Gamma)))
     dt = nd.forcing_period / n
-    t, Z = iv.response_bdf2(dt, periods * n, Oh=Oh, Bo=0.0, d=d, Gamma=Gamma, Omega=nd.Omega)
+    t, Z = iv.response_bdf2(dt, round(periods * n), Oh=Oh, Bo=0.0, d=d, Gamma=Gamma,
+                            Omega=nd.Omega)
     run = tmp_path / f"G{Gamma}"
     run.mkdir()
     cols = ["time", "z_axis", "w_axis", "amp", "volume", "area", "kinetic_energy", "dissipation",
@@ -151,14 +152,23 @@ def test_comparison_pipeline_on_synthetic_runs(tmp_path):
     assert abs(free["rate_rel_error_spatial"]) < 1e-9
     assert abs(free["frequency_rel_error_spatial"]) < 1e-9
     assert free["max_abs_diff_bdf2_over_a0"] < 1e-9
+    assert free["fit_window"] == [free["fit_simulation"][k] for k in ("t_start", "t_end")]
     runs = [_synthetic_run(tmp_path, G, -0.001, 20, 50) for G in (0.2, 0.3)]
     forced = [cl.analyse(run, out, 4.0, None, False) for run in runs]
     for r in forced:
         assert abs(r["modes_mu_error_spatial"]) < 1e-8
         assert r["radius"] == pytest.approx(jn_zeros(1, 1)[0], rel=1e-14)
         assert r["newton_tolerance"] == 1e-10
-        # without --fit-end each run is fitted to its own end
-        assert r["fit_window"] == pytest.approx([8 * math.pi / r["Omega"], r["t_end"]], rel=1e-14)
+        # the window the Floquet fits used, which all share: without --fit-end, the outputs from
+        # 4 T_f to the run's end, cut to whole forcing periods
+        window = [r["fit_simulation"]["t_start"], r["fit_simulation"]["t_end"]]
+        assert r["fit_window"] == window
+        for fit in ("fit_linear_response", "modes_fit_simulation", "modes_fit_linear_response",
+                    "modes_fit_linear_response_bdf2"):
+            assert [r[fit]["t_start"], r[fit]["t_end"]] == window
+        T = 2 * math.pi / r["Omega"]
+        assert 4 * T <= window[0] < 4 * T + r["dt"] * (1 + 1e-9)
+        assert r["t_end"] - T < window[1] <= r["t_end"]
     (th,) = cl.thresholds(forced)
     assert th["problem"] == {"a0": -0.001, "radius": forced[0]["radius"]}
     assert th["fit_window"] == forced[0]["fit_window"]
@@ -167,6 +177,26 @@ def test_comparison_pipeline_on_synthetic_runs(tmp_path):
     clipped = cl.analyse(runs[0], out, 4.0, 40.0, False)
     assert clipped["fit_window"] == forced[0]["fit_window"]
     assert th["floquet_exact"] == pytest.approx(th["Gamma_c_exact"], rel=2e-3)
+
+
+def test_thresholds_group_runs_fitted_over_one_window(tmp_path):
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import compare_linear as cl
+
+    # runs stopped less than one forcing period apart (as analysed with --allow-incomplete) are
+    # fitted over the same whole periods, so they form one threshold group
+    out = tmp_path / "analysis"
+    out.mkdir()
+    forced = [cl.analyse(_synthetic_run(tmp_path, G, -0.001, periods, 50), out, 4.0, None, False)
+              for G, periods in ((0.2, 20.1), (0.4, 20.9))]
+    assert forced[0]["t_end"] != forced[1]["t_end"]
+    assert forced[0]["fit_window"] == forced[1]["fit_window"]
+    (th,) = cl.thresholds(forced)
+    assert th["Gammas"] == [0.2, 0.4]
+    assert th["fit_window"] == forced[0]["fit_window"]
+    for name in ESTIMATORS:
+        assert math.isfinite(th[name])
+    assert th["floquet_exact"] == pytest.approx(GAMMA_C_C1, rel=1e-2)
 
 
 def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch):
