@@ -294,12 +294,17 @@ def test_thresholds_do_not_mix_problem_mesh_or_dt(change):
         e = by_gammas[tuple(r["Gamma"] for r in runs)]
         assert e["problem"] == {"a0": runs[0]["a0"], "radius": runs[0].get("radius")}
         assert e["fit_window"] == runs[0].get("fit_window")
-        assert e["mesh_and_dt"] == runs[0]["mesh"] | {"dt": runs[0]["dt"]}
+        assert e["mesh"] == runs[0]["mesh"]
+        assert e["dt"] == runs[0]["dt"]
+        # the positional form of the Phase 1a results
+        m = runs[0]["mesh"]
+        assert e["mesh_and_dt"] == [m["h_interface"], m["h_axis"], m["h_max"], m["grading"],
+                                    runs[0]["dt"]]
         for name in ESTIMATORS:
             assert e[name] == pytest.approx(zero, rel=1e-12)
     a, b = forward
-    assert ((a["problem"], a["fit_window"], a["mesh_and_dt"])
-            != (b["problem"], b["fit_window"], b["mesh_and_dt"]))
+    assert ((a["problem"], a["fit_window"], a["mesh"], a["dt"])
+            != (b["problem"], b["fit_window"], b["mesh"], b["dt"]))
 
 
 def test_thresholds_reject_repeated_gamma():

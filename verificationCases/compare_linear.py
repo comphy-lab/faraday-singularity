@@ -196,8 +196,11 @@ def thresholds(results: list[dict]) -> list[dict]:
         gammas = sorted(by_gamma)
         G = np.array(gammas)
         rs = [by_gamma[g][0] for g in gammas]
+        mesh = dict(mesh)
+        # "mesh_and_dt" keeps its earlier positional form; "mesh" holds every mesh setting
+        legacy = [mesh.get(k) for k in ("h_interface", "h_axis", "h_max", "grading")] + [dt]
         entry = {"physics": physics, "problem": {"a0": a0, "radius": radius},
-                 "fit_window": window, "mesh_and_dt": dict(mesh) | {"dt": dt},
+                 "fit_window": window, "mesh_and_dt": legacy, "mesh": mesh, "dt": dt,
                  "Gammas": G.tolist(), "Gamma_c_exact": rs[0]["Gamma_c"]}
         for g, same in by_gamma.items():
             # the same run passed twice is harmless; runs that disagree would leave the bracket to
@@ -206,7 +209,7 @@ def thresholds(results: list[dict]) -> list[dict]:
             if not all(np.array_equal(m, mus[0], equal_nan=True) for m in mus[1:]):
                 entry["error"] = (
                     f"repeated Gamma {g} in threshold group physics={physics}, a0={a0}, "
-                    f"radius={radius}, fit_window={window}, mesh={dict(mesh)}, dt={dt}: runs "
+                    f"radius={radius}, fit_window={window}, mesh={mesh}, dt={dt}: runs "
                     f"{[r.get('case_id') for r in same]} give different exponents")
                 break
         if "error" in entry:
