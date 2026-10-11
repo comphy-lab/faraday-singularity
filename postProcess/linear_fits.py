@@ -15,9 +15,11 @@ from scipy.optimize import least_squares
 def _window(t: np.ndarray, a: np.ndarray, t_start: float, t_end: float | None):
     t = np.asarray(t, dtype=float)
     a = np.asarray(a, dtype=float)
-    sel = t >= t_start
+    # an output on a window end, up to round-off in the time grid, lies in the window
+    tol = 1e-12 * max(1.0, float(np.max(np.abs(t))))
+    sel = t >= t_start - tol
     if t_end is not None:
-        sel &= t <= t_end
+        sel &= t <= t_end + tol
     if sel.sum() < 8:
         raise ValueError(f"too few samples in the fitting window [{t_start}, {t_end}]")
     return t[sel], a[sel]
@@ -63,7 +65,8 @@ def floquet_exponent(t, a, *, period: float, t_start: float, t_end: float | None
     negative one (a harmonic response) is reported rather than hidden.
     """
     tw, aw = _window(t, a, t_start, t_end)
-    n_periods = int(np.floor((tw[-1] - tw[0]) / period))
+    # whole periods, up to round-off in the time grid
+    n_periods = int(np.floor((tw[-1] - tw[0]) / period + 1e-9))
     if n_periods < 2:
         raise ValueError("need at least two forcing periods in the fitting window")
     grid = tw[0] + np.arange(n_periods * samples_per_period + 1) * (period / samples_per_period)
@@ -91,7 +94,8 @@ def floquet_multipliers(t, a, *, period: float, t_start: float, t_end: float | N
     real negative multipliers, i.e. the leading subharmonic one.
     """
     tw, aw = _window(t, a, t_start, t_end)
-    n_periods = int(np.floor((tw[-1] - tw[0]) / period))
+    # whole periods, up to round-off in the time grid
+    n_periods = int(np.floor((tw[-1] - tw[0]) / period + 1e-9))
     if n_periods < modes + 2:
         raise ValueError(f"need at least {modes + 2} forcing periods in the fitting window")
     grid = tw[0] + np.arange(n_periods * samples_per_period + 1) * (period / samples_per_period)

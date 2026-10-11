@@ -110,6 +110,19 @@ def test_bdf2_response_is_second_order():
     assert errs[1] / errs[2] == pytest.approx(4.0, rel=0.15)
 
 
+def test_fit_window_ends_tolerate_round_off():
+    # outputs a few ulps outside the requested window ends, as round-off in a time grid leaves
+    # them, belong to the window: 14 whole periods of a(t + T) = -exp(-0.01 T) a(t)
+    T = 2.0
+    t = np.arange(20 * 64 + 1) * (T / 64)
+    a = np.cos(math.pi * t / T) * np.exp(-0.01 * t)
+    t_start = t[4 * 64] + 4 * np.spacing(t[4 * 64])
+    t_end = t[18 * 64] - 4 * np.spacing(t[18 * 64])
+    fit = floquet_exponent(t, a, period=T, t_start=t_start, t_end=t_end)
+    assert (fit["t_start"], fit["t_end"], fit["periods"]) == (t[4 * 64], t[18 * 64], 14)
+    assert fit["mu"] == pytest.approx(-0.01, rel=1e-10)
+
+
 def _synthetic_run(tmp_path: Path, Gamma: float, a0: float, periods: float, n: int) -> Path:
     """A run directory whose amplitude is the exact BDF2 linear response over ``periods`` T_f."""
     import json
@@ -167,8 +180,10 @@ def test_comparison_pipeline_on_synthetic_runs(tmp_path):
                     "modes_fit_linear_response_bdf2"):
             assert [r[fit]["t_start"], r[fit]["t_end"]] == window
         T = 2 * math.pi / r["Omega"]
-        assert 4 * T <= window[0] < 4 * T + r["dt"] * (1 + 1e-9)
-        assert r["t_end"] - T < window[1] <= r["t_end"]
+        # the outputs at 4 T_f and at the run's end, 16 periods later, both lie in the window,
+        # although round-off in the time grid puts the first just below 4 T_f
+        assert window[0] == pytest.approx(4 * T, abs=1e-12)
+        assert window[1] == pytest.approx(r["t_end"], abs=1e-12)
     (th,) = cl.thresholds(forced)
     assert th["problem"] == {"a0": -0.001, "radius": forced[0]["radius"]}
     assert th["fit_window"] == forced[0]["fit_window"]
@@ -183,20 +198,23 @@ def test_thresholds_group_runs_fitted_over_one_window(tmp_path):
     sys.path.insert(0, str(ROOT / "verificationCases"))
     import compare_linear as cl
 
-    # runs stopped less than one forcing period apart (as analysed with --allow-incomplete) are
-    # fitted over the same whole periods, so they form one threshold group
-    out = tmp_path / "analysis"
-    out.mkdir()
-    forced = [cl.analyse(_synthetic_run(tmp_path, G, -0.001, periods, 50), out, 4.0, None, False)
-              for G, periods in ((0.2, 20.1), (0.4, 20.9))]
-    assert forced[0]["t_end"] != forced[1]["t_end"]
-    assert forced[0]["fit_window"] == forced[1]["fit_window"]
-    (th,) = cl.thresholds(forced)
-    assert th["Gammas"] == [0.2, 0.4]
-    assert th["fit_window"] == forced[0]["fit_window"]
-    for name in ESTIMATORS:
-        assert math.isfinite(th[name])
-    assert th["floquet_exact"] == pytest.approx(GAMMA_C_C1, rel=1e-2)
+    # runs that stop in the same forcing period, counting whole periods from the fit start (as
+    # analysed with --allow-incomplete), are fitted over the same whole periods and so form one
+    # threshold group; a stop on a whole period, up to round-off, completes that period
+    for stops in ((20.1, 20.9), (20.0, 20.5)):
+        out = tmp_path / f"analysis-{stops[0]}"
+        out.mkdir()
+        (out / "runs").mkdir()
+        forced = [cl.analyse(_synthetic_run(out / "runs", G, -0.001, periods, 50), out, 4.0, None,
+                             False) for G, periods in zip((0.2, 0.4), stops)]
+        assert forced[0]["t_end"] != forced[1]["t_end"]
+        assert forced[0]["fit_window"] == forced[1]["fit_window"]
+        (th,) = cl.thresholds(forced)
+        assert th["Gammas"] == [0.2, 0.4]
+        assert th["fit_window"] == forced[0]["fit_window"]
+        for name in ESTIMATORS:
+            assert math.isfinite(th[name])
+        assert th["floquet_exact"] == pytest.approx(GAMMA_C_C1, rel=1e-2)
 
 
 def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch, capsys):
