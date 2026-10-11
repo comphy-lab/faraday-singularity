@@ -4,8 +4,8 @@ Direct numerical simulation, with sharp-interface finite elements in
 [pyoomph](https://github.com/pyoomph/pyoomph), of the singular collapse of a Faraday-wave
 interface and the Worthington jet it launches.
 
-**Status:** repository scaffold. There is no solver code yet, and the model choices listed
-under [Open choices](#open-choices) are unresolved.
+**Status:** axisymmetric solver at zero Bond number and its linear verification cases. The
+cavity-collapse cases and the jet observables are not implemented yet.
 
 ## Motivation
 
@@ -42,22 +42,35 @@ and test:
 
 ## Approach
 
-- The solver will start from the surfactant-free path of the CoMPhy `faraday-surfactant-fem`
-  code: incompressible Navier–Stokes in the container frame with modulated gravity, and a free
-  surface with kinematic and dynamic conditions on an arbitrary Lagrangian–Eulerian mesh.
+- The solver adapts the surfactant-free path of the CoMPhy `faraday-surfactant-fem` code to an
+  axisymmetric geometry: incompressible Navier–Stokes in the frame of a vertically vibrated
+  cylindrical container, and a free surface with kinematic and dynamic conditions on an arbitrary
+  Lagrangian–Eulerian mesh. The unstructured triangular mesh is smoothed hyperelastically and
+  rebuilt from the current free surface when elements become too distorted.
+- The container is a cylinder of radius $R_c = j_{1,1}/k$ with free-slip walls and a sliding 90°
+  contact line, so the axisymmetric surface mode $J_0(kr)$ is exact in linear theory. Its trough
+  lies on the axis.
 - A sharp-interface mesh cannot change topology. The simulations cover the collapse and the
   birth of the jet, and stop before any pinch-off or bubble entrainment.
 
-## Open choices
+## Model
 
-1. Geometry: an axisymmetric standing Faraday wave on a flat vibrated layer, whose trough
-   collapses at the axis, or a wall-attached bubble carrying the parametrically excited mode.
-2. Forcing, and a definition of $h$ that is comparable with the experimental one.
-3. The Ohnesorge and Bond numbers, which set the viscous cut-off of the singularity and the
-   role of gravity.
-4. The observables written during the run: the interface near the axis, the jet-base radius
-   and position, the jet speed, $\beta$ and the singular time.
-5. The verification case that gates production runs.
+Lengths are scaled with $1/k$, times with the capillary time $\sqrt{\rho/(\sigma k^3)}$. In the
+container frame the body force is $-(Bo + \Gamma\cos\Omega t)\,\mathbf{e}_z$, with
+
+- $Oh = \mu\sqrt{k/(\rho\sigma)}$, the Ohnesorge number;
+- $Bo = \rho g/(\sigma k^2)$, the Bond number, zero in the present cases;
+- $\Gamma = \rho A\Omega_d^2/(\sigma k^2)$, the container acceleration amplitude scaled by the
+  capillary acceleration ($A$ the displacement amplitude, $\Omega_d$ the angular forcing
+  frequency). With gravity, the usual reduced acceleration $A\Omega_d^2/g$ equals $\Gamma/Bo$;
+- $\Omega$, the dimensionless forcing frequency, set to twice the inviscid frequency of the mode.
+
+## Verification
+
+`verificationCases/` compares the solver with the exact linear viscous theory of the $J_0$ mode:
+free decay against the finite-depth dispersion relation and the linear initial-value response, and
+forced growth or decay against the Floquet analysis of Kumar & Tuckerman [4]. The acceptance
+criteria are stated in `verificationCases/README.md`.
 
 ## Layout
 
@@ -76,8 +89,22 @@ Run outputs are not stored in this repository.
 
 ## Environment
 
-Not yet pinned. pyoomph will be built from source at a fixed CoMPhy release, recorded in
-`pyproject.toml` and `uv.lock`.
+pyoomph is built from source at the CoMPhy release `comphy-2026.09.21.1`
+(`f912ac10cdbb170e58aca3a337f0aa4ed13cf1e0`), pinned in `pyproject.toml` and `uv.lock`, with MPI
+enabled.
+
+## Running
+
+```bash
+python run_case.py verificationCases/free-decay/free-decay-h0.025-n100.json --outdir <run-directory>
+python verificationCases/compare_linear.py <run-directory> --out <analysis-directory>
+pytest testCases
+```
+
+Each run directory receives `parameters.json` (inputs, dimensionless groups, numerical settings
+and provenance), `run_status.json`, `diagnostics.txt` (axis height and velocity, mode amplitude,
+volume, area, kinetic energy, dissipation and remesh count after every step) and free-surface
+snapshots.
 
 ## References
 
@@ -89,3 +116,6 @@ Not yet pinned. pyoomph will be built from source at a fixed CoMPhy release, rec
    [doi:10.1103/7c4p-y9jr](https://doi.org/10.1103/7c4p-y9jr)
 3. J. M. Gordillo, J. Rodríguez-Rodríguez and V. Sanjay, Self-similar Worthington jets,
    arXiv:2607.08972 (2026). [arXiv:2607.08972](https://arxiv.org/abs/2607.08972)
+4. K. Kumar and L. S. Tuckerman, Parametric instability of the interface between two fluids,
+   *J. Fluid Mech.* **279**, 49–68 (1994).
+   [doi:10.1017/S0022112094003812](https://doi.org/10.1017/S0022112094003812)
