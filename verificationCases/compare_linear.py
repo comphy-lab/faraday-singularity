@@ -54,8 +54,13 @@ def read_table(path: Path) -> dict[str, np.ndarray]:
     return {name: data[:, i] for i, name in enumerate(header)}
 
 
+def read_case_id(run: Path) -> str:
+    return json.loads((run / "parameters.json").read_text())["case"]["case_id"]
+
+
 def analyse(run: Path, out_dir: Path, fit_start_periods: float, fit_end_periods: float | None,
-            allow_incomplete: bool) -> dict:
+            allow_incomplete: bool, label: str | None = None) -> dict:
+    """Compare one run with the linear theory; ``label`` (default the case id) names its files."""
     params = json.loads((run / "parameters.json").read_text())
     status = json.loads((run / "run_status.json").read_text())
     nd = params["dimensionless"]
@@ -149,7 +154,7 @@ def analyse(run: Path, out_dir: Path, fit_start_periods: float, fit_end_periods:
     # the window actually fitted, as the fits report it: the outputs from --fit-start to --fit-end
     # (or the run's end), cut to whole forcing periods for the Floquet fits, which share one grid
     out["fit_window"] = [out["fit_simulation"]["t_start"], out["fit_simulation"]["t_end"]]
-    out["linear_response_file"] = f"{case_id}_linear_response.txt"
+    out["linear_response_file"] = f"{label or case_id}_linear_response.txt"
     np.savetxt(out_dir / out["linear_response_file"], np.column_stack([t, a, a_lin]),
                header="time  amp_simulation  amp_linear_response")
     return out
@@ -175,11 +180,12 @@ def thresholds(results: list[dict]) -> list[dict]:
     Newton tolerance, which set the discrete solution. Runs of one group at the same ``Gamma`` with
     identical estimates (the same run analysed twice) count once; if their estimates differ, the
     group is ambiguous: its entry gives no threshold (every estimator None) and an ``error`` naming
-    the runs, and the other groups are unaffected. For each estimator, ``mu(Gamma)`` is
-    interpolated linearly to zero between the first pair of adjacent amplitudes whose exponents are
-    both finite and of opposite sign, for the simulations and for the exact linear response
-    analysed identically; the exact ``Gamma_c`` is the Floquet value. Like-for-like comparison
-    isolates the solver from the estimator and interpolation bias.
+    the runs by directory, since two directories of one case share its ``case_id`` (which names a
+    result that records no directory), and the other groups are unaffected. For each estimator,
+    ``mu(Gamma)`` is interpolated linearly to zero between the first pair of adjacent amplitudes
+    whose exponents are both finite and of opposite sign, for the simulations and for the exact
+    linear response analysed identically; the exact ``Gamma_c`` is the Floquet value. Like-for-like
+    comparison isolates the solver from the estimator and interpolation bias.
     """
     groups: dict[tuple, list[dict]] = {}
     for r in results:
@@ -216,7 +222,7 @@ def thresholds(results: list[dict]) -> list[dict]:
                     f"repeated Gamma {g} in threshold group physics={physics}, a0={a0}, "
                     f"radius={radius}, fit_window={window}, mesh={mesh}, dt={dt}, "
                     f"newton_tolerance={newton}: runs "
-                    f"{[r.get('case_id') for r in same]} give different exponents")
+                    f"{[r.get('run', r.get('case_id')) for r in same]} give different exponents")
                 break
         if "error" in entry:
             out.append(entry | dict.fromkeys(ESTIMATES))
@@ -298,8 +304,15 @@ def main() -> int:
                     help="analyse runs that did not reach their planned end time")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    results = [analyse(run, args.out, args.fit_start, args.fit_end, args.allow_incomplete)
-               for run in args.runs]
+    # one linear-response file per run directory: the files of a case analysed from more than one
+    # directory (two solver revisions, say) are numbered by input position
+    case_ids = [read_case_id(run) for run in args.runs]
+    dirs: dict[str, set[Path]] = {}
+    for run, case_id in zip(args.runs, case_ids):
+        dirs.setdefault(case_id, set()).add(run.resolve())
+    results = [analyse(run, args.out, args.fit_start, args.fit_end, args.allow_incomplete,
+                       label=None if len(dirs[case_id]) == 1 else f"{i:02d}-{case_id}")
+               for i, (run, case_id) in enumerate(zip(args.runs, case_ids))]
     summary = {"runs": results, "thresholds": thresholds(results)}
     # an ambiguous group gives no threshold but discards neither the per-run comparison nor the
     # other groups

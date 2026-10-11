@@ -205,16 +205,13 @@ def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch):
 
     import compare_linear as cl
 
-    # two runs of one recorded problem at one Gamma whose amplitudes differ (as from two solver
-    # revisions): that threshold group is ambiguous, but each run's comparison stands, and so does
-    # the threshold of another group (here another a0) analysed in the same call
+    # two runs of one case at one Gamma, in two directories, whose amplitudes differ (as from two
+    # solver revisions): that threshold group is ambiguous, but each run's comparison stands, and
+    # so does the threshold of another group (here another a0) analysed in the same call
     runs = []
     for name in ("a", "b"):
         (tmp_path / name).mkdir()
         runs.append(_synthetic_run(tmp_path / name, 0.3, -0.001, 12, 50))
-    params = json.loads((runs[1] / "parameters.json").read_text())
-    params["case"]["case_id"] += "-b"
-    (runs[1] / "parameters.json").write_text(json.dumps(params))
     diag = runs[1] / "diagnostics.txt"
     header = diag.read_text().splitlines()[0]
     data = np.loadtxt(diag, comments="#")
@@ -231,16 +228,26 @@ def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(cl, "plot", lambda results, stem: calls.append(
         ([r["case_id"] for r in results], stem)))
     assert cl.main() == 1
-    case_ids = ["synthetic-G0.3", "synthetic-G0.3-b", "synthetic-G0.2", "synthetic-G0.4"]
+    case_ids = ["synthetic-G0.3", "synthetic-G0.3", "synthetic-G0.2", "synthetic-G0.4"]
     assert calls == [(case_ids, out / "linear_comparison")]
     summary = json.loads((out / "linear_comparison.json").read_text())
     assert [r["case_id"] for r in summary["runs"]] == case_ids
+    # one linear-response file per run directory, holding that run's amplitude; a case analysed
+    # from one directory keeps its own name
+    files = [r["linear_response_file"] for r in summary["runs"]]
+    assert len(set(files)) == len(files)
+    assert files[2:] == ["synthetic-G0.2_linear_response.txt", "synthetic-G0.4_linear_response.txt"]
+    for run, name in zip(runs, files):
+        amp = cl.read_table(run / "diagnostics.txt")["amp"]
+        np.testing.assert_allclose(np.loadtxt(out / name)[:, 1], amp, rtol=1e-12, atol=0)
     by_a0 = {e["problem"]["a0"]: e for e in summary["thresholds"]}
     assert len(by_a0) == len(summary["thresholds"]) == 2
     ambiguous, kept = by_a0[-0.001], by_a0[-0.002]
     assert ambiguous["Gammas"] == [0.3]
     assert all(ambiguous[name] is None for name in ESTIMATORS)
-    assert "synthetic-G0.3-b" in ambiguous["error"]
+    # the runs share their case_id, so the error tells them apart by directory
+    for run in runs[:2]:
+        assert repr(str(run)) in ambiguous["error"]
     assert summary["thresholds_error"] == [ambiguous["error"]]
     assert "error" not in kept
     assert kept["Gammas"] == [0.2, 0.4]
