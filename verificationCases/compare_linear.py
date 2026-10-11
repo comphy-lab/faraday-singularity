@@ -14,8 +14,8 @@ For each run, the simulated amplitude ``a(t)`` (the Hankel projection of the fre
 * forced runs: the Floquet exponent ``mu`` from ``a(t + T) = -exp(mu T) a(t)``, applied to both
   histories over the same window, and the Kumar-Tuckerman exponent ``mu(Gamma)``. A
   three-component Floquet fit (``floquet_multipliers``) is reported as a supplementary diagnostic,
-  and forced runs of one simulated problem that share fitting window, mesh and time step give the
-  neutral forcing by interpolation.
+  and forced runs of one simulated problem that share fitting window, mesh, time step and Newton
+  tolerance give the neutral forcing by interpolation.
 
 Each comparison is also made against the linear system advanced with the solver's own time scheme
 (``initial_value.response_bdf2``); that difference contains only the spatial error.
@@ -91,6 +91,7 @@ def analyse(run: Path, out_dir: Path, fit_start_periods: float, fit_end_periods:
         "radius": nd["radius"],
         "mesh": params["mesh"],
         "dt": params["time_stepping"]["dt"],
+        "newton_tolerance": params["case"].get("tolerances", {}).get("newton"),
         "steps_per_forcing_period": params["case"]["time_stepping"]["steps_per_forcing_period"],
         "t_end": float(t[-1]),
         "max_abs_diff_over_a0": float(np.max(np.abs(a - a_lin)) / abs(a0)),
@@ -164,30 +165,32 @@ ESTIMATES = {
 
 
 def thresholds(results: list[dict]) -> list[dict]:
-    """Neutral forcing, by interpolation, from forced runs of one problem, window, mesh and dt.
+    """Neutral forcing, by interpolation, from forced runs of one problem, window and numerics.
 
     Runs are grouped by the physics ``(Oh, Bo, depth, Omega)`` (``Omega`` carries the detuning), on
     which the exact ``Gamma_c`` depends, by the rest of the simulated problem ``(a0, radius)``,
     which the linear theory ignores but the finite-element solution does not, by the fitting
-    window, on which the fitted exponents depend, and by every mesh setting and the time step.
-    Runs of one group at the same ``Gamma`` with identical estimates (the same run analysed twice)
-    count once; if their estimates differ, the group is ambiguous: its entry gives no threshold
-    (every estimator None) and an ``error`` naming the runs, and the other groups are unaffected.
-    For each estimator, ``mu(Gamma)`` is interpolated linearly to zero between the first pair of
-    adjacent amplitudes whose exponents are both finite and of opposite sign, for the simulations
-    and for the exact linear response analysed identically; the exact ``Gamma_c`` is the Floquet
-    value. Like-for-like comparison isolates the solver from the estimator and interpolation bias.
+    window, on which the fitted exponents depend, and by every mesh setting, the time step and the
+    Newton tolerance, which set the discrete solution. Runs of one group at the same ``Gamma`` with
+    identical estimates (the same run analysed twice) count once; if their estimates differ, the
+    group is ambiguous: its entry gives no threshold (every estimator None) and an ``error`` naming
+    the runs, and the other groups are unaffected. For each estimator, ``mu(Gamma)`` is
+    interpolated linearly to zero between the first pair of adjacent amplitudes whose exponents are
+    both finite and of opposite sign, for the simulations and for the exact linear response
+    analysed identically; the exact ``Gamma_c`` is the Floquet value. Like-for-like comparison
+    isolates the solver from the estimator and interpolation bias.
     """
     groups: dict[tuple, list[dict]] = {}
     for r in results:
         if r["Gamma"] != 0.0:
-            # results stored before ``radius`` or ``fit_window`` was recorded load with None
+            # results stored before ``radius``, ``fit_window`` or ``newton_tolerance`` was
+            # recorded load with None
             window = None if r.get("fit_window") is None else tuple(r["fit_window"])
             key = ((r["Oh"], r["Bo"], r["depth"], r["Omega"]), (r["a0"], r.get("radius")),
-                   window, tuple(sorted(r["mesh"].items())), r["dt"])
+                   window, tuple(sorted(r["mesh"].items())), r["dt"], r.get("newton_tolerance"))
             groups.setdefault(key, []).append(r)
     out = []
-    for (physics, (a0, radius), window, mesh, dt), rs in groups.items():
+    for (physics, (a0, radius), window, mesh, dt, newton), rs in groups.items():
         physics = dict(zip(("Oh", "Bo", "depth", "Omega"), physics))
         window = None if window is None else list(window)
         by_gamma: dict[float, list[dict]] = {}
@@ -201,7 +204,8 @@ def thresholds(results: list[dict]) -> list[dict]:
         legacy = [mesh.get(k) for k in ("h_interface", "h_axis", "h_max", "grading")] + [dt]
         entry = {"physics": physics, "problem": {"a0": a0, "radius": radius},
                  "fit_window": window, "mesh_and_dt": legacy, "mesh": mesh, "dt": dt,
-                 "Gammas": G.tolist(), "Gamma_c_exact": rs[0]["Gamma_c"]}
+                 "newton_tolerance": newton, "Gammas": G.tolist(),
+                 "Gamma_c_exact": rs[0]["Gamma_c"]}
         for g, same in by_gamma.items():
             # the same run passed twice is harmless; runs that disagree would leave the bracket to
             # the order of the inputs, so the group gives no threshold
@@ -209,7 +213,8 @@ def thresholds(results: list[dict]) -> list[dict]:
             if not all(np.array_equal(m, mus[0], equal_nan=True) for m in mus[1:]):
                 entry["error"] = (
                     f"repeated Gamma {g} in threshold group physics={physics}, a0={a0}, "
-                    f"radius={radius}, fit_window={window}, mesh={mesh}, dt={dt}: runs "
+                    f"radius={radius}, fit_window={window}, mesh={mesh}, dt={dt}, "
+                    f"newton_tolerance={newton}: runs "
                     f"{[r.get('case_id') for r in same]} give different exponents")
                 break
         if "error" in entry:
