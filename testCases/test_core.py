@@ -199,7 +199,7 @@ def test_thresholds_group_runs_fitted_over_one_window(tmp_path):
     assert th["floquet_exact"] == pytest.approx(GAMMA_C_C1, rel=1e-2)
 
 
-def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch):
+def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch, capsys):
     sys.path.insert(0, str(ROOT / "verificationCases"))
     import json
 
@@ -249,11 +249,40 @@ def test_main_keeps_run_results_when_thresholds_fail(tmp_path, monkeypatch):
     for run in runs[:2]:
         assert repr(str(run)) in ambiguous["error"]
     assert summary["thresholds_error"] == [ambiguous["error"]]
+    assert capsys.readouterr().err == f"thresholds: {ambiguous['error']}\n"
     assert "error" not in kept
     assert kept["Gammas"] == [0.2, 0.4]
     for name in ESTIMATORS:
         assert math.isfinite(kept[name])
     assert kept["floquet_exact"] == pytest.approx(GAMMA_C_C1, rel=1e-2)
+
+
+def test_main_succeeds_when_no_threshold_group_is_ambiguous(tmp_path, monkeypatch, capsys):
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import json
+
+    import compare_linear as cl
+
+    # the same run passed twice is one run directory: it neither makes its group ambiguous nor
+    # renames its linear-response file
+    runs = [_synthetic_run(tmp_path, G, -0.001, 12, 50) for G in (0.2, 0.4)]
+    out = tmp_path / "analysis"
+    monkeypatch.setattr(sys, "argv", ["compare_linear.py", *map(str, runs + runs[:1]),
+                                      "--out", str(out)])
+    monkeypatch.setattr(cl, "plot", lambda results, stem: None)
+    assert cl.main() == 0
+    assert capsys.readouterr().err == ""
+    summary = json.loads((out / "linear_comparison.json").read_text())
+    # "thresholds_error" is written only on failure
+    assert "thresholds_error" not in summary
+    assert [r["linear_response_file"] for r in summary["runs"]] == [
+        "synthetic-G0.2_linear_response.txt", "synthetic-G0.4_linear_response.txt",
+        "synthetic-G0.2_linear_response.txt"]
+    (th,) = summary["thresholds"]
+    assert "error" not in th
+    assert th["Gammas"] == [0.2, 0.4]
+    for name in ESTIMATORS:
+        assert math.isfinite(th[name])
 
 
 MESH = {"h_interface": 0.05, "h_axis": 0.05, "h_max": 0.4, "grading": 0.3,
