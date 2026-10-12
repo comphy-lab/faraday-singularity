@@ -4,11 +4,16 @@ The meridional domain is ``0 <= r <= R_c`` below the free surface ``z = d + zeta
 boundaries ``axis`` (r = 0), ``bottom`` (z = 0), ``wall`` (r = R_c) and ``interface``. The first mesh
 puts the interface through the initial elevation; every remesh rebuilds it through the current
 interface nodes, ordered from the axis to the wall, with the end points snapped onto ``r = 0`` and
-``r = R_c``.
+``r = R_c``. The rebuild checks the control polygon and a sampled spline for self-contact before
+meshing (:func:`~faraday_singularity.selfcontact.check_simple_interface`). Narrow spline loops can
+escape this sampled check; detected contacts raise rather than entering mesh generation.
 
 Element size is graded with distance from two attractors: the whole interface (``h_interface``)
-and the point where the interface meets the axis (``h_axis``), where the cavity collapses. The size
-grows linearly with distance at rate ``grading`` and is capped at ``h_max``.
+and a focus region near the axis, where the cavity collapses. The size grows linearly with distance
+at rate ``grading`` and is capped at ``h_max``. Initially the focus is the point where the interface
+meets the axis, with size ``h_axis``. During a collapse the problem sets ``focus`` (a
+:class:`Focus`) before forcing a remesh: interface nodes within ``radius`` of the axis become
+attractors with size ``size``, so the resolution follows the cavity bottom, the jet base and the jet.
 """
 
 from __future__ import annotations
@@ -18,6 +23,8 @@ from typing import Callable
 
 import numpy as np
 from pyoomph.meshes.gmsh import GmshTemplate
+
+from .selfcontact import check_simple_interface
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,13 @@ class MeshSettings:
             raise ValueError("need at least three interface points")
 
 
+@dataclass(frozen=True)
+class Focus:
+    size: float  # element size on the focus attractors
+    radius: float  # interface nodes with r <= radius are attractors
+    grading: float  # growth rate of the element size away from the focus
+
+
 class FaradayCylinderMesh(GmshTemplate):
     def __init__(self, radius: float, depth: float, elevation: Callable[[np.ndarray], np.ndarray],
                  settings: MeshSettings, domain_name: str = "liquid"):
@@ -44,6 +58,7 @@ class FaradayCylinderMesh(GmshTemplate):
         self.elevation = elevation  # initial zeta(r), numpy-vectorised
         self.settings = settings
         self.domain_name = domain_name
+        self.focus: Focus | None = None  # set by the problem before a resolution-driven remesh
 
     def _interface_points(self) -> list[tuple[float, float]]:
         if self.is_first_time():
@@ -61,9 +76,11 @@ class FaradayCylinderMesh(GmshTemplate):
 
     def define_geometry(self):
         s = self.settings
+        focus = self.focus if self.is_remeshing() else None
+        h_focus = focus.size if focus is not None else s.h_axis
         self.mesh_mode = "tris"
         self.set_gmsh_parameter("General.NumThreads", 1)  # deterministic meshes
-        self.set_gmsh_parameter("Mesh.MeshSizeMin", min(s.h_interface, s.h_axis))
+        self.set_gmsh_parameter("Mesh.MeshSizeMin", min(s.h_interface, h_focus))
         self.set_gmsh_parameter("Mesh.MeshSizeMax", s.h_max)
         self.set_gmsh_parameter("Mesh.MeshSizeFromCurvature", 0)
         self.set_gmsh_parameter("Mesh.MeshSizeFromPoints", 0)
@@ -71,16 +88,29 @@ class FaradayCylinderMesh(GmshTemplate):
         self.set_gmsh_parameter("Mesh.Algorithm", 6)
         self.default_resolution = s.h_max
 
-        pts = [self.point(x, y) for x, y in self._interface_points()]
+        # The rebuilt spline passes through the current interface nodes only; inserting points would
+        # put kinks into it. Refining by at most about 2x per remesh keeps the size field between
+        # attractor nodes within about 1.2 times the focus size.
+        coords = self._interface_points()
+        # Gmsh reports a self-crossing boundary only as warnings and an empty surface, which
+        # pyoomph meets later as "There is no domain 'liquid'"; refuse it here, with its location.
+        check_simple_interface(coords)
+        pts = [self.point(x, y) for x, y in coords]
         interface = self.spline(pts, name="interface")
         self.create_lines(pts[-1], "wall", (self.radius, 0.0), "bottom", (0.0, 0.0), "axis", pts[0])
         self.plane_surface("interface", "wall", "bottom", "axis", name=self.domain_name)
 
         d_if = self.add_mesh_size_field("Distance", CurvesList=[interface], Sampling=2000)
-        d_ax = self.add_mesh_size_field("Distance", PointsList=[pts[0]])
+        if focus is None:
+            attractors, g_focus = [pts[0]], s.grading
+        else:
+            attractors = [pt for pt, (x, _) in zip(pts, coords) if x <= focus.radius] or [pts[0]]
+            g_focus = focus.grading
+        d_ax = self.add_mesh_size_field("Distance", PointsList=attractors)
         size_if = self.add_mesh_size_field(
             "MathEval", F=f"min({s.h_max!r}, {s.h_interface!r} + {s.grading!r}*F{d_if})")
         size_ax = self.add_mesh_size_field(
-            "MathEval", F=f"min({s.h_max!r}, {s.h_axis!r} + {s.grading!r}*F{d_ax})")
+            "MathEval", F=f"min({s.h_max!r}, {h_focus!r} + {g_focus!r}*F{d_ax})")
         self.set_mesh_size_background_field(
             self.add_mesh_size_field("Min", FieldsList=[size_if, size_ax]))
+

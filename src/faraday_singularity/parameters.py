@@ -8,17 +8,19 @@ pressure ``sigma k``. In these units the mode wavenumber and the surface tension
 
 Dimensionless momentum balance in the frame of the vertically vibrated container::
 
-    Du/Dt = -grad p + Oh lap u - (Bo + Gamma cos(Omega t)) e_z
+    Du/Dt = -grad p + Oh lap u - (Bo + Gamma cos(Omega t + phase)) e_z
 
 with
 
 * ``Oh = mu sqrt(k/(rho sigma))``, the Ohnesorge number built on ``1/k``;
 * ``Bo = rho g/(sigma k**2)``, the gravitational Bond number (0 by default);
-* ``Gamma = rho A Omega_d**2/(sigma k**2)``, the container acceleration amplitude ``A Omega_d**2``
-  (``A`` the displacement amplitude, ``Omega_d`` the dimensional angular forcing frequency) scaled by
-  the capillary acceleration ``sigma k**2/rho``: a Bond number built on the vibration instead of
-  gravity. With gravity, the conventional ``A Omega_d**2/g`` equals ``Gamma/Bo``;
-* ``Omega = Omega_d t_c``, the dimensionless forcing frequency.
+* ``Gamma = rho A Omega_d**2/(sigma k**2)``, the vibrational Bond number: the container
+  acceleration amplitude ``A Omega_d**2`` (``A`` the displacement amplitude, ``Omega_d`` the
+  dimensional angular forcing frequency) scaled by the capillary acceleration ``sigma k**2/rho``.
+  With gravity, the conventional reduced acceleration ``A Omega_d**2/g`` equals ``Gamma/Bo``;
+* ``Omega = Omega_d t_c``, the dimensionless forcing frequency, and ``phase`` the forcing phase at
+  ``t = 0``. A wave released from rest at ``t = 0`` follows the growing (subharmonic) Faraday mode
+  most closely for ``phase = -pi/2``, i.e. forcing ``Gamma sin(Omega t)``.
 
 Container: a cylinder of radius ``R_c = j_{1,n}`` (the n-th positive zero of ``J1``) and depth
 ``d = k H`` with a free-slip side wall and a 90 degree contact angle, so that ``J0(r)`` is an exact
@@ -50,8 +52,9 @@ class Container:
 
 @dataclass(frozen=True)
 class Forcing:
-    Gamma: float = 0.0
+    Gamma: float = 0.0  # vibrational Bond number
     detuning: float = 1.0  # Omega / (2 omega0)
+    phase: float = 0.0  # forcing phase at t = 0 (radians)
 
 
 @dataclass(frozen=True)
@@ -86,7 +89,8 @@ class Dimensionless:
 
     Oh: float
     Bo: float
-    Gamma: float
+    Gamma: float  # vibrational Bond number
+    phase: float  # forcing phase at t = 0
     radius: float  # R_c = j_{1,mode}
     depth: float  # d = k H
     omega0: float  # inviscid linear frequency of the J0 mode
@@ -141,6 +145,7 @@ def nondimensionalise(p: CaseParameters) -> Dimensionless:
         Oh=fl.Oh,
         Bo=fl.Bo,
         Gamma=fo.Gamma,
+        phase=fo.phase,
         radius=radius,
         depth=ct.depth,
         omega0=omega0,
