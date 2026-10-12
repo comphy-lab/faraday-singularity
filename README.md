@@ -135,7 +135,8 @@ Its run directory also receives:
 
 - `collapse.txt`, one row per step: collapse cycle and crest/trough episode, apex height, velocity
   and curvature, jet-base radius `r_j` and height, flux, mean jet speed `V_j` and `We_j`, the
-  narrowest neck, cone angles, resolution, global budgets, and a running estimate `t0_est`, with
+  narrowest neck, conservative fold-gap diagnostics (`fold_gap`, `fold_r`, `fold_z`), cone angles,
+  resolution, global budgets, and a running estimate `t0_est`, with
   exponent `alpha_est`, of the origin of a power law in time fitted to the latest samples of a
   length (`t0_source`: 0 none; 1 the apex radius of curvature, an estimate of the singular time;
   2 the jet-base radius after birth: while the base closes in on the axis, the time at which it
@@ -149,6 +150,13 @@ Its run directory also receives:
 A run ends at its end time, at the step-size floor or step limit, or right before a pinch-off or
 the singular collapse. The `stop` record in `run_status.json` and `events.jsonl` names the reason:
 `pinch-off-approach` when a neck becomes narrower than the stop radius (`trigger` `neck-radius`).
+`self-contact-approach` (`trigger` `fold-gap`) is a conservative geometry cutoff in the focus
+region: nonadjacent nodes are closer than `1/fold_ratio` of their intervening arc, and their gap
+is below `max(fold_stop, fold_stop_elements * h_elem)`, using the local element length. The pair
+closest to its own limit is recorded. This criterion can also stop at a static sharp corner;
+it does not establish physical entrapment or a singularity. An already self-intersecting control
+polygon, or a detected contact of its sampled spline, raises `InterfaceSelfIntersection` and
+marks the run failed. The spline check is sampled and can miss loops below its sampling scale.
 A run also stops when oomph-lib gives up on a step because the Newton solve fails at every step size
 down to its smallest step (the message `less than the minimum dt` in the log): as a
 `pinch-off-approach` if a neck is narrower than `neck_guard`, otherwise as a `singularity-approach`

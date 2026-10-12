@@ -4,7 +4,9 @@ The meridional domain is ``0 <= r <= R_c`` below the free surface ``z = d + zeta
 boundaries ``axis`` (r = 0), ``bottom`` (z = 0), ``wall`` (r = R_c) and ``interface``. The first mesh
 puts the interface through the initial elevation; every remesh rebuilds it through the current
 interface nodes, ordered from the axis to the wall, with the end points snapped onto ``r = 0`` and
-``r = R_c``.
+``r = R_c``. The rebuild checks the control polygon and a sampled spline for self-contact before
+meshing (:func:`~faraday_singularity.selfcontact.check_simple_interface`). Narrow spline loops can
+escape this sampled check; detected contacts raise rather than entering mesh generation.
 
 Element size is graded with distance from two attractors: the whole interface (``h_interface``)
 and a focus region near the axis, where the cavity collapses. The size grows linearly with distance
@@ -21,6 +23,8 @@ from typing import Callable
 
 import numpy as np
 from pyoomph.meshes.gmsh import GmshTemplate
+
+from .selfcontact import check_simple_interface
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,9 @@ class FaradayCylinderMesh(GmshTemplate):
         # put kinks into it. Refining by at most about 2x per remesh keeps the size field between
         # attractor nodes within about 1.2 times the focus size.
         coords = self._interface_points()
+        # Gmsh reports a self-crossing boundary only as warnings and an empty surface, which
+        # pyoomph meets later as "There is no domain 'liquid'"; refuse it here, with its location.
+        check_simple_interface(coords)
         pts = [self.point(x, y) for x, y in coords]
         interface = self.spline(pts, name="interface")
         self.create_lines(pts[-1], "wall", (self.radius, 0.0), "bottom", (0.0, 0.0), "axis", pts[0])

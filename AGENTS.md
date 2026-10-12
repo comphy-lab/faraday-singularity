@@ -73,7 +73,10 @@ add a second top-level `cases/` tree.
   its smallest step (the Newton solve failing at every step size) can end a run cleanly, and only
   when `classify_failure` attributes it to a closing neck or a vanishing local scale, as measured
   rather than growth-limited; any other failure, including a failed remesh, is a failed run. Runs also end cleanly at the neck-radius
-  stop, the end time, the step-size floor and the step limit.
+  stop, the conservative fold-gap stop (`self-contact-approach`), the end time, the step-size
+  floor and the step limit. A fold-gap stop can also truncate a static sharp corner; it is not
+  proof of entrapment or a singularity. `InterfaceSelfIntersection` is a failed run. Check stop
+  criteria before advancing and after every remesh, before writing a state dump.
 - The wave height `h` of a collapse is `h_crest` from `postProcess/collapse_table.py
   --per-episode`: the largest elevation of the axis above the mean level over the crest episode
   before the trough that collapses. It is a wave height only in rows with `crest_jet` 0: when a

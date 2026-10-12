@@ -43,7 +43,15 @@ adaptive stepping, which the driver uses with ``dt`` as the largest step: the dr
 reaches ``t + dt`` in several accepted sub-steps, and only its end is measured. Element distortion
 still triggers pyoomph's own remeshing, at the focus the driver last set, which a hold keeps from
 coarsening; those rebuilds neither start nor end a hold. The run stops right before a pinch-off,
-when a neck becomes narrower than ``max(neck_stop, neck_stop_elements h_floor)``, or at ``t_end``.
+when a neck becomes narrower than ``max(neck_stop, neck_stop_elements h_floor)``, at the
+conservative self-contact cutoff, when a fold in the focus region (two nodes closer than
+``1/fold_ratio`` of the arc length between them, :func:`selfcontact.fold_gap`; the air slot that
+can close at the jet base) is narrower than ``max(fold_stop, fold_stop_elements h_elem)``, with
+``h_elem`` the local element length there (``self-contact-approach``), or at ``t_end``. The pair
+with smallest gap relative to its own limit governs this conservative cutoff; a static sharp
+corner can also meet it, so the event alone does not establish physical entrapment. A surface
+that has already crossed itself is no end state: measuring it raises
+:class:`~selfcontact.InterfaceSelfIntersection`, and so does a remesh handed one (``mesh.py``).
 
 Close to a pinch-off or to the singular collapse the Newton solve can fail at every step size:
 oomph-lib halves the step down to ``Problem::Minimum_dt`` (``1e-12``) and then gives up with an
@@ -64,7 +72,9 @@ are not measured, and the recorded state may precede them.
 
 Per step ``collapse.txt`` records the cycle and episode, the apex (height, velocity, curvature),
 the jet base (``r_j``, ``z_b``, flux ``Q_j``, mean speed ``V_j``, ``We_j = V_j^2 r_j``), the
-narrowest neck, cone angles, the resolution, the global budgets and the power-law origin estimate.
+narrowest neck, cone angles, the resolution, the global budgets, the power-law origin estimate and
+the fold closest to its local limit (``fold_gap``, ``inf`` without one within ``FOLD_SEARCH`` stop limits, at
+``fold_r``, ``fold_z``).
 ``events.jsonl`` records cavities, jet birth (with the largest trough curvature ``z''(0) > 0``
 before it in its cycle and trough episode; a bump or crest on the axis has ``z''(0) < 0``), the
 first neck, crest and trough episodes, remeshes, restarts and the stop. Free-surface profiles with
@@ -123,6 +133,7 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
 from .mesh import Focus
+from .selfcontact import InterfaceSelfIntersection, fold_gap
 from .singular import singular_time
 
 
@@ -155,6 +166,9 @@ class CollapseSettings:
     jet_max_radius: float = 0.3  # and is narrower than this; a broad rebound is not a jet
     neck_stop: float = 1e-3
     neck_stop_elements: float = 3.0
+    fold_ratio: float = 4.0  # a fold pair is closer than 1/fold_ratio of the arc between them
+    fold_stop: float = 1e-3  # as neck_stop, for the gap of a closing fold
+    fold_stop_elements: float = 3.0  # in local element lengths at the fold
     neck_guard: float = 1e-2  # a Newton failure with a neck narrower than this is a pinch-off
     ell_guard: float = 1e-3  # and with a local scale below this the approach to the singularity
     snapshot_dt: float = 0.25
@@ -171,6 +185,18 @@ class CollapseSettings:
     singular_extrapolation: float = 2.0  # largest distance of t0 from the samples, in window spans
     eta_hys: float = ETA_HYS  # axis elevation that starts a crest (+) or trough (-) episode
 
+    def __post_init__(self):
+        for name in ("fold_ratio", "fold_stop", "fold_stop_elements"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} must be finite and numeric")
+        if self.fold_ratio <= 1:
+            raise ValueError("fold_ratio must be greater than one")
+        if self.fold_stop < 0 or self.fold_stop_elements < 0:
+            raise ValueError("fold stop limits must be non-negative")
+        if self.fold_stop == 0 and self.fold_stop_elements == 0:
+            raise ValueError("at least one fold stop limit must be positive")
+
     @classmethod
     def from_dict(cls, data: dict, *, t_end: float, dt_max: float) -> "CollapseSettings":
         kw = dict(data)
@@ -181,6 +207,7 @@ class CollapseSettings:
 
 
 MIN_DT_FAILURE = "less than the minimum dt"  # oomph-lib's message when it gives up on a step
+FOLD_SEARCH = 4.0  # folds are looked for within this many stop limits
 # what a dump's max_curvature holds: the largest z''(0) > 0 of the trough episode and cycle
 MAX_CURVATURE_KIND = "trough-episode"
 
@@ -266,7 +293,7 @@ COLUMNS = ("step", "cycle", "episode", "time", "dt", "z_axis", "w_axis", "axis_c
            "Q_j", "V_j", "We_j", "flux_found", "r_neck", "z_neck", "ell", "h_focus", "h_near",
            "U", "beta_fit", "beta_fit_points", "beta_window_lo", "beta_window_hi",
            "volume", "area", "kinetic_energy", "dissipation", "remesh_count", "wall",
-           "t0_est", "alpha_est", "t0_source")
+           "t0_est", "alpha_est", "t0_source", "fold_gap", "fold_r", "fold_z")
 
 
 @dataclass
@@ -368,6 +395,15 @@ class CollapseDriver:
 
         focus_r = min(pb.nd.radius, s.focus_extent * ell)
         in_focus = r <= focus_r
+        # Select the fold closest to its own stop limit, using each node's local spacing.
+        fold = fold_gap(r, z, r_max=focus_r, ratio=s.fold_ratio,
+                        stop=s.fold_stop, stop_elements=s.fold_stop_elements, search_factor=FOLD_SEARCH)
+        if fold.crossed:
+            raise InterfaceSelfIntersection(
+                f"the free surface crosses itself within r <= {focus_r:.6g} at t = {self._t():.15g}; "
+                "the measured state is invalid and the last row before it is the last valid one")
+        fold_limit = (max(s.fold_stop, s.fold_stop_elements * fold.h_elem)
+                      if math.isfinite(fold.gap) else math.nan)
         U = max(float(np.max(np.hypot(ur[in_focus], uz[in_focus]))) if in_focus.any() else 0.0,
                 abs(V) if math.isfinite(V) else 0.0, 1e-3)
 
@@ -386,7 +422,9 @@ class CollapseDriver:
                 "We_j": We, "flux_found": found, "r_neck": r_neck, "z_neck": z_neck, "ell": ell,
                 "ell_measured": ell_measured, "h_focus": h_focus, "h_near": h_near, "U": U, "beta_fit": beta,
                 "beta_fit_points": npts, "beta_window_lo": lo, "beta_window_hi": hi,
-                "angles": angles, "focus_radius": focus_r, "profile": (r, z, ur, uz)}
+                "angles": angles, "focus_radius": focus_r, "profile": (r, z, ur, uz),
+                "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
+                "fold_h_elem": fold.h_elem, "fold_limit": fold_limit}
 
     # --- bookkeeping --------------------------------------------------------------------------
 
@@ -408,7 +446,9 @@ class CollapseDriver:
                int(m["flux_found"]), m["r_neck"], m["z_neck"], m["ell"], m["h_focus"], m["h_near"],
                m["U"], m["beta_fit"], m["beta_fit_points"], m["beta_window_lo"],
                m["beta_window_hi"], obs["volume"], obs["area"], obs["kinetic_energy"],
-               obs["dissipation"], self.pb.remesh_count, wall, *est] + list(m["angles"])
+               obs["dissipation"], self.pb.remesh_count, wall, *est,
+               m.get("fold_gap", math.inf), m.get("fold_r", math.nan),
+               m.get("fold_z", math.nan)] + list(m["angles"])
         self._table.write("\t".join(f"{v:.12e}" if isinstance(v, float) else str(v)
                                     for v in row) + "\n")
 
@@ -593,6 +633,18 @@ class CollapseDriver:
 
     # --- main loop ----------------------------------------------------------------------------
 
+    def _geometry_stop(self, m):
+        neck_limit = max(self.s.neck_stop, self.s.neck_stop_elements * self.s.h_floor)
+        if math.isfinite(m["r_neck"]) and m["r_neck"] < neck_limit:
+            return {"reason": "pinch-off-approach", "trigger": "neck-radius",
+                    "r_neck": m["r_neck"], "z_neck": m["z_neck"], "neck_limit": neck_limit}
+        if m.get("fold_gap", math.inf) < m.get("fold_limit", math.nan):
+            return {"reason": "self-contact-approach", "trigger": "fold-gap",
+                    "fold_gap": m["fold_gap"], "fold_r": m["fold_r"], "fold_z": m["fold_z"],
+                    "fold_arc": m["fold_arc"], "fold_h_elem": m["fold_h_elem"],
+                    "fold_limit": m["fold_limit"]}
+        return None
+
     def run(self, newton_tolerance: float) -> dict:
         s, st, pb = self.s, self.state, self.pb
         m = self.measure()
@@ -601,6 +653,10 @@ class CollapseDriver:
         self._snapshot(m, "start")
         stop = {"reason": "end-time"}
         while True:
+            geometry_stop = self._geometry_stop(m)
+            if geometry_stop is not None:
+                stop = geometry_stop
+                break
             t = self._t()
             if s.t_end - t <= max(1e-14, 8 * math.ulp(s.t_end)):
                 break
@@ -671,14 +727,17 @@ class CollapseDriver:
             if math.isfinite(m["r_neck"]) and not st.neck_seen:
                 st.neck_seen = True
                 self._event("neck", m, r_neck=m["r_neck"], z_neck=m["z_neck"])
-            neck_limit = max(s.neck_stop, s.neck_stop_elements * s.h_floor)
-            if math.isfinite(m["r_neck"]) and m["r_neck"] < neck_limit:
-                stop = {"reason": "pinch-off-approach", "trigger": "neck-radius",
-                        "r_neck": m["r_neck"], "z_neck": m["z_neck"], "neck_limit": neck_limit}
+            geometry_stop = self._geometry_stop(m)
+            if geometry_stop is not None:
+                stop = geometry_stop
                 break
             self._maybe_snapshot(m)
             if self._maybe_remesh(m):
                 m = self.measure()
+                geometry_stop = self._geometry_stop(m)
+                if geometry_stop is not None:
+                    stop = geometry_stop
+                    break
             if self._t() - st.last_state_t >= s.state_dt:
                 self.save_state()
         self._event("stop", m, **stop)
