@@ -275,7 +275,7 @@ def main() -> int:
     if not runner_path.is_file():
         runner_path = Path(__file__).resolve()
     commit = recorded_provenance["component_commit"] or "unknown"
-    if recorded_provenance["component_dirty"]:
+    if recorded_provenance["component_dirty"] is not False:
         commit += "-dirty"
     manifest = {"schema": "pyoomph-runner-manifest-v1", "case_id": case["case_id"],
                 "case_file": str(args.case.resolve()),

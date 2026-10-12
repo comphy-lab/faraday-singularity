@@ -264,7 +264,7 @@ def time_free(r_j, Q_j, We_j, V_j, Oh: float, bins: int, nu_cone: float | None) 
 # --- inception profile ----------------------------------------------------------------------------
 
 def inception(run: Path, tab: dict, t_ref: float, settings: dict, inner_factor: float,
-              outer_radius: float, angle_tol: float) -> dict:
+              outer_radius: float, angle_tol: float, max_offset: float = math.inf) -> dict:
     """Cone angle and wall kinematics on the profile nearest ``t_ref`` (see the module notes)."""
     headers = profile_headers(run)
     if not headers:
@@ -274,6 +274,10 @@ def inception(run: Path, tab: dict, t_ref: float, settings: dict, inner_factor: 
              and abs(h["time"] - t_ref) <= 1e-9 * max(1.0, abs(t_ref))]
     i = exact[0] if exact else int(np.argmin(np.abs(times - t_ref)))
     header, path = headers[i]
+    offset = float(header["time"] - t_ref)
+    if not exact and abs(offset) > max_offset:
+        return {"status": "profile too far from growth reference", "profile_offset": offset,
+                "max_profile_offset": max_offset}
     data = np.loadtxt(path, ndmin=2)
     r, z, ur, uz = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
     if r[0] > r[-1]:
@@ -291,7 +295,7 @@ def inception(run: Path, tab: dict, t_ref: float, settings: dict, inner_factor: 
            "profile_time": float(header["time"]), "profile_offset": float(header["time"] - t_ref),
            "r_j": r_j, "axis_curvature": kappa, "h_near": h_near, "base_index": jb.index,
            "inner_factor": inner_factor, "outer_radius": outer_radius,
-           "angle_tol_deg": angle_tol, "r_lo": r_lo}
+           "angle_tol_deg": angle_tol, "r_lo": r_lo, "max_profile_offset": max_offset}
     if not r_lo < outer_radius:
         out["status"] = "no intermediate window: r_lo >= outer_radius"
         return out
@@ -531,8 +535,11 @@ def analyse_jet(run: Path, tab: dict, rows: np.ndarray, events: list[dict], sett
     elif not out["birth_observed"] and k_ref == 0:
         inc = {"status": "the jet was born before the first row of the table"}
     else:
+        elapsed = t[seg] - t_ref
+        positive = elapsed[elapsed > 0]
+        max_offset = float(positive.min()) if positive.size else 0.0
         inc = inception(run, tab, t_ref, settings, opts["inner_factor"], opts["outer_radius"],
-                        opts["angle_tol"])
+                        opts["angle_tol"], max_offset=max_offset)
     out["inception"] = inc
     beta = inc.get("beta", math.nan)
     cone = None

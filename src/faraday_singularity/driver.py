@@ -602,7 +602,7 @@ class CollapseDriver:
         stop = {"reason": "end-time"}
         while True:
             t = self._t()
-            if t >= s.t_end - 1e-14:
+            if s.t_end - t <= max(1e-14, 8 * math.ulp(s.t_end)):
                 break
             if st.step >= s.max_steps:
                 stop = {"reason": "max-steps"}

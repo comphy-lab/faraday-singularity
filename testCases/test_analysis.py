@@ -249,6 +249,20 @@ def test_cone_window_starts_above_the_resolution_at_inception(tmp_path):
     assert inc["beta_deg"] == pytest.approx(38.4, abs=1e-6)
 
 
+def test_distant_profile_cannot_establish_inception_cone(tmp_path):
+    run = tmp_path / "run"
+    _write_run(run, beta_deg=38.4, nu=nu_of_beta(math.radians(38.4)))
+    for profile in (run / "profiles").glob("*.txt"):
+        lines = profile.read_text().splitlines()
+        metadata = json.loads(lines[0].lstrip("# "))
+        metadata["time"] += 1.0
+        metadata["reason"] = "snapshot"
+        profile.write_text("# " + json.dumps(metadata) + "\n" + "\n".join(lines[1:]) + "\n")
+    jet = analyse(run)["jets"][0]
+    assert jet["inception"]["status"] == "profile too far from growth reference"
+    assert jet["alpha_cone"] is None and jet["beta_below_taylor"] is None
+
+
 def test_analysis_of_a_line_sink_jet(tmp_path):
     # q_j constant and a horizontal inflow on a 60 deg wall: every law is reported, none chosen
     _write_run(tmp_path / "run", beta_deg=60.0, nu=0.0, field="sink")

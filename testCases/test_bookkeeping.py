@@ -1065,6 +1065,7 @@ def test_header_only_run_does_not_block_table_command(tmp_path, monkeypatch, mod
     tab["cavity"] = np.ones_like(tab["time"])
     tab["remesh_count"] = np.zeros_like(tab["time"])
     tab["volume"] = np.ones_like(tab["time"])
+    tab["We_j"] = tab["V_j"] ** 2 * tab["r_j"]
     valid = _write_run(tmp_path / "valid", tab, stop={"reason": "end-time"})
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -1075,6 +1076,18 @@ def test_header_only_run_does_not_block_table_command(tmp_path, monkeypatch, mod
                                       "--out", str(output), *mode])
     assert collapse_table.main() == 0
     assert len(output.read_text().splitlines()) > 1
+
+
+def test_one_ulp_before_large_endpoint_is_end_time(tmp_path):
+    pb = SurfaceProblem(lambda t, r: 2 * math.pi - 0.1 + 0.5 * r**2)
+    pb.t = math.nextafter(65.0, -math.inf)
+    driver = CollapseDriver(pb, _settings(t_end=65.0), tmp_path)
+    try:
+        result = driver.run(1e-9)
+        assert result["stop"]["reason"] == "end-time"
+        assert pb.calls == 0
+    finally:
+        driver.close()
 
 
 def test_per_episode_curvature_with_a_sticky_jet_flag(tmp_path):
