@@ -82,6 +82,8 @@ FIELDS = ("case_id", "Gamma", "Oh", "a0", "state", "stop", "t_end", "jet_born", 
 def read_table(path: Path) -> dict[str, np.ndarray]:
     with path.open() as fh:
         header = fh.readline().lstrip("#").strip().split("\t")
+        if not any(line.strip() and not line.startswith("#") for line in fh):
+            return {name: np.empty(0) for name in header}
     data = np.loadtxt(path, comments="#", ndmin=2)
     return {name: data[:, i] for i, name in enumerate(header)}
 
@@ -331,6 +333,9 @@ def main() -> int:
                     help="hysteresis for runs without recorded episodes (default: the run's "
                          f"eta_hys, else {ETA_HYS})")
     args = ap.parse_args()
+    # A failed startup or an in-progress restart can have written only its table header.
+    args.runs = [run for run in args.runs if (run / "collapse.txt").exists()
+                 and read_table(run / "collapse.txt").get("time", np.empty(0)).size]
     if args.per_cycle:
         rows = [r for run in args.runs if (run / "collapse.txt").exists() for r in per_cycle(run)]
         rows.sort(key=lambda r: (r["Oh"], r["Gamma"], r["h_crest"]))

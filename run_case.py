@@ -339,9 +339,9 @@ def main() -> int:
                         local = args.outdir / "restart" / args.restart.name
                         local.parent.mkdir(exist_ok=True)
                         if hashlib.sha256(args.restart.read_bytes()).hexdigest() != parent_record["sha256"]:
-                            raise SystemExit("restart state changed after admission")
+                            raise RuntimeError("restart state changed after admission")
                         if hashlib.sha256(args.restart.with_suffix(".json").read_bytes()).hexdigest() != parent_record["metadata_sha256"]:
-                            raise SystemExit("restart metadata changed after admission")
+                            raise RuntimeError("restart metadata changed after admission")
                         copy_state_file(str(args.restart), str(local))
                         problem.load_state(str(local))
                         driver.restore(restart_meta)

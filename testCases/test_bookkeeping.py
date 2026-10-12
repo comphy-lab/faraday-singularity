@@ -1058,6 +1058,25 @@ def test_table_command_line(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
 
 
+@pytest.mark.parametrize("mode", [[], ["--per-cycle"], ["--per-episode"]])
+def test_header_only_run_does_not_block_table_command(tmp_path, monkeypatch, mode):
+    tab = _old_style_table()
+    tab["cycle"] = np.zeros_like(tab["time"])
+    tab["cavity"] = np.ones_like(tab["time"])
+    tab["remesh_count"] = np.zeros_like(tab["time"])
+    tab["volume"] = np.ones_like(tab["time"])
+    valid = _write_run(tmp_path / "valid", tab, stop={"reason": "end-time"})
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "collapse.txt").write_text((valid / "collapse.txt").read_text().splitlines()[0] + "\n")
+    assert collapse_table.read_table(empty / "collapse.txt")["time"].size == 0
+    output = tmp_path / "combined.csv"
+    monkeypatch.setattr(sys, "argv", ["collapse_table.py", str(empty), str(valid),
+                                      "--out", str(output), *mode])
+    assert collapse_table.main() == 0
+    assert len(output.read_text().splitlines()) > 1
+
+
 def test_per_episode_curvature_with_a_sticky_jet_flag(tmp_path):
     # tables without the cycle column keep jet_born on after the first birth
     tab = _old_style_table()
