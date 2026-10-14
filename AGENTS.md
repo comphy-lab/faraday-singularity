@@ -74,7 +74,8 @@ add a second top-level `cases/` tree.
   when `classify_failure` attributes it to a closing neck or a vanishing local scale, as measured
   rather than growth-limited; any other failure, including a failed remesh, is a failed run. Runs also end cleanly at the neck-radius
   stop, the conservative fold-gap stop (`self-contact-approach`), the end time, the step-size
-  floor and the step limit. A fold-gap stop can also truncate a static sharp corner; it is not
+  floor and the step limit, and, only when a case sets a finite `post_birth_aspect`, once the born
+  jet is unambiguous (`jet-confirmed`); such a run records jet birth but not jet formation. A fold-gap stop can also truncate a static sharp corner; it is not
   proof of entrapment or a singularity. `InterfaceSelfIntersection` is a failed run. Check stop
   criteria before advancing and after every remesh, before writing a state dump.
 - The wave height `h` of a collapse is `h_crest` from `postProcess/collapse_table.py

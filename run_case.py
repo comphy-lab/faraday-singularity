@@ -8,7 +8,8 @@ Example::
 
 Times in the case file are in forcing periods ``2 pi/Omega``. A case with a ``collapse`` block runs
 the collapse driver (``src/faraday_singularity/driver.py``) up to ``completion.t_max`` or until it
-stops at its conservative neck-radius or fold-gap cutoff, with the fixed step of
+stops at its conservative neck-radius or fold-gap cutoff or, if the case sets a finite
+``collapse.post_birth_aspect``, once a born jet is unambiguous, with the fixed step of
 ``time_stepping`` as its largest step. A
 Newton failure that the driver classifies as the approach to a pinch-off or to the singularity is
 such a stop, and the run is ``completed``; the stop is recorded under ``collapse.stop`` in

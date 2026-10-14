@@ -1261,3 +1261,92 @@ def test_restore_keeps_an_old_backoff_for_refinement_only(tmp_path):
     assert drv.state.last_remesh_step == 110 - s.remesh_backoff
     assert drv.state.refine_blocked_until == 110 + s.min_steps_between_remesh
 
+
+
+# --- the optional stop once a born jet is unambiguous ----------------------------------------
+
+
+def _jet_rising_after(t, t_birth=0.5, r_j=0.1, speed=1.0):
+    """A trough until ``t_birth``, then a jet of base radius ``r_j`` born standing 0.11 r_j above its
+    base, whose apex rises at ``speed``: its aspect is 0.11 + 10 (t - t_birth)."""
+    if t < t_birth:
+        return {"axis_curvature": 2.0}
+    return {"jet_born": True, "axis_lowest": False, "axis_curvature": -1.0, "r_j": r_j,
+            "z_b": 0.0, "z_axis": 0.11 * r_j + speed * (t - t_birth)}
+
+
+def _birth_and_stop(tmp_path, **kw):
+    drv = PrescribedDriver(FakeProblem(), _settings(t_end=0.7, dt_max=0.01, **kw), tmp_path,
+                           _jet_rising_after)
+    result = drv.run(1e-9)
+    drv.close()
+    events = _read_events(tmp_path)
+    born = next(e for e in events if e["event"] == "jet-born")
+    return result, born, events[-1]
+
+
+def test_jet_stop_is_off_by_default(tmp_path):
+    result, _, stop = _birth_and_stop(tmp_path)
+    assert result["stop"] == {"reason": "end-time"} and stop["reason"] == "end-time"
+    assert math.isinf(CollapseSettings(t_end=1.0, dt_max=0.01).post_birth_aspect)
+
+
+def test_jet_stop_once_the_jet_stands_above_the_threshold(tmp_path):
+    result, born, stop = _birth_and_stop(tmp_path, post_birth_aspect=0.5)
+    # the aspect passes 0.5 at t - t_birth > 0.039: the fourth step of 0.01 after birth
+    assert result["stop"]["reason"] == "jet-confirmed" and result["stop"]["trigger"] == "jet-aspect"
+    assert result["steps"] - born["step"] == 4 == stop["step"] - result["stop"]["born_step"]
+    assert result["stop"]["aspect"] > 0.5 and result["jet_born"]
+    tab = _rows(tmp_path)
+    aspect = (tab["z_axis"][-2:] - tab["z_b"][-2:]) / tab["r_j"][-2:]  # rows after birth
+    assert aspect[-1] > 0.5 >= aspect[-2]
+
+
+def test_jet_stop_waits_the_least_number_of_steps_after_birth(tmp_path):
+    # a threshold the jet meets at birth: the stop still waits post_birth_steps accepted steps
+    result, born, _ = _birth_and_stop(tmp_path, post_birth_aspect=0.05, post_birth_steps=6)
+    assert result["stop"]["reason"] == "jet-confirmed"
+    assert result["steps"] - born["step"] == 6
+
+
+def test_neck_stop_takes_precedence_over_the_jet_stop(tmp_path):
+    def fields(t):
+        m = _jet_rising_after(t)
+        if t >= 0.53:
+            m["r_neck"], m["z_neck"] = 5e-4, 1.0
+        return m
+
+    drv = PrescribedDriver(FakeProblem(), _settings(t_end=0.7, dt_max=0.01, post_birth_aspect=0.1,
+                                                    post_birth_steps=3), tmp_path, fields)
+    result = drv.run(1e-9)
+    drv.close()
+    assert result["stop"]["reason"] == "pinch-off-approach"
+
+
+@pytest.mark.parametrize("kw", [{"post_birth_aspect": 0.0}, {"post_birth_aspect": math.nan},
+                                {"post_birth_aspect": True}, {"post_birth_steps": 0},
+                                {"post_birth_steps": 1.5}])
+def test_jet_stop_settings_are_validated(kw):
+    with pytest.raises(ValueError):
+        _settings(**kw)
+
+
+def test_restore_keeps_the_birth_step(tmp_path):
+    drv = PrescribedDriver(FakeProblem(), _settings(t_end=0.53, dt_max=0.01), tmp_path,
+                           _jet_rising_after)
+    drv.run(1e-9)
+    drv.save_state()
+    drv.close()
+    born = next(e for e in _read_events(tmp_path) if e["event"] == "jet-born")
+    meta = json.loads(sorted((tmp_path / "states").glob("*.json"))[-1].read_text())
+    assert meta["born_step"] == born["step"]
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    out = tmp_path / "restored"
+    again = PrescribedDriver(pb, _settings(t_end=0.7, dt_max=0.01, post_birth_aspect=0.5), out,
+                             _jet_rising_after)
+    again.restore(meta)
+    result = again.run(1e-9)
+    again.close()
+    assert result["stop"]["reason"] == "jet-confirmed"
+    assert result["stop"]["born_step"] == born["step"]

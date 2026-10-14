@@ -49,7 +49,12 @@ conservative self-contact cutoff, when a fold in the focus region (two nodes clo
 can close at the jet base) is narrower than ``max(fold_stop, fold_stop_elements h_elem)``, with
 ``h_elem`` the local element length there (``self-contact-approach``), or at ``t_end``. The pair
 with smallest gap relative to its own limit governs this conservative cutoff; a static sharp
-corner can also meet it, so the event alone does not establish physical entrapment. A surface
+corner can also meet it, so the event alone does not establish physical entrapment. A run that
+only has to decide whether a jet is born, such as one of a bisection between jet and pocket, can
+also stop once the jet is unambiguous (``jet-confirmed``): at the first step, at least
+``post_birth_steps`` accepted steps after birth, at which the jet stands more than
+``post_birth_aspect r_j`` above its base. The default ``post_birth_aspect`` of ``inf`` never
+stops on the jet. Like the other stops, it is checked after the geometry stops. A surface
 that has already crossed itself is no end state: measuring it raises
 :class:`~selfcontact.InterfaceSelfIntersection`, and so does a remesh handed one (``mesh.py``).
 
@@ -171,6 +176,8 @@ class CollapseSettings:
     fold_stop_elements: float = 3.0  # in local element lengths at the fold
     neck_guard: float = 1e-2  # a Newton failure with a neck narrower than this is a pinch-off
     ell_guard: float = 1e-3  # and with a local scale below this the approach to the singularity
+    post_birth_aspect: float = math.inf  # stop once the born jet stands this many r_j above its base
+    post_birth_steps: int = 1  # accepted steps after birth before post_birth_aspect can stop a run
     snapshot_dt: float = 0.25
     snapshot_decades: float = 0.05
     probe_points: int = 16
@@ -196,6 +203,12 @@ class CollapseSettings:
             raise ValueError("fold stop limits must be non-negative")
         if self.fold_stop == 0 and self.fold_stop_elements == 0:
             raise ValueError("at least one fold stop limit must be positive")
+        aspect = self.post_birth_aspect
+        if isinstance(aspect, bool) or not isinstance(aspect, (int, float)) or not aspect > 0:
+            raise ValueError("post_birth_aspect must be positive (inf: no post-birth stop)")
+        steps = self.post_birth_steps
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+            raise ValueError("post_birth_steps must be an integer of at least one")
 
     @classmethod
     def from_dict(cls, data: dict, *, t_end: float, dt_max: float) -> "CollapseSettings":
@@ -308,6 +321,7 @@ class _State:
     snapshots: int = 0
     cavity_seen: bool = False
     born: bool = False
+    born_step: int = -1  # step at which the standing jet was born
     cycle: int = 0
     ell_prev: float = math.nan
     t_prev: float = math.nan
@@ -577,7 +591,7 @@ class CollapseDriver:
     # bookkeeping added later: older dumps lack it and restore to the defaults of a fresh run
     _OPTIONAL_FIELDS = ("apex_samples", "jet_samples", "apex_t0", "apex_alpha", "apex_t_est",
                         "ell_prev", "t_prev", "last_remesh_step", "last_singular_t",
-                        "refine_blocked_until", "coarsen_held_until")
+                        "refine_blocked_until", "coarsen_held_until", "born_step")
 
     def save_state(self):
         """Dump the pyoomph state and the driver state; keep the last ``state_keep`` dumps."""
@@ -643,6 +657,19 @@ class CollapseDriver:
                     "fold_gap": m["fold_gap"], "fold_r": m["fold_r"], "fold_z": m["fold_z"],
                     "fold_arc": m["fold_arc"], "fold_h_elem": m["fold_h_elem"],
                     "fold_limit": m["fold_limit"]}
+        return None
+
+    def _jet_stop(self, m):
+        """Stop once the born jet is unambiguous: at least ``post_birth_steps`` accepted steps after
+        its birth, it stands more than ``post_birth_aspect r_j`` above its base."""
+        st, s = self.state, self.s
+        if not st.born or st.step - st.born_step < s.post_birth_steps:
+            return None
+        rise = m["z_axis"] - m["z_b"]
+        if m["r_j"] > 0.0 and rise > s.post_birth_aspect * m["r_j"]:
+            return {"reason": "jet-confirmed", "trigger": "jet-aspect", "rise": rise,
+                    "r_j": m["r_j"], "aspect": rise / m["r_j"], "born_step": st.born_step,
+                    "post_birth_aspect": s.post_birth_aspect}
         return None
 
     def run(self, newton_tolerance: float) -> dict:
@@ -716,6 +743,7 @@ class CollapseDriver:
                 self._maybe_snapshot(m, "cavity")
             if m["jet_born"] and not st.born:
                 st.born = True
+                st.born_step = st.step
                 self._event("jet-born", m, cycle=st.cycle, max_curvature=st.max_curvature,
                             max_curvature_time=st.max_curvature_time, t0_apex=st.apex_t0,
                             alpha_apex=st.apex_alpha, t_apex_est=st.apex_t_est)
@@ -730,6 +758,10 @@ class CollapseDriver:
             geometry_stop = self._geometry_stop(m)
             if geometry_stop is not None:
                 stop = geometry_stop
+                break
+            jet_stop = self._jet_stop(m)
+            if jet_stop is not None:
+                stop = jet_stop
                 break
             self._maybe_snapshot(m)
             if self._maybe_remesh(m):
