@@ -1350,3 +1350,53 @@ def test_restore_keeps_the_birth_step(tmp_path):
     again.close()
     assert result["stop"]["reason"] == "jet-confirmed"
     assert result["stop"]["born_step"] == born["step"]
+
+
+def _born_dump(step=50, time=0.55, **extra):
+    return {"step": step, "cycle": 0, "cavity_seen": True, "born": True, "neck_seen": False,
+            "max_curvature": 2.0, "max_curvature_time": 0.4, "snapshots": 3, "time": time,
+            "remesh_count": 0, "focus": None, "dt_prev": 0.01, **extra}
+
+
+def _restored(tmp_path, meta, **kw):
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, _settings(t_end=0.7, dt_max=0.01, **kw), tmp_path, _jet_rising_after)
+    drv.restore(meta)
+    result = drv.run(1e-9)
+    drv.close()
+    return result
+
+
+def test_a_restart_that_already_qualifies_stops_before_advancing(tmp_path):
+    # aspect 0.61 at t = 0.55, forty steps after birth: no further step is taken
+    result = _restored(tmp_path, _born_dump(born_step=10), post_birth_aspect=0.5)
+    assert result["stop"]["reason"] == "jet-confirmed" and result["steps"] == 50
+
+
+def test_a_dump_without_the_birth_step_waits_from_the_restart(tmp_path):
+    result = _restored(tmp_path, _born_dump(), post_birth_aspect=0.5, post_birth_steps=3)
+    assert result["stop"]["reason"] == "jet-confirmed"
+    assert result["steps"] == 53 and result["stop"]["born_step"] == 50
+
+
+def test_jet_stop_is_checked_after_a_remesh(tmp_path):
+    # the jet stands still at aspect 0.11 until a rebuild at t >= 0.53 re-reads it at 0.2
+    pb = FakeProblem()
+
+    def fields(t):
+        if t < 0.5:
+            return {"axis_curvature": 2.0}
+        rebuilt = pb.remesh_count > 0
+        return {"jet_born": True, "axis_lowest": False, "axis_curvature": -1.0, "r_j": 0.1,
+                "z_b": 0.0, "z_axis": 0.02 if rebuilt else 0.011,
+                "h_near": 0.1 if t >= 0.53 and not rebuilt else 0.05}
+
+    drv = PrescribedDriver(pb, _settings(t_end=0.7, dt_max=0.01, post_birth_aspect=0.15), tmp_path,
+                           fields)
+    result = drv.run(1e-9)
+    drv.close()
+    events = _read_events(tmp_path)
+    (remesh,) = [e for e in events if e["event"] == "remesh"]
+    assert result["stop"]["reason"] == "jet-confirmed"
+    assert result["steps"] == remesh["step"] and result["stop"]["aspect"] == pytest.approx(0.2)

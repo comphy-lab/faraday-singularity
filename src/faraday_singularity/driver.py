@@ -54,7 +54,7 @@ only has to decide whether a jet is born, such as one of a bisection between jet
 also stop once the jet is unambiguous (``jet-confirmed``): at the first step, at least
 ``post_birth_steps`` accepted steps after birth, at which the jet stands more than
 ``post_birth_aspect r_j`` above its base. The default ``post_birth_aspect`` of ``inf`` never
-stops on the jet. Like the other stops, it is checked after the geometry stops. A surface
+stops on the jet. It is checked wherever the geometry stops are, and after them. A surface
 that has already crossed itself is no end state: measuring it raises
 :class:`~selfcontact.InterfaceSelfIntersection`, and so does a remesh handed one (``mesh.py``).
 
@@ -620,6 +620,8 @@ class CollapseDriver:
         for k in self._OPTIONAL_FIELDS:
             if k in meta:
                 setattr(st, k, meta[k])
+        if st.born and "born_step" not in meta:  # older dump: wait post_birth_steps from here
+            st.born_step = st.step
         reset = meta.get("max_curvature_kind") != MAX_CURVATURE_KIND
         if reset:  # possibly |z''(0)| of a bump, or of an earlier trough episode
             st.max_curvature, st.max_curvature_time = 0.0, math.nan
@@ -659,6 +661,10 @@ class CollapseDriver:
                     "fold_limit": m["fold_limit"]}
         return None
 
+    def _stop(self, m):
+        """The stop the measured state calls for, if any: a geometry stop before the jet stop."""
+        return self._geometry_stop(m) or self._jet_stop(m)
+
     def _jet_stop(self, m):
         """Stop once the born jet is unambiguous: at least ``post_birth_steps`` accepted steps after
         its birth, it stands more than ``post_birth_aspect r_j`` above its base."""
@@ -680,9 +686,9 @@ class CollapseDriver:
         self._snapshot(m, "start")
         stop = {"reason": "end-time"}
         while True:
-            geometry_stop = self._geometry_stop(m)
-            if geometry_stop is not None:
-                stop = geometry_stop
+            found = self._stop(m)
+            if found is not None:
+                stop = found
                 break
             t = self._t()
             if s.t_end - t <= max(1e-14, 8 * math.ulp(s.t_end)):
@@ -755,20 +761,16 @@ class CollapseDriver:
             if math.isfinite(m["r_neck"]) and not st.neck_seen:
                 st.neck_seen = True
                 self._event("neck", m, r_neck=m["r_neck"], z_neck=m["z_neck"])
-            geometry_stop = self._geometry_stop(m)
-            if geometry_stop is not None:
-                stop = geometry_stop
-                break
-            jet_stop = self._jet_stop(m)
-            if jet_stop is not None:
-                stop = jet_stop
+            found = self._stop(m)
+            if found is not None:
+                stop = found
                 break
             self._maybe_snapshot(m)
             if self._maybe_remesh(m):
                 m = self.measure()
-                geometry_stop = self._geometry_stop(m)
-                if geometry_stop is not None:
-                    stop = geometry_stop
+                found = self._stop(m)
+                if found is not None:
+                    stop = found
                     break
             if self._t() - st.last_state_t >= s.state_dt:
                 self.save_state()
