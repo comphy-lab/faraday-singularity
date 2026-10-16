@@ -143,8 +143,10 @@ remesh check before its first step, as the run that wrote it did after keeping i
 from the same mesh (the restart's ``start`` profile stands for the snapshot). Rotating dumps are
 written at the end of a step, and a restart from one steps at once. Kept dumps, and every dump of a
 run that keeps landing states, also hold the latest ``NECK_SAMPLES`` samples ``(t, r_n)`` of the
-closing neck, from which :meth:`CollapseDriver.pinch_time` fits the pinch time ``t_p`` that the cut
-records.
+closing neck, from which :meth:`CollapseDriver.pinch_time` fits the pinch time ``t_p`` (a power law
+``r_n = A (t_p - t)^alpha`` with a free exponent, as for the singular time). The fit, with its
+window and exponent, is recorded in the landing and stop dumps (``pinch``) and in the ``landing``
+event, and the cut records it again in its ``precut`` dump and its record.
 
 After a cut (:meth:`CollapseDriver.reset_after_cut`) the measured surface is the open chain, whose
 tip on the axis is a fresh cavity bottom: the scale, step, neck and singular-time bookkeeping
@@ -835,9 +837,11 @@ class CollapseDriver:
                 self._event("landing-missed", m, **info, reason="neck-passed",
                             max_landing_ratio=MAX_LANDING_RATIO)
                 continue
+            pinch = self.pinch_time()
             path = self.keep_state(self.outdir / "states" / f"landing_{delta:.6g}.dump",
-                                   landing=info)
-            self._event("landing", m, **info, path=str(path))
+                                   landing=info, pinch=pinch)
+            self._event("landing", m, **info, path=str(path), t_p=pinch["t_p"],
+                        alpha_p=pinch["alpha"])
 
     def _landings_left(self, m: dict, stop: dict):
         """At the stop: ``landing-missed`` (reason ``stopped-first``) for each cut radius the run
@@ -1009,7 +1013,8 @@ class CollapseDriver:
         if self.keep_stop_state and stop.get("trigger") == "neck-radius":
             # the measured state of an accepted step: a landing state for a reconnection
             stop["kept_state"] = str(self.keep_state(
-                self.outdir / "states" / f"stop_{st.step:08d}.dump", stop=stop))
+                self.outdir / "states" / f"stop_{st.step:08d}.dump", stop=stop,
+                pinch=self.pinch_time()))
         self._landings_left(m, stop)
         self._event("stop", m, **stop)
         self._snapshot(m, "stop")

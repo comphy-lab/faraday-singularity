@@ -528,7 +528,8 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
     local = {"radius": local_radius, "centre": [0.0, z_n], "samples": LOCAL_SAMPLES,
              "kinetic_energy": {"before": local_kinetic_energy(pb, z_n, local_radius)}}
     record["local_budgets"] = local
-    record["precut_state"] = _keep(pb, driver, out, f"precut_{tag}", {"cut_stage": "precut"})
+    record["precut_state"] = _keep(pb, driver, out, f"precut_{tag}",
+                                   {"cut_stage": "precut", "pinch": pinch})
 
     # 2. plan
     stage("plan")

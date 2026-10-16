@@ -1616,6 +1616,9 @@ def test_restart_from_a_stop_state_with_a_lower_neck_stop_matches_a_run_with_it(
     stop = Path(out["stop"]["kept_state"])
     meta = json.loads(stop.with_suffix(".json").read_text())
     assert meta["resume_at"] == "remesh-check" and meta["neck_samples"][-1][0] == meta["time"]
+    # the stop state records the pinch-time fit of its neck samples (a linearly closing neck here)
+    assert set(meta["pinch"]) >= {"t_p", "alpha", "t_window", "r_window", "samples"}
+    assert meta["pinch"]["t_window"][1] == meta["time"]
     ref = PrescribedDriver(FakeProblem(), lo, tmp_path / "ref", fields)
     ref.run(1e-9)
     ref.close()
@@ -1664,6 +1667,10 @@ def test_pinch_time_from_the_neck_samples_of_a_landing_state(tmp_path):
     assert fit["t_window"][1] == landing["time"] and fit["r_window"][1] == landing["r_neck"]
     assert fit["r_window"][0] <= PINCH_FIT_SPAN * fit["r_window"][1] and fit["samples"] >= 10
     assert fit["samples"] < NECK_SAMPLES  # the window, not the whole series
+    # the landing state and its event record that fit
+    assert meta["pinch"] == {**fit, "t_window": list(fit["t_window"]),
+                             "r_window": list(fit["r_window"])}
+    assert landing["t_p"] == fit["t_p"] and landing["alpha_p"] == fit["alpha"]
     # no neck samples: no pinch time
     fresh = PrescribedDriver(FakeProblem(), s, tmp_path / "c", fields)
     assert math.isnan(fresh.pinch_time()["t_p"])

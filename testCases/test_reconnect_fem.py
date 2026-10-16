@@ -783,6 +783,8 @@ def test_prototype_cuts_a_landing_state_and_steps(landing_run, tmp_path):
     for name in (f"precut_{cut['delta']:.6g}", f"postcut_{cut['delta']:.6g}"):
         assert (out / "states" / f"{name}.dump").is_file()
         assert (out / "states" / f"{name}.json").is_file()
+    precut = json.loads((out / "states" / f"precut_{cut['delta']:.6g}.json").read_text())
+    assert precut["pinch"] == pinch and precut["cut_stage"] == "precut"
     events = [json.loads(x) for x in (out / "events.jsonl").read_text().splitlines()]
     assert [e["event"] for e in events[:2]] == ["restart", "cut"]
     assert events[1]["t_pinch"] == pinch["t_p"] and events[1]["in_cut_radii"] == cut["in_cut_radii"]
