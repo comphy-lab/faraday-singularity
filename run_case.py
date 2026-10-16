@@ -27,11 +27,15 @@ the landing state of a reconnection. ``landing``, a list of cut radii, keeps for
 (``driver.CollapseDriver``); a radius the run cannot reach before its neck-radius stop, below 1.05
 times ``max(neck_stop, neck_stop_elements h_floor)``, is refused before any output. A ``reconnect``
 block (``reconnect.ReconnectSettings``) builds the problem with the reconnection handler and the
-pressure-impulse projection, both inert during the run, but compiled into it: the run is then not
-bit for bit that of the ordinary case (it departs at round-off, which the step control carries on).
-The cut itself is made from a landing state by ``simulationCases/reconnect_prototype.py``, which
-builds its own problem with the reconnect block. Without these keys the problem, the settings and
-every output are those of an ordinary case.
+pressure-impulse projection, both inert until a cut, but compiled into it: the computed trajectory
+then differs from that of the ordinary case at round-off (deterministically; from the third step,
+by about 1e-14 relative, in the tests), and the step control carries the difference on. Two runs of
+one case in fresh processes also differ by about 1e-14 unless MKL, whose threaded solve is the
+source, runs on one thread (``MKL_NUM_THREADS=1``; ``OMP_NUM_THREADS`` alone does not do it); with
+it they have agreed to the byte. The cut itself is made from a landing state by
+``simulationCases/reconnect_prototype.py``, which builds its own problem with the reconnect block.
+Without these keys the problem, the settings and every output are those of an ordinary case: the
+tests run the driver of this commit against that of commit ``9e0d8a1`` and compare every output.
 
 A restart (``--restart-from``) continues the run of the same case. It may also continue it under a
 derived case, one that differs from the parent's only in ``case_id``, the description
@@ -110,9 +114,10 @@ def case_has_field(case: dict, field: str) -> bool:
 
 
 # Keys a case derived from a parent run may change at a restart: the name, a description the runner
-# does not read, and the collapse keys that decide what the run keeps and where it stops. Not
-# collapse.reconnect: it compiles the projection and the handler into the problem, whose
-# trajectory then departs from the ordinary one at round-off.
+# does not read, and the collapse keys that decide what the run keeps and where it stops, none of
+# which changes the computed trajectory. Not collapse.reconnect: it compiles the projection and the
+# handler into the problem, whose trajectory then departs from the ordinary one at round-off, from
+# the third step in the tests (a cut, which changes it outright, is another matter).
 DERIVED_KEYS = ("case_id", "completion.value", "collapse.keep_stop_state", "collapse.landing",
                 "collapse.neck_stop")
 # The reconnection prototype builds its own problem with the reconnect block and cuts the state it

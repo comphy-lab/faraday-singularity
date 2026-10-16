@@ -14,7 +14,8 @@
 * the prototype entry point on a landing state of that cavity, with the lineage of its parent run,
   the pinch time fitted to the neck samples of the landing state, and a failing cut;
 * the ordinary path: meshes as with the mesh class of commit 9e0d8a1 (to the byte), steps
-  (to round-off), and dumps that load across the two kinds of problem.
+  (to round-off), dumps that load across the two kinds of problem, and a short run of the collapse
+  driver against that of 9e0d8a1, every output compared (to round-off, dump keys exactly).
 
 Each problem compiles in seconds; the module takes about a minute.
 """
@@ -24,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 import types
@@ -605,7 +607,9 @@ def test_steps_after_the_cut_and_restart(neck_cut):
     meta = neck_cut["postcut_meta"]
     assert meta["cut_stage"] == "postcut" and meta["cut"]["t_cut"] == neck_cut["record"]["t_cut"]
     assert a.shape == b.shape
-    assert np.max(np.abs(a - b)) <= 1e-10 * np.max(np.abs(a))  # not bit for bit: the .msh text
+    # a reload is not bit for bit here (the mesh is read back from its stored file, and MKL runs
+    # threaded); 1e-10 bounds what it changes
+    assert np.max(np.abs(a - b)) <= 1e-10 * np.max(np.abs(a))
     assert neck_cut["chains_after"] == 2
     assert neck_cut["bridge_after"] > neck_cut["bridge0"]  # the caps move apart
     assert neck_cut["axis_state"] == neck_cut["open_tip"]
@@ -881,6 +885,111 @@ def _reference_mesh_class():
     return type("FaradayCylinderMesh", (base,), {"__init__": __init__})
 
 
+DRIVER_RUN = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from faraday_singularity.driver import CollapseDriver, CollapseSettings
+from faraday_singularity.mesh import MeshSettings
+from faraday_singularity.parameters import CaseParameters, nondimensionalise
+from faraday_singularity.problem import FaradayProblem
+
+out = Path(sys.argv[2])
+physics = json.loads(sys.argv[3])
+nd = nondimensionalise(CaseParameters.from_dict(physics))
+mesh = MeshSettings(h_interface=0.05, h_axis=0.05, h_max=0.4, grading=0.3, interface_points=201)
+# a refine ratio below one rebuilds the focus every few steps, so that the run goes through the
+# driver's remesh path too; every step is dumped
+settings = CollapseSettings(t_end=1.0, dt_max=0.02, max_steps=6, refine_ratio=0.5,
+                            remesh_backoff=2, state_dt=0.0, state_keep=3, snapshot_dt=0.03)
+pb = FaradayProblem(nd, mesh=mesh)
+pb.set_output_directory(str(out))
+with pb:
+    pb.initialise()
+    driver = CollapseDriver(pb, settings, out)
+    pb.start_diagnostics(out / "diagnostics.txt")
+    result = driver.run(1e-8)
+    driver.close()
+    pb.close_diagnostics()
+(out / "result.json").write_text(json.dumps(result))
+"""
+
+
+def _close(a, b, path=""):
+    """``a`` and ``b`` equal in structure and keys, their numbers to round-off."""
+    if isinstance(a, dict):
+        assert isinstance(b, dict) and set(a) == set(b), (path, sorted(set(a) ^ set(b)))
+        for k in a:
+            _close(a[k], b[k], f"{path}.{k}")
+    elif isinstance(a, list):
+        assert isinstance(b, list) and len(a) == len(b), path
+        for k, (x, y) in enumerate(zip(a, b)):
+            _close(x, y, f"{path}[{k}]")
+    elif isinstance(a, float) and not isinstance(a, bool):
+        assert isinstance(b, (int, float)), path
+        assert (math.isnan(a) and math.isnan(b)) or a == pytest.approx(b, rel=1e-10, abs=1e-13), \
+            (path, a, b)
+    else:
+        assert a == b, (path, a, b)
+
+
+def _table(path: Path):
+    lines = path.read_text().splitlines()
+    return lines[0], np.loadtxt(path, ndmin=2)
+
+
+def test_the_ordinary_driver_runs_as_at_9e0d8a1(tmp_path):
+    """The collapse driver and problem of this commit, run on a small ordinary case (no reconnection
+    key) for a few steps with rebuilds and dumps, against those of commit 9e0d8a1, each in a fresh
+    process with MKL single-threaded: the same output files, columns, events and dump keys, and the
+    same numbers to round-off (the wall time aside). With MKL on one thread they have agreed to the
+    byte; the test asks for round-off only."""
+    ref = tmp_path / "ref"
+    try:
+        archive = subprocess.run(["git", "-C", str(ROOT), "archive", "9e0d8a1", "src"],
+                                 capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("commit 9e0d8a1 is not available")
+    ref.mkdir()
+    subprocess.run(["tar", "-x", "-C", str(ref)], input=archive, check=True)
+    physics = dict(PHYSICS, forcing={"Gamma": 0.3, "detuning": 1.0, "phase": 0.0},
+                   initial={"amplitude": 0.2}, container={"mode": 1, "depth": 2.0})
+    env = dict(os.environ, MKL_NUM_THREADS="1", OMP_NUM_THREADS="1")
+    runs = {}
+    for name, src in (("9e0d8a1", ref / "src"), ("head", ROOT / "src")):
+        out = tmp_path / name
+        proc = subprocess.run([sys.executable, "-c", DRIVER_RUN, str(src), str(out),
+                               json.dumps(physics)], capture_output=True, text=True, timeout=900,
+                              cwd=tmp_path, env=env, check=False)
+        assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+        runs[name] = out
+    a, b = runs["9e0d8a1"], runs["head"]
+    names = {f.relative_to(a).as_posix() for f in a.rglob("*") if f.is_file()
+             and not f.relative_to(a).parts[0].startswith("_")}
+    assert names == {f.relative_to(b).as_posix() for f in b.rglob("*") if f.is_file()
+                     and not f.relative_to(b).parts[0].startswith("_")}
+    assert (a / "collapse_settings.json").read_text() == (b / "collapse_settings.json").read_text()
+    result = json.loads((a / "result.json").read_text())
+    assert result["steps"] == 6 and result["remesh_count"] >= 2, result
+    _close(result, json.loads((b / "result.json").read_text()), "result")
+    head_a, rows_a = _table(a / "collapse.txt")
+    head_b, rows_b = _table(b / "collapse.txt")
+    assert head_a == head_b
+    wall = head_a[2:].split("\t").index("wall")
+    keep = [k for k in range(rows_a.shape[1]) if k != wall]
+    assert np.allclose(rows_a[:, keep], rows_b[:, keep], rtol=1e-10, atol=1e-13, equal_nan=True)
+    events = [[json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+              for run in (a, b)]
+    assert [e["event"] for e in events[0]] == [e["event"] for e in events[1]]
+    for e, f in zip(*events):
+        _close(e, f, e["event"])
+    for name in sorted(n for n in names if n.startswith("states/") and n.endswith(".json")):
+        _close(json.loads((a / name).read_text()), json.loads((b / name).read_text()), name)
+    for name in sorted(n for n in names if n.startswith("profiles/") or n == "diagnostics.txt"):
+        assert (a / name).read_text().splitlines()[0] == (b / name).read_text().splitlines()[0]
+        assert np.allclose(np.loadtxt(a / name), np.loadtxt(b / name), rtol=1e-10, atol=1e-13), name
+
+
 def test_ordinary_meshes_steps_and_dumps_are_unchanged(tmp_path):
     ref_cls = _reference_mesh_class()
     physics = dict(PHYSICS, forcing={"Gamma": 0.3, "detuning": 1.0, "phase": 0.0},
@@ -910,13 +1019,14 @@ def test_ordinary_meshes_steps_and_dumps_are_unchanged(tmp_path):
             pb.save_state(str(out / "state.dump"), quiet=True)
             runs[name] = {"first": first, "remeshed": remeshed.read_bytes(), "vec": vec,
                           "dump": out / "state.dump"}
-    # The meshes are the same to the byte. The steps are compared to 1e-12 only: in one process
-    # the problems built after the first already differ from it at about 1e-14. Single-threaded
-    # and each in a fresh process, the ordinary problem reproduces the reference bit for bit; the
-    # reconnection-enabled one, compiled with its extra residual and observables, does not: it
-    # departs at round-off from the third step (about 1e-14 relative after 10 fixed steps of this
-    # case), which the step control of the collapse driver carries on. This is why a restart may
-    # not add, drop or change a reconnect block (run_case.DERIVED_KEYS).
+    # The meshes are the same to the byte. The steps are compared to 1e-12 only: unless MKL runs
+    # on one thread (MKL_NUM_THREADS=1), even two runs of one problem differ at about 1e-14, in
+    # one process or in fresh ones. With MKL on one thread the ordinary problem reproduces the
+    # reference to the byte; the reconnection-enabled one, compiled with its extra residual and
+    # observables, does not: it departs at round-off from the third step (about 1e-14 relative
+    # after 10 fixed steps of this case), deterministically, and the step control of the collapse
+    # driver carries that on. This is why a restart may not add, drop or change a reconnect block
+    # (run_case.DERIVED_KEYS) unless it cuts.
     scale = float(np.max(np.abs(runs["ref"]["vec"])))
     for name in ("new", "recon"):
         assert runs[name]["first"] == runs["ref"]["first"]
