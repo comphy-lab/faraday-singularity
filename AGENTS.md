@@ -81,7 +81,11 @@ add a second top-level `cases/` tree.
   floor and the step limit, and, only when a case sets a finite `post_birth_aspect`, once the born
   jet is unambiguous (`jet-confirmed`); such a run records jet birth but not jet formation. A fold-gap stop can also truncate a static sharp corner; it is not
   proof of entrapment or a singularity. `InterfaceSelfIntersection` is a failed run. Check stop
-  criteria before advancing and after every remesh, before writing a state dump.
+  criteria before advancing and after every remesh, before writing a state dump; after a cut also
+  before every rebuild, the driver's rebuilds for distortion included, so that no rebuild meets a
+  spline through the nodes that contacts itself (that is the clean `self-contact-approach` stop
+  with trigger `spline-contact`; its `contact` says `fold`, a fold of the resolved surface, or
+  `kink`, at the scale of the mesh).
 - Reconnection through a neck pinch-off is made by restarts of the production runner
   (`simulationCases/run_faraday.py`; exact commands in `README.md`), never by a script of its own:
   (1) landing states, from a restart of an existing run under a derived case that adds
@@ -110,7 +114,12 @@ add a second top-level `cases/` tree.
   on slender threads at `delta/r_n = 1.05` a bridge of 13-14.5 `delta` and 55-58 `delta^3` of
   removed gas), so a `delta` study needs a sensitivity to that window; the tips, the bridge and the
   focus of the cut's remesh are sized in cut radii (`tip_size`, `bridge_size`, `focus_size`,
-  `focus_radius`), not by the landing run's focus; the velocity is carried across and projected by a
+  `focus_radius`), not by the landing run's focus, except that the bubble's bottom, the landing's
+  cavity bottom with its jet, keeps the landing focus where that is finer (`focus.kept`); gmsh's
+  sizing from curvature is off after a cut by default (`curvature_sizing` 0): it reads the curvature
+  of the spline through the nodes, which a jump in node spacing makes spurious, and refines there
+  ungraded, which widens the jump rebuild after rebuild until the spline loops; the velocity is
+  carried across and projected by a
   pressure impulse, refused unless the projection converges and the discrete energy identity holds
   (`strong_divergence_L2` is an order-`h` diagnostic, not a test); the bubble keeps the passive
   constant gas pressure (the zero-density limit). A refused or failed cut, whatever failed in it,
@@ -122,10 +131,17 @@ add a second top-level `cases/` tree.
   mirrored; `r_j`, `z_b`, `Q_j`, `V_j`, `We_j` and `jet_born` of all three tips in `chains.txt`,
   `Q_j` and `V_j` positive along each jet), the local scale is the smallest over both chains (on
   the bubble its jets, neck and length, not the radii of curvature of its tips, which depend on the
-  mesh at a chain's end), the remesh rule reads the spacing away from the tips and the bridge, whose
-  cut sizing every later mesh keeps, on both chains, the coarser counting, and a coarsening that
-  does not take effect waits `remesh_backoff` steps; the stops before a second change of topology
-  apply on both chains (`reconnect.post_cut_stops`) and at `tau_end`, the step also follows every
+  mesh at a chain's end), the focus is floored at the cut's focus size (not at the landing run's
+  `h_floor`, which is no length of the cut) and the mesh follows each feature of both chains in its
+  own region (`reconnect.feature_regions`): the tips the cut made at the cut's focus size within
+  `focus_radius` cut radii and over their jets, the bubble's bottom at its jet's size but never
+  coarser than at the landing, each neck at its own scale; a rebuild refines or coarsens each region
+  by the bounded factors when its longest element exceeds `refine_ratio`, or its shortest lies
+  below `coarsen_ratio`, times its target, a rebuild that changed none of the regions that asked
+  waits `remesh_backoff` steps, and a rebuild for distortion keeps every region's size
+  (`h_<tip>`, `size_<tip>` in `chains.txt`, the regions in the `remesh` events); the stops before
+  a second change of topology apply on both chains (`reconnect.post_cut_stops`, a spline that
+  contacts itself included) and at `tau_end`, the step also follows every
   node of both chains (`reconnect.courant_limit`) and the capillary time of the sharpest tip, no
   Newton failure ends the run cleanly, rotating dumps follow at least each time `tau` doubles and
   the end state is dumped, and every output carries `tau = t - t_cut` and `tau_p = t - t_p`
@@ -147,7 +163,9 @@ add a second top-level `cases/` tree.
   first refinement, a cut, a restored dump) the driver turns `do_call_remeshing_when_necessary`
   off, so pyoomph only flags it (`FaradayProblem.take_distortion_flags`), and rebuilds after the
   step, before measuring it, at focus size `min(focus size, h_near)` (never coarser near the
-  collapse; not floored at `h_floor`) within the current `focus_radius`, the grading kept: one
+  collapse; not floored at `h_floor`) within the current `focus_radius` (after a cut: each
+  feature's region at its current place and the size it has, and only once the stops of the step's
+  state have been checked), the grading kept: one
   rebuild per driver step however many sub-steps were flagged, a `remesh` event with `reason`
   `distortion` (trigger, ratio, extremes, focus and `h_near` before and after) and
   `distortion_remeshes` in `run_status.json`. These rebuilds neither start nor end a hold nor count

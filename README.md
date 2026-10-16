@@ -271,7 +271,14 @@ record gives the splice radii, the bridge and the removed gas in cut radii (`in_
 study in `delta` should vary the window too. The mesh of the cut is sized in cut radii, so that the
 cuts of a study are meshed alike: the tips on the axis and the bridge (`tip_size`, `bridge_size`,
 kept for every later remesh) and the focus of the cut's remesh (`focus_size` within
-`focus_radius`), which replaces the focus the landing run left. The liquid velocity is carried
+`focus_radius`), which replaces the focus the landing run left. Only the bubble's bottom, far from
+the cut, keeps the landing focus where that is finer: it is the cavity's bottom of the landing
+state, with its jet, and the cut makes no feature there (`focus.kept` in the record). gmsh's sizing
+from curvature is off after a cut unless `curvature_sizing` asks for it: the caps do not need it
+(an arc of radius at least `delta` meshed at `tip_size` of at most a quarter of `delta` has at
+least 25 elements per turn), and gmsh reads the curvature of the spline through the nodes, which a
+jump in node spacing makes spurious, so that it refines there without grading and widens the jump
+at every rebuild, until the spline crosses itself. The liquid velocity is carried
 across and projected onto a weakly divergence-free field by a pressure impulse that vanishes on
 the free surfaces; the cut is refused unless the projection converges and the discrete energy
 identity holds (the pointwise divergence of the velocity, `strong_divergence_L2`, is an order-`h`
@@ -294,19 +301,31 @@ rising from a cavity: for each of the three tips `chains.txt` holds the jet-base
 the flux through the base, the mean jet speed and `We_j` (`r_j_<tip>`, `z_b_<tip>`, `Q_j_<tip>`,
 `V_j_<tip>`, `We_j_<tip>` and `jet_born_<tip>`, with `<tip>` one of `cavity_tip`, `bubble_bottom`
 and `bubble_top`, and `Q_j` and `V_j` positive along each jet), so that the jets of a study in
-`delta` can be compared. The local scale that sets the step and the focus is the smallest over both
-chains (on the bubble its jets, its neck and its length, `ell_bubble`; the radii of curvature of its
-tips, which depend on the mesh at the end of a chain, bound the step instead), and the spacing that
-the remesh rule reads near the collapse is the coarser of the two chains', so that a jet on either
-chain is resolved. The driver in addition stops before a second change of topology: the bridge
-closing, the chains approaching each other, the bubble's two tips meeting, a
-new neck narrower than `delta` on either chain, a closing fold on the bubble, the bubble draining
-away, or `tau_end` after the cut. The step also follows every node of both chains (a Courant limit
-`courant h/|u|` over each node's element length), the capillary time of the sharpest of the three
-tips on the axis and the cut's `dt_growth`. The mesh keeps the cut's sizing at the tips and along
-the bridge, so the focus near the collapse is set from the spacing away from them, and a rebuild
-that cannot coarsen the mesh waits before the next, as one that cannot refine it does. After a cut,
-no Newton failure ends a run cleanly.
+`delta` can be compared. The local scale that sets the step is the smallest over both chains (on
+the bubble its jets, its neck and its length, `ell_bubble`; the radii of curvature of its tips,
+which depend on the mesh at the end of a chain, bound the step instead). The mesh follows each
+feature of both chains in a region of its own, so that every feature resolved before the cut
+stays resolved after it: the two tips the cut made, the cavity's and the bubble's top, are meshed
+at the cut's focus size within `focus_radius` cut radii of the tip and over the jet on it, neither
+finer (the focus after a cut is floored at the cut's focus size, not at the `h_floor` of the run
+that wrote the landing state) nor coarser; the bubble's bottom at the size its jet asks for, but
+never coarser than at the landing; each neck at its own scale. A rebuild refines or coarsens a
+region by bounded factors when its longest element exceeds `refine_ratio`, or its shortest lies
+below `coarsen_ratio`, times its target, and a rebuild that changed none of the regions that asked
+for it waits before the next; a rebuild for element distortion keeps every region's size.
+`chains.txt` gives at each tip the longest element of its region and the size the mesh has there
+(`h_<tip>`, `size_<tip>`), and the `remesh` events every region. The driver in addition stops
+before a second change of topology: the bridge closing, the chains approaching each other, the
+bubble's two tips meeting, a new neck narrower than `delta` on either chain, a closing fold on the
+bubble, a spline through the nodes of either chain that contacts itself (`self-contact-approach`
+with `trigger` `spline-contact`), the bubble draining away, or `tau_end` after the cut. These stops
+are checked before every rebuild, those for element distortion included, with the rebuild's own
+test of the spline, so that no rebuild meets a self-intersecting spline; a self-contact stop says
+whether its two sides lie at least four elements apart along the surface, a fold of the resolved
+surface (`contact` `fold`), or closer, a kink at the scale of the mesh (`kink`). The step also
+follows every node of both chains (a Courant limit `courant h/|u|` over each node's element
+length), the capillary time of the sharpest of the three tips on the axis and the cut's
+`dt_growth`. After a cut, no Newton failure ends a run cleanly.
 Every output after the cut carries the time after the cut `tau = t - t_cut` and after the pinch
 `tau_p = t - t_p`: the columns `tau` and `tau_p` of `collapse.txt`, `chains.txt` (both chains per
 step: the three tips with their speeds, radii of curvature and jets, the bridge, the bubble, the
