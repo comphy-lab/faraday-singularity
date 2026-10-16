@@ -274,7 +274,7 @@ def test_restart_admission_cuts_a_landing_state_under_a_case_that_adds_the_recon
 def test_restart_admission_continues_a_post_cut_state_under_the_case_of_its_cut(tmp_path):
     cut_case = json.loads(json.dumps(CASE))
     cut_case["collapse"]["reconnect"] = RECON.to_dict()
-    state, cut_hash = _parent_run(tmp_path, case=cut_case)
+    state, _ = _parent_run(tmp_path, case=cut_case)
     _write_meta(state, cut={"delta": RECON.delta, "settings": RECON.to_dict()})
     path = tmp_path / "parent-case.json"
     record, mode = run_case.restart_admission(state, cut_case, path, RECON)

@@ -1808,7 +1808,7 @@ def test_after_a_cut_outputs_carry_tau_and_tau_p_and_end_at_tau_end(tmp_path):
     assert np.allclose(table["tau"], table["time"]) and np.allclose(table["tau_p"],
                                                                    table["time"] + 1e-6)
     events = _read_events(tmp_path)
-    assert [e["event"] for e in events][0] == "cut" and events[-1]["event"] == "stop"
+    assert events[0]["event"] == "cut" and events[-1]["event"] == "stop"
     assert all("tau" in e and "tau_p" in e for e in events)
     for prof in sorted((tmp_path / "profiles").glob("profile_*[0-9].txt")):
         bubble = prof.with_name(prof.stem + "_bubble.txt")
@@ -1853,7 +1853,7 @@ def test_a_post_cut_state_needs_the_reconnect_settings_of_its_cut(tmp_path):
     drv = _cut_driver(tmp_path / "a", pb, recon, state_dt=0.0)
     drv.run(1e-9)
     drv.close()
-    meta = json.loads(sorted((tmp_path / "a" / "states").glob("state_*.json"))[-1].read_text())
+    meta = json.loads(max((tmp_path / "a" / "states").glob("state_*.json")).read_text())
     assert meta["cut"]["t_cut"] == 0.0 and meta["tau"] == meta["time"]
     with pytest.raises(RuntimeError, match="reconnect settings"):
         CollapseDriver(CutProblem(), _settings(), tmp_path / "b").restore(meta)

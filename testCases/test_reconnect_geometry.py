@@ -380,7 +380,7 @@ def test_a_fold_stop_far_above_delta_finds_no_fold_on_freshly_cut_chains(thread_
 
     for r, z, rn in thread_scan.values():
         delta = 1.05 * rn
-        s, _, _, edits, chains, cg = _cut_on(r, z, delta)
+        s, _, _, _, chains, cg = _cut_on(r, z, delta)
         fold_stop = fold_over_delta * delta
         assert rc.post_cut_stops(chains, cg, s, rc.tip_size(delta, s), fold_stop=fold_stop) is None
         for c in chains:

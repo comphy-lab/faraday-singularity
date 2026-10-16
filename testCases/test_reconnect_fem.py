@@ -1032,7 +1032,7 @@ def test_production_runner_continues_a_post_cut_dump(production_cut, landing_run
             assert np.allclose(b[name][1:], a[name][k + 1:], rtol=1e-8, atol=1e-15)
         else:
             assert np.allclose(b[name], a[name][k:], rtol=1e-8, atol=1e-13, equal_nan=True), name
-    meta = json.loads(sorted((run / "states").glob("state_*.json"))[-1].read_text())
+    meta = json.loads(max((run / "states").glob("state_*.json")).read_text())
     assert meta["cut"]["sizing"] == json.loads(
         (cut_run / "cut_diagnostics.json").read_text())["sizing"]
 
