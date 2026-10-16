@@ -94,8 +94,7 @@ def parse_args(argv=None):
     ap.add_argument("--steps", type=int, default=20)
     for name in ("fill", "restart"):
         ap.add_argument("--" + name)
-    for name in ("dt0", "dt_growth", "courant", "tau_end", "cap_window_factor",
-                 "cap_splice_factor"):
+    for name in ("dt0", "dt_growth", "courant", "tau_end", "cap_window_factor"):
         ap.add_argument("--" + name.replace("_", "-"), dest=name, type=float)
     ap.add_argument("--curvature-sizing", dest="curvature_sizing", type=int)
     ap.add_argument("--check", action="store_true", help="validate the inputs and stop")
@@ -113,7 +112,7 @@ def settings_from(case: dict, args) -> tuple[CollapseSettings, dict, float]:
     collapse = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
     recon = dict(recon or {})
     for name in ("fill", "restart", "dt0", "dt_growth", "courant", "tau_end", "cap_window_factor",
-                 "cap_splice_factor", "curvature_sizing"):
+                 "curvature_sizing"):
         value = getattr(args, name)
         if value is not None:
             recon[name] = value

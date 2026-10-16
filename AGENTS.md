@@ -82,8 +82,10 @@ add a second top-level `cases/` tree.
   planner gives the topology, its caps are always replaced by tangent arcs, the liquid velocity is
   carried across and projected onto a divergence-free field by a pressure impulse (refused unless
   the discrete energy identity holds), and the bubble keeps the passive constant gas pressure (the
-  zero-density limit). The planner's window (`cap_window_factor`), not `cap_splice_factor`,
-  usually sets the cut geometry (`in_cut_radii` in the cut record); a `delta` study needs a
+  zero-density limit). The planner's window (`cap_window_factor`) sets the cut geometry: each
+  splice is the first survivor beyond it with a radius of at least `delta` (`in_cut_radii` in the
+  cut record; on slender threads at `delta/r_n = 1.05` a bridge of 13-14.5 `delta` and 55-58
+  `delta^3` of removed gas); a `delta` study needs a
   sensitivity to it. A reconnected result counts only if the jets at a fixed time after the pinch
   time `t_p` do not depend on `delta`; compare the cuts of a study at one common `t_p` (each cut
   records its own fit and window, `pinch`, and `tau_p` in `steps.txt`), and report the result with

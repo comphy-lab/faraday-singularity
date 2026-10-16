@@ -18,21 +18,25 @@ This module holds what needs no finite-element problem:
   planner (``pyoomph.meshes.axisymm_topology.detect_and_plan``) cuts the right topology, but on a
   slender gas thread its caps fold back on themselves (a needle inside the thread joined to it by a
   backward connector, with wedge angles of a few degrees) and cannot be meshed. Each cap is
-  therefore always rebuilt: from a surviving node of the old interface at radius ``r_s >=
-  cap_splice_factor * delta`` the new cap is the circular arc tangent to the old interface there
-  whose centre lies on the axis, so it meets the axis at a right angle.
+  therefore always rebuilt: from the splice, a surviving node of the old interface, the new cap is
+  the circular arc tangent to the old interface there whose centre lies on the axis, so it meets
+  the axis at a right angle.
 
-  The planner's exclusion window, ``cap_window_factor * delta`` about the event (6 by default),
-  usually sets the cut geometry, not ``cap_splice_factor``: on slender threads (the synthetic one
-  of the tests and the stored necks they can read) the first survivor beyond the window already
-  lies at ``r_s/delta`` of about 1.4-1.5, so a splice factor below that drops no survivor and
-  changes nothing (``replaced_survivors`` 0; the cut record's ``in_cut_radii`` then says
-  ``splice_set_by`` ``planner-window``). There, at ``delta/r_n = 1.05``, the bridge is 13-14.5 delta
-  long and the cut removes 55-58 delta^3 of gas; with a window of 4 about 10-11 delta and 36-39
-  delta^3, with 8 about 17-18 delta and 78-84 delta^3. The liquid that fills the bridge carries the
-  inflow of the neck wall, so the impulse of the projection, and with it the first jet speeds, may
-  depend on ``cap_window_factor``: a study in ``delta`` needs a sensitivity to it (e.g. 4 and 8),
-  as to the fill;
+  The splice is the first survivor beyond the planner's exclusion window, ``cap_window_factor *
+  delta`` about the event (6 by default), whose radius is at least ``delta``. The window sets the
+  cut geometry: on slender threads (the synthetic one of the tests and the stored necks they can
+  read) the first survivor already lies at ``r_s/delta`` of about 1.4-1.5, so the floor at
+  ``delta`` drops no survivor (the cut record's ``in_cut_radii`` says ``splice_set_by``
+  ``planner-window`` for each cap). The floor binds only on a thread that stays narrower than
+  ``delta`` beyond the window (``delta-floor``): it keeps a fresh cap off a thread narrower than
+  the post-cut neck limit ``delta`` (:func:`post_cut_stops`). There is no other splice setting. At
+  ``delta/r_n = 1.05`` on those threads the bridge is 13-14.5 delta long and the cut removes 55-58
+  delta^3 of gas (12.5-17 delta and 50-66 delta^3 over ``delta/r_n`` from 1.03 to 1.1); with a
+  window of 4 about 10-11 delta and 36-39 delta^3, with 8 about 17-18 delta and 78-84 delta^3. The
+  bridge is therefore much longer than the cut radius. The liquid that
+  fills the bridge carries the inflow of the neck wall, so the impulse of the projection, and with
+  it the first jet speeds, may depend on ``cap_window_factor``: a study in ``delta`` needs a
+  sensitivity to it (e.g. 4 and 8), as to the fill;
 * checks of the edited chains (simple, disjoint, monotone cap, no knife-edge angles), the volume
   the cut removes from the gas (:func:`chain_volumes`), and the gas volume within a box around the
   cut (:func:`gas_volume_in_box`), which separates the volume the cut adds to the liquid from the
@@ -86,8 +90,7 @@ class ReconnectSettings:
     max_landing_ratio: float = MAX_LANDING_RATIO  # and at most this, retries of the planner included
     plan_attempts: int = 5  # planner calls, the cut radius growing by retry_factor after a refusal
     retry_factor: float = 1.01
-    cap: str = "arc"
-    cap_splice_factor: float = 1.0  # the arc starts at a surviving node with r >= this * delta
+    cap: str = "arc"  # the splice: the first survivor beyond the window with r >= delta
     cap_min_points: int = 16  # control points of each arc, at least
     cap_tangent_fit: float = 2.0  # the tangent at the splice is fitted over this many r_s of arc
     min_cap_angle: float = 30.0  # smallest interior angle (deg) of a cap polyline
@@ -117,7 +120,7 @@ class ReconnectSettings:
                     or not math.isfinite(value):
                 raise ValueError(f"reconnect.{name} must be positive and finite")
         for name in ("delta", "reservoir_depth", "cap_window_factor", "retry_factor",
-                     "cap_splice_factor", "cap_tangent_fit", "min_cap_angle", "tip_elements",
+                     "cap_tangent_fit", "min_cap_angle", "tip_elements",
                      "tip_floor", "bridge_elements", "projection_tolerance", "energy_tolerance",
                      "dt0", "dt_growth", "courant", "bridge_stop", "bubble_stop"):
             positive(name)
@@ -163,6 +166,9 @@ class ReconnectSettings:
     def from_dict(cls, data: dict) -> "ReconnectSettings":
         if not isinstance(data, dict):
             raise ValueError("collapse.reconnect must be an object")
+        if "cap_splice_factor" in data:
+            raise ValueError("collapse.reconnect.cap_splice_factor was removed: the planner's window "
+                             "(cap_window_factor) sets the splice, with a floor at delta")
         known = set(cls.__dataclass_fields__)
         unknown = sorted(set(data) - known)
         if unknown:
@@ -389,6 +395,7 @@ class CapEdit:
     points: int  # arc points, splice excluded, tip included
     replaced_fresh: int  # planner points dropped
     replaced_survivors: int  # surviving old points dropped between the planner cap and the splice
+    splice_set_by: str  # "planner-window" (first survivor beyond it) or "delta-floor"
     backtrack: float  # fold depth of the planner cap, in delta (0: monotone)
     min_angle: float  # smallest interior angle of the new cap, degrees
     splice_angle: float  # interior angle at the splice, degrees (180: tangent)
@@ -479,8 +486,9 @@ def replace_caps(new_chains, delta: float, settings: ReconnectSettings) -> list[
     ``new_chains`` are the planner's ``NewChain`` objects (``points``, ``sizes``, ``zeta``,
     ``origin``, ``end_types``). For each end on the axis made by the planner (``origin < 0`` there),
     the planner's points are dropped, and so are surviving old points up to the first one, walking
-    away from the tip, whose radius is at least ``cap_splice_factor * delta``: that node is the
-    splice. The arc (:func:`tangent_arc`) is tangent there to the old interface (fitted over
+    away from the tip, whose radius is at least ``delta``: that node is the splice, normally the
+    first survivor beyond the planner's window (``splice_set_by`` ``planner-window``), and further
+    out only where survivors narrower than ``delta`` were dropped (``delta-floor``). The arc (:func:`tangent_arc`) is tangent there to the old interface (fitted over
     ``cap_tangent_fit`` splice radii) and ends on the axis. Its chart (``zeta``) is a strictly
     increasing ramp from the splice to the planner's tip value, so that the plan's chart still
     covers the cap. Point spacing is set so that no cap segment spans more chart than five times the
@@ -507,14 +515,13 @@ def replace_caps(new_chains, delta: float, settings: ReconnectSettings) -> list[
             step = 1 if end == 0 else -1
             k = nf if end == 0 else len(P) - 1 - nf
             dropped = 0
-            while P[k, 0] < s.cap_splice_factor * delta:
+            while P[k, 0] < delta:
                 if O[k] < 0:
                     raise RuntimeError("planner points between survivors next to a fresh cap")
                 k += step
                 dropped += 1
                 if not (0 <= k < len(P)) or dropped > len(P) // 2:
-                    raise RuntimeError("no surviving node reaches the splice radius "
-                                       f"{s.cap_splice_factor * delta:.3g}")
+                    raise RuntimeError(f"no surviving node reaches the splice radius {delta:.3g}")
             if O[k] < 0:
                 raise RuntimeError("the splice of a cap is not an old interface node")
             t = _tangent_towards_tip(P, k, step, s.cap_tangent_fit * float(P[k, 0]))
@@ -563,6 +570,7 @@ def replace_caps(new_chains, delta: float, settings: ReconnectSettings) -> list[
             edits.append(CapEdit(chain=ci, end=end, r_s=float(P[k, 0]), z_s=float(P[k, 1]),
                                  beta_deg=beta, radius=R, z_tip=z_tip, points=len(arc),
                                  replaced_fresh=nf, replaced_survivors=dropped,
+                                 splice_set_by="delta-floor" if dropped else "planner-window",
                                  backtrack=backtrack, min_angle=float(angles.min()),
                                  splice_angle=splice_angle))
     return edits
@@ -594,15 +602,13 @@ def in_cut_radii(edits: Sequence[CapEdit], geometry: CutGeometry, rmin: float,
                  settings: ReconnectSettings) -> dict:
     """The cut geometry in units of the cut radius ``rmin`` and what set its splices.
 
-    ``splice_set_by`` is ``planner-window`` when no cap dropped a surviving node, so that the
-    splices are the first survivors beyond the planner's window (``cap_window_factor``) and
-    ``cap_splice_factor`` changed nothing, and ``splice-factor`` otherwise."""
+    ``splice_set_by`` gives, for each cap, ``planner-window`` when its splice is the first
+    survivor beyond the planner's window (``cap_window_factor``), and ``delta-floor`` when survivors
+    narrower than the cut radius were dropped first."""
     return {"cut_radius": rmin, "cap_window_factor": settings.cap_window_factor,
-            "cap_splice_factor": settings.cap_splice_factor,
             "r_s": [e.r_s / rmin for e in edits], "arc_radius": [e.radius / rmin for e in edits],
             "replaced_survivors": [e.replaced_survivors for e in edits],
-            "splice_set_by": ("planner-window" if all(e.replaced_survivors == 0 for e in edits)
-                              else "splice-factor"),
+            "splice_set_by": [e.splice_set_by for e in edits],
             "bridge": geometry.bridge / rmin, "removed_gas": geometry.removed_gas / rmin**3}
 
 

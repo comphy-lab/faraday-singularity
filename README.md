@@ -198,8 +198,10 @@ times the neck radius; the settings are those of a `collapse.reconnect` block, s
 `src/faraday_singularity/reconnect.py`), projects, and takes a few steps. A cut is refused unless
 `min_landing_ratio <= delta/r_n <= max_landing_ratio` (1.03 and 1.1 by default; the window must
 contain the landing window 1.05 to 1.1): the cut geometry in units of `delta` depends on
-`delta/r_n`. It also depends on the exclusion window of pyoomph's planner (`cap_window_factor`),
-which usually sets where the new caps are spliced; the record gives the splice radii, the bridge
+`delta/r_n`. It also depends on the exclusion window of pyoomph's planner (`cap_window_factor`):
+each new cap is spliced to the first surviving node beyond it whose radius is at least `delta` (on
+slender necks at `delta/r_n = 1.05` the bridge is then 13-14.5 `delta` long and the cut removes
+55-58 `delta^3` of gas); the record gives the splice radii, the bridge
 and the removed gas in cut radii (`in_cut_radii`), and a study in `delta` should vary that window
 too. The prototype writes `cut_diagnostics.json` (the planner attempts, the replaced caps, the
 volumes, the kinetic energy and axial momentum before and after the transfer and the projection,

@@ -49,8 +49,8 @@ identity), with ``outcome`` ``refused`` or ``failed``, the stage reached (``fail
 error. An interruption (``KeyboardInterrupt``, ``SystemExit`` or any other exception that is not an
 ``Exception``) is no outcome of the cut: it propagates unchanged, after the plan is dropped and the
 partial record is written with ``outcome`` ``interrupted``. The record also gives the cut geometry in cut radii (``in_cut_radii``: the splice radii, arc
-radii, bridge and removed gas, the number of survivors each cap dropped, and whether the planner's
-window or ``cap_splice_factor`` set the splices; see ``reconnect.py``).
+radii, bridge and removed gas, the number of survivors each cap dropped, and for each cap whether
+the planner's window or the floor at the cut radius set its splice; see ``reconnect.py``).
 
 A state written after the cut carries its record; :func:`restore_cut` puts the cut's mesh sizing
 back when such a state is loaded. No runner continues from a post-cut state yet: ``run_case.py``
@@ -674,7 +674,7 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
     (out / "cut_diagnostics.json").write_text(json.dumps(pb.cut, indent=1) + "\n")
     g = record["in_cut_radii"]
     log(f"cut at delta {s.delta:.6g} (rmin {rmin:.6g}, r_n {r_n:.6g}): splices at r_s/rmin "
-        f"{', '.join(f'{x:.3g}' for x in g['r_s'])} ({g['splice_set_by']}), bridge "
+        f"{', '.join(f'{x:.3g}' for x in g['r_s'])} ({', '.join(g['splice_set_by'])}), bridge "
         f"{g['bridge']:.3g} rmin, removed gas {g['removed_gas']:.3g} rmin^3, "
         f"delta KE {record['projection'].get('delta_KE')}, t_cut - t_p {pinch['t_cut_minus_t_p']}")
     return pb.cut

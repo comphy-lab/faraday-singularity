@@ -56,6 +56,7 @@ def test_settings_parse_and_round_trip():
                                  {"delta": 1e-4, "min_landing_ratio": 1.07},
                                  {"delta": 1e-4, "max_landing_ratio": 1.08},
                                  {"delta": 1e-4, "volume_correction": True},
+                                 {"delta": 1e-4, "cap_splice_factor": 1.0},  # removed
                                  {"delta": 1e-4, "projection": 1}])
 def test_settings_reject_invalid(bad):
     with pytest.raises(ValueError):
@@ -302,25 +303,27 @@ def _cut_on(r, z, delta):
 def test_planner_caps_fold_on_a_slender_thread_and_replaced_caps_do_not(thread_scan, f):
     """The planner's caps double back by several cut radii yet pass the simplicity check the
     meshing relies on; the replaced caps are monotone, tangent at the splice and without knife
-    edges; the liquid gains about 50-70 delta^3; and the state right after the cut meets no stop."""
+    edges, spliced at the first survivor beyond the planner's window; the bridge is 13-18 delta
+    long and the liquid gains 53-69 delta^3 (delta/r_n from 1.03 to 1.2); and the state right after
+    the cut meets no stop."""
     for r, z, rn in thread_scan.values():
         delta = f * rn
         s, folded, simple, edits, chains, cg = _cut_on(r, z, delta)
         assert all(simple) and len(folded) == 2 and min(folded) > 1.0
         assert len(edits) == 2
         for e in edits:
-            assert e.backtrack > 1.0
+            assert e.backtrack > 1.0 and e.splice_set_by == "planner-window"
             assert e.min_angle >= 30.0 and e.splice_angle > 170.0 and e.r_s >= delta
-        assert cg.bridge > 2 * delta and 40 * delta**3 < cg.removed_gas < 80 * delta**3
+        assert 12 * delta < cg.bridge < 19 * delta
+        assert 50 * delta**3 < cg.removed_gas < 72 * delta**3
         assert rc.post_cut_stops(chains, cg, s, rc.tip_size(min(e.radius for e in edits), delta, s),
                                  fold_stop=3e-4) is None
 
 
-def test_the_planner_window_sets_the_cut_and_the_splice_factor_below_it_does_not(thread_scan):
+def test_the_planner_window_sets_the_cut(thread_scan):
     """On a slender thread the first survivor beyond the planner's window lies at about 1.4 cut
-    radii, so splice factors up to that drop no survivor and give the same cut (``splice_set_by``
-    ``planner-window``), while the window factor moves the splices, the bridge and the removed
-    gas."""
+    radii, so the floor at the cut radius drops no survivor (``splice_set_by`` ``planner-window``
+    for both caps), and the window factor moves the splices, the bridge and the removed gas."""
     r, z, rn = thread_scan[3e-4]
     delta = 1.05 * rn
 
@@ -333,19 +336,34 @@ def test_the_planner_window_sets_the_cut_and_the_splice_factor_below_it_does_not
                              sum(plan.fragment_volumes_before))
         return rc.in_cut_radii(edits, cg, delta, s)
 
-    base, splice, window4, window8 = (summary(), summary(cap_splice_factor=1.3),
-                                      summary(cap_window_factor=4.0),
-                                      summary(cap_window_factor=8.0))
-    assert base["splice_set_by"] == splice["splice_set_by"] == "planner-window"
-    assert base["replaced_survivors"] == [0, 0] and min(base["r_s"]) > 1.3
-    for key in ("r_s", "arc_radius", "bridge", "removed_gas"):
-        assert splice[key] == base[key], key
-    assert 12 < base["bridge"] < 17 and 50 < base["removed_gas"] < 65
+    base, window4, window8 = (summary(), summary(cap_window_factor=4.0),
+                              summary(cap_window_factor=8.0))
+    for g in (base, window4, window8):
+        assert g["splice_set_by"] == ["planner-window"] * 2 and g["replaced_survivors"] == [0, 0]
+    assert min(base["r_s"]) > 1.3 and "cap_splice_factor" not in base
+    assert 13 < base["bridge"] < 15.5 and 54 < base["removed_gas"] < 60  # measured 14.3 and 57.1
     assert window4["bridge"] < 0.8 * base["bridge"] and window8["bridge"] > 1.15 * base["bridge"]
     assert window4["removed_gas"] < base["removed_gas"] < window8["removed_gas"]
-    above = summary(cap_splice_factor=1.6)  # above the first survivor: it drops some
-    assert above["splice_set_by"] == "splice-factor" and min(above["replaced_survivors"]) > 0
-    assert min(above["r_s"]) >= 1.6
+    assert min(window4["r_s"]) < min(base["r_s"]) < min(window8["r_s"])
+
+
+def test_the_splice_floor_at_the_cut_radius():
+    """Where the survivors beyond the planner's window are narrower than the cut radius, they are
+    dropped up to the first one at least as wide (``delta-floor``), so no fresh cap sits on a thread
+    narrower than the post-cut neck limit."""
+    delta = 1.0
+    zz = np.linspace(10.0, 30.0, 201)  # surviving thread, r = 0.8025 + 0.05 (z - 10)
+    thread = np.column_stack([0.8025 + 0.05 * (zz - 10.0), zz])
+    cap = np.array([[0.0, 9.0], [0.4, 9.3], [0.7, 9.7]])  # the planner's tip
+    pts = np.vstack([cap, thread])
+    nc = SimpleNamespace(points=pts, sizes=np.full(len(pts), 0.2),
+                         zeta=np.linspace(0.0, 1.0, len(pts)),
+                         origin=np.r_[np.full(len(cap), -1), np.arange(len(thread))],
+                         end_types=("axis", "fixed"))
+    (e,) = rc.replace_caps([nc], delta, rc.ReconnectSettings(delta=delta))
+    assert e.splice_set_by == "delta-floor" and e.replaced_survivors == 40  # r < 1 below z = 14
+    assert e.r_s >= delta and e.r_s == pytest.approx(1.0025)
+    assert nc.points[0, 0] == 0.0 and rc.cap_backtrack(nc.points[:e.points + 1]) == 0.0
 
 
 def test_cut_geometry_in_delta_units_depends_on_the_landing_ratio(thread_scan):
@@ -566,17 +584,17 @@ def test_planner_caps_fold_and_replaced_caps_do_not(step):
             assert e.min_angle >= 30.0 and e.splice_angle > 170.0 and e.r_s >= delta
         cg = rc.cut_geometry(rc.plan_chains(plan.new_chains), s.reservoir_depth,
                              sum(plan.fragment_volumes_before))
-        assert cg.bridge > 2 * delta and 40 * delta**3 < cg.removed_gas < 100 * delta**3
-        if f <= 1.2:
-            assert cg.removed_gas < 80 * delta**3
+        # measured 12.7-22.9 delta and 50-76 delta^3 for delta/r_n from 1.03 to 2
+        assert 12 * delta < cg.bridge < 24 * delta
+        assert 48 * delta**3 < cg.removed_gas < 78 * delta**3
 
 
 @stored
 @pytest.mark.parametrize("step", [1028, 1055, 1076])
 def test_cut_of_a_stored_neck_at_the_landing_ratio(step):
     """At delta/r_n = LANDING_RATIO the splices on a stored neck are the first survivors beyond the
-    planner's window (``cap_splice_factor`` changes nothing), the bridge is 12-17 delta long and the
-    cut removes 50-65 delta^3 of gas, and no stop after the cut fires with the fold settings of the
+    planner's window (the floor at delta drops none), the bridge is 13-14.5 delta long and the cut
+    removes 54-59 delta^3 of gas, and no stop after the cut fires with the fold settings of the
     run the profiles come from (fold_stop 3e-4, fold_stop_elements 3, fold_ratio 4); the open chain
     keeps a neck wider than delta (``open_neck``), which ``post_cut_stops`` watches."""
     r, z, _ = _stored(step)
@@ -589,8 +607,8 @@ def test_cut_of_a_stored_neck_at_the_landing_ratio(step):
     chains = [rc.orient_chain(c.points, R_C, 1e-7) for c in rc.plan_chains(plan.new_chains)]
     cg = rc.cut_geometry(chains, s.reservoir_depth, sum(plan.fragment_volumes_before))
     g = rc.in_cut_radii(edits, cg, delta, s)
-    assert g["splice_set_by"] == "planner-window" and min(g["r_s"]) > 1.3
-    assert 12 < g["bridge"] < 17 and 50 < g["removed_gas"] < 65
+    assert g["splice_set_by"] == ["planner-window"] * 2 and min(g["r_s"]) > 1.3
+    assert 12.5 < g["bridge"] < 15 and 53 < g["removed_gas"] < 60
     h_min = rc.tip_size(min(e.radius for e in edits), delta, s)
     assert rc.post_cut_stops(chains, cg, s, h_min, neck_elements=3.0, fold_ratio=4.0,
                              fold_stop=3e-4, fold_stop_elements=3.0) is None

@@ -411,7 +411,10 @@ def test_cut_plans_once_and_builds_two_chains(neck_cut):
     for got, want in zip(rec["mesh"]["axis_spans"], rec["mesh"]["expected_axis_spans"]):
         assert got == pytest.approx(want, abs=1e-12)
     g = rec["geometry"]
-    assert g["z_bubble_top"] < g["z_cavity_tip"] and g["bridge"] > 2 * rec["delta"]
+    # on this conical neck (12 degrees) the planner's window gives a bridge of about 10.6 cut radii
+    # and 86 cut radii cubed of removed gas
+    assert g["z_bubble_top"] < g["z_cavity_tip"] and 8 * rec["rmin"] < g["bridge"] < 14 * rec["rmin"]
+    assert 60 * rec["rmin"] ** 3 < g["removed_gas"] < 110 * rec["rmin"] ** 3
     for cap in rec["caps"]:
         assert cap["min_angle"] >= 30.0 and cap["r_s"] >= rec["delta"]
 
@@ -422,7 +425,9 @@ def test_cut_records_the_geometry_in_cut_radii(neck_cut):
     assert g["cut_radius"] == rmin and g["cap_window_factor"] == 6.0
     assert g["r_s"] == pytest.approx([c["r_s"] / rmin for c in rec["caps"]])
     assert g["replaced_survivors"] == [c["replaced_survivors"] for c in rec["caps"]]
-    assert g["splice_set_by"] in ("planner-window", "splice-factor")
+    assert g["splice_set_by"] == [c["splice_set_by"] for c in rec["caps"]]
+    assert set(g["splice_set_by"]) <= {"planner-window", "delta-floor"}
+    assert "cap_splice_factor" not in g and "cap_splice_factor" not in rec["settings"]
     assert g["bridge"] == pytest.approx(rec["geometry"]["bridge"] / rmin)
     assert g["removed_gas"] == pytest.approx(rec["geometry"]["removed_gas"] / rmin**3)
 
