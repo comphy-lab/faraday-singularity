@@ -369,6 +369,26 @@ def test_the_splice_floor_at_the_cut_radius():
     assert nc.points[0, 0] == 0.0 and rc.cap_backtrack(nc.points[:e.points + 1]) == 0.0
 
 
+@pytest.mark.parametrize("fold_over_delta", [1.0, 3.0, 20.0])
+def test_a_fold_stop_far_above_delta_finds_no_fold_on_freshly_cut_chains(thread_scan,
+                                                                          fold_over_delta):
+    """The fold stops after a cut keep the landing run's absolute ``fold_stop``, which may be many
+    cut radii. They need a fold pair (two nodes closer than ``1/fold_ratio`` of the arc between
+    them), and a cap with the thread behind it has none, so neither the bubble's fold stop nor the
+    driver's on the open chain fires on the new thread however large ``fold_stop`` is."""
+    from faraday_singularity.selfcontact import fold_gap
+
+    for r, z, rn in thread_scan.values():
+        delta = 1.05 * rn
+        s, _, _, edits, chains, cg = _cut_on(r, z, delta)
+        fold_stop = fold_over_delta * delta
+        assert rc.post_cut_stops(chains, cg, s, rc.tip_size(delta, s), fold_stop=fold_stop) is None
+        for c in chains:
+            f = fold_gap(c.points[:, 0], c.points[:, 1], ratio=4.0, stop=fold_stop,
+                         stop_elements=3.0, search_factor=4.0)
+            assert math.isinf(f.gap) and not f.crossed
+
+
 def test_cut_geometry_in_delta_units_depends_on_the_landing_ratio(thread_scan):
     """Within the admitted band of delta/r_n the bridge and the removed gas, in units of delta,
     vary by less than a quarter; at twice the neck radius they do not: a cut there is refused."""
