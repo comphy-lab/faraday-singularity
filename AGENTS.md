@@ -74,22 +74,33 @@ add a second top-level `cases/` tree.
   pinch-off or entrainment, and record why it stopped. The one exception is the reconnection
   through a neck pinch-off: a run keeps its landing state at the neck-radius stop
   (`collapse.keep_stop_state`), or one for each cut radius of `collapse.landing` (the first state
-  with `delta/r_n >= 1.05`), and the cut is made from it at radius `delta`
-  (`collapse.reconnect`, `reconnect.py`, `surgery.py`), refused unless `delta/r_n` lies between
-  `min_landing_ratio` and `max_landing_ratio`, so each `delta` of a study needs its own landing
-  state: pyoomph's planner gives the topology, its
-  caps are always replaced by tangent arcs, the liquid velocity is carried across and projected
-  onto a divergence-free field by a pressure impulse (refused unless the discrete energy identity
-  holds), and the bubble keeps the passive constant gas pressure (the zero-density limit). A
-  reconnected result counts only if the jets at a fixed time after the cut do not depend on
-  `delta`; report it with that `delta` study. One cut per run; stop before any second change of
-  topology (the stops in `reconnect.post_cut_stops`, on both chains: the driver measures only the
-  open one). Landing states come from restarts of existing runs under a derived case, which may
-  differ from the parent's only in `case_id`, `completion.value` and the collapse keys
-  `keep_stop_state`, `landing`, `neck_stop` and `reconnect` (`run_case.DERIVED_KEYS`); the
-  prototype checks the same lineage for the state it cuts and records it. The cut relies on private
-  names of the pinned pyoomph release, pinned by `testCases/test_reconnect_fem.py`; check them when
-  the pin moves. A restart after the cut must restore the cut's mesh sizing on the template
+  with `delta/r_n >= 1.05`; a radius below 1.05 times the neck-stop radius is refused before any
+  output, and `landing-missed` records one left without a state), and the cut is made from it at
+  radius `delta` (`collapse.reconnect`, `reconnect.py`, `surgery.py`), refused unless `delta/r_n`
+  lies between `min_landing_ratio` and `max_landing_ratio` (a window that must contain the
+  landing window [1.05, 1.1]), so each `delta` of a study needs its own landing state: pyoomph's
+  planner gives the topology, its caps are always replaced by tangent arcs, the liquid velocity is
+  carried across and projected onto a divergence-free field by a pressure impulse (refused unless
+  the discrete energy identity holds), and the bubble keeps the passive constant gas pressure (the
+  zero-density limit). The planner's window (`cap_window_factor`), not `cap_splice_factor`,
+  usually sets the cut geometry (`in_cut_radii` in the cut record); a `delta` study needs a
+  sensitivity to it. A reconnected result counts only if the jets at a fixed time after the pinch
+  time `t_p` do not depend on `delta`; compare the cuts of a study at one common `t_p` (each cut
+  records its own fit and window, `pinch`, and `tau_p` in `steps.txt`), and report the result with
+  that `delta` study. One cut per run; stop before any second change of topology (the stops in
+  `reconnect.post_cut_stops`, on both chains: the driver measures only the open one). No runner
+  continues from a post-cut state yet; both refuse it, and a resume mode must keep applying
+  `post_cut_stops` rather than go through `run_case.py`'s driver loop. A refused or failed cut
+  leaves its partial record, with `failed_at`, in `cut_diagnostics.json`. Landing states come from
+  restarts of existing runs under a derived case, which may differ from the parent's only in
+  `case_id`, `completion.value` and the collapse keys `keep_stop_state`, `landing` and `neck_stop`
+  (`run_case.DERIVED_KEYS`); not in `reconnect`, which compiles extra terms into the problem and so
+  changes the trajectory at round-off. The prototype checks the same lineage, its `reconnect` block
+  included (`run_case.PROTOTYPE_DERIVED_KEYS`), for the state it cuts and records it. Landing and
+  stop dumps are kept within their step and record `resume_at`; a restart from one makes that
+  step's remesh check before stepping, as its parent did. The cut relies on private names of the
+  pinned pyoomph release, pinned by `testCases/test_reconnect_fem.py`; check them when the pin
+  moves. Loading a state written after the cut must restore the cut's mesh sizing on the template
   (`surgery.restore_cut`). Planner tests on stored neck profiles run when
   `FARADAY_RECONNECT_PROFILES` names their directory; a synthetic slender thread covers the same
   planner classes by default. Of failures of the solve, only oomph-lib giving up below
