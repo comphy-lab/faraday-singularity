@@ -26,6 +26,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import types
@@ -882,6 +883,186 @@ def test_prototype_records_a_failed_cut(landing_run, tmp_path):
     rec = json.loads((out / "cut_diagnostics.json").read_text())
     assert rec["outcome"] == "failed" and rec["failed_at"] == "chart"
     assert rec["projection"]["newton_residuals"] and rec["pinch"]["source"] == "neck_samples"
+
+
+# --- the production runner: a cut at the start of a restart, and a restart after it ------------------
+
+
+def _run_faraday(*args, script=None):
+    """``simulationCases/run_faraday.py`` (or ``script``, which runs it) in a fresh process, MKL on
+    one thread so that a continuation can be compared with the run it continues."""
+    env = dict(os.environ, MKL_NUM_THREADS="1", OMP_NUM_THREADS="1")
+    head = ([sys.executable, "-c", script, str(ROOT)] if script is not None else
+            [sys.executable, str(ROOT / "simulationCases" / "run_faraday.py")])
+    return subprocess.run(head + [str(a) for a in args], capture_output=True, text=True,
+                          timeout=900, env=env, check=False)
+
+
+SHA256, COMMIT = re.compile(r"[0-9a-f]{64}"), re.compile(r"[0-9a-f]{40}")
+
+
+def _runner_manifest_problems(m: dict) -> list[str]:
+    """The fields validate-run-output requires of a pyoomph-runner-manifest-v1, but for a dirty
+    commit, which a tree under edit has (the test tree can be dirty)."""
+    out = []
+    if m.get("schema") != "pyoomph-runner-manifest-v1":
+        out.append("schema")
+    if not SHA256.fullmatch(str(m.get("case_sha256"))):
+        out.append("case_sha256")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", str(m.get("case_id"))):
+        out.append("case_id")
+    if not re.fullmatch(r"[0-9a-f]{40}(-dirty)?", str(m.get("component_commit"))):
+        out.append("component_commit")
+    if not COMMIT.fullmatch(str((m.get("pyoomph") or {}).get("commit"))):
+        out.append("pyoomph.commit")
+    if not (isinstance(m.get("argv"), list) and m["argv"] and all(
+            isinstance(x, str) and x for x in m["argv"])):
+        out.append("argv")
+    fields = m.get("case_fields_used")
+    if not (isinstance(fields, list) and fields and len(set(fields)) == len(fields)):
+        out.append("case_fields_used")
+    restart = m.get("restart_from")
+    if restart is not None and not (isinstance(restart.get("path"), str)
+                                    and SHA256.fullmatch(str(restart.get("sha256")))):
+        out.append("restart_from")
+    return out
+
+
+@pytest.fixture(scope="module")
+def production_cut(landing_run, tmp_path_factory):
+    """The production runner cuts the landing state at its start (the case of the landing run with
+    a reconnect block), then continues from a dump written after the cut."""
+    root = tmp_path_factory.mktemp("production")
+    cut_run = root / "cut" / "runtime"
+    res = {"cut": cut_run, "proc_cut": _run_faraday(landing_run["cut_case"], "--restart-from",
+                                                    landing_run["state"], "--out", cut_run)}
+    if res["proc_cut"].returncode == 0:
+        # a restart needs a parent with a clean source commit; the test tree may be under edit
+        path = cut_run / "run-manifest.json"
+        m = json.loads(path.read_text())
+        res["cut_commit"] = m["component_commit"]
+        m["component_commit"] = m["component_commit"].removesuffix("-dirty")
+        path.write_text(json.dumps(m))
+        dumps = sorted((cut_run / "states").glob("state_*.dump"))
+        res["from"] = dumps[0]
+        res["post"] = root / "post" / "runtime"
+        res["proc_post"] = _run_faraday(landing_run["cut_case"], "--restart-from", dumps[0],
+                                        "--out", res["post"])
+    return res
+
+
+def test_production_runner_cuts_a_landing_state_at_its_start(production_cut, landing_run):
+    proc = production_cut["proc_cut"]
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    run = production_cut["cut"]
+    status = json.loads((run / "run_status.json").read_text())
+    assert status["state"] == "completed" and status["collapse"]["stop"]["reason"] == "tau-end"
+    t_p = PINCH[0]
+    assert status["cut"]["outcome"] == "cut" and status["cut"]["t_p"] == pytest.approx(t_p, rel=1e-3)
+    assert status["collapse"]["cut"]["tau"] == pytest.approx(3e-5)
+    # the standard runner manifest, with the lineage of the landing state
+    manifest = json.loads((run / "run-manifest.json").read_text())
+    manifest["component_commit"] = production_cut["cut_commit"]
+    assert _runner_manifest_problems(manifest) == []
+    assert manifest["case_sha256"] == hashlib.sha256(
+        landing_run["cut_case"].read_bytes()).hexdigest() and manifest["case_id"] == "neck-cut"
+    assert manifest["restart_mode"] == "cut" and manifest["reconnect"]["delta"] == landing_run["delta"]
+    restart = manifest["restart_from"]
+    assert restart["path"] == str(landing_run["state"].resolve())
+    assert restart["sha256"] == hashlib.sha256(landing_run["state"].read_bytes()).hexdigest()
+    parent = restart["parent_record"]
+    assert parent["case_sha256"] == landing_run["digest"] and parent["component_commit"] == "b" * 40
+    assert parent["derived_keys"] == ["case_id", "collapse.reconnect"]
+    params = json.loads((run / "parameters.json").read_text())
+    assert params["restart_mode"] == "cut"
+    assert params["inactive_after_cut"] == {"keep_stop_state": True}
+    # the cut, its record and its kept states
+    rec = json.loads((run / "cut_diagnostics.json").read_text())
+    assert rec["outcome"] == "cut" and rec["pinch"]["t_p"] == status["cut"]["t_p"]
+    assert rec["focus"]["cut"]["size"] == pytest.approx(0.25 * rec["rmin"])
+    for name in ("precut", "postcut"):
+        assert Path(status["cut"][name]).is_file() and Path(status["cut"][name]).parent == run / "states"
+    # after the cut: the post-cut mode of the driver
+    chains, table = _columns(run / "chains.txt"), _columns(run / "collapse.txt")
+    assert list(chains["dt"]) == pytest.approx([0.0, 1e-5, 1.25e-5, 7.5e-6])  # tau_end 3e-5
+    assert chains["tau"][0] == 0.0 and np.allclose(chains["tau_p"], chains["time"] - rec["pinch"]["t_p"])
+    assert np.all(chains["dt"][1:] <= np.minimum(chains["dt_courant"],
+                                                 chains["dt_capillary"])[:-1] * (1 + 1e-12))
+    assert np.array_equal(table["tau"], chains["tau"]) and np.all(np.isfinite(table["z_axis"]))
+    assert {"r_j", "V_j", "Q_j", "tau_p"} <= set(table)
+    events = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+    kinds = [e["event"] for e in events]
+    assert kinds[:2] == ["restart", "cut"] and kinds[-1] == "stop"
+    assert not any(k.startswith("landing") for k in kinds)
+    assert all("tau_p" in e for e in events[1:])
+    bubbles = sorted((run / "profiles").glob("profile_*_bubble.txt"))
+    assert bubbles and all(json.loads(b.read_text().splitlines()[0][2:])["chain"] == "bubble"
+                           for b in bubbles)
+    dumps = sorted((run / "states").glob("state_*.json"))
+    assert len(dumps) == 3
+    for d in dumps:
+        meta = json.loads(d.read_text())
+        assert meta["cut"]["t_cut"] == rec["t_cut"] and meta["tau"] == pytest.approx(
+            meta["time"] - rec["t_cut"], abs=1e-15)
+        assert "landed" not in meta and "resume_at" not in meta
+
+
+def test_production_runner_continues_a_post_cut_dump(production_cut, landing_run):
+    """A restart from a dump written after the cut restores the cut and continues in the post-cut
+    mode: the same steps as the run it continues, to round-off."""
+    proc = production_cut["proc_post"]
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    run, cut_run = production_cut["post"], production_cut["cut"]
+    status = json.loads((run / "run_status.json").read_text())
+    assert status["state"] == "completed" and status["collapse"]["stop"]["reason"] == "tau-end"
+    assert "cut" not in status  # no second cut
+    manifest = json.loads((run / "run-manifest.json").read_text())
+    assert _runner_manifest_problems(manifest) == []
+    assert manifest["restart_mode"] == "post-cut"
+    assert manifest["restart_from"]["path"] == str(production_cut["from"].resolve())
+    assert "derived_keys" not in manifest["restart_from"]["parent_record"]  # the same case
+    events = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+    assert events[0]["event"] == "restart" and "tau" in events[0]
+    assert "cut" not in [e["event"] for e in events] and events[-1]["event"] == "stop"
+    a, b = _columns(cut_run / "chains.txt"), _columns(run / "chains.txt")
+    k = int(np.searchsorted(a["step"], b["step"][0]))
+    assert b["step"][0] == json.loads(production_cut["from"].with_suffix(".json").read_text())["step"]
+    for name in b:
+        if name == "dt":  # the restart's first row records no step
+            assert np.allclose(b[name][1:], a[name][k + 1:], rtol=1e-8, atol=1e-15)
+        else:
+            assert np.allclose(b[name], a[name][k:], rtol=1e-8, atol=1e-13, equal_nan=True), name
+    meta = json.loads(sorted((run / "states").glob("state_*.json"))[-1].read_text())
+    assert meta["cut"]["sizing"] == json.loads(
+        (cut_run / "cut_diagnostics.json").read_text())["sizing"]
+
+
+FAILING_CUT_RUN = """
+import runpy, sys
+sys.path.insert(0, sys.argv[1] + "/src")
+from faraday_singularity import surgery
+
+def broken_chart(_problem):
+    raise RuntimeError("no chart")
+
+surgery.orient_interface_chart = broken_chart
+sys.argv = [sys.argv[1] + "/simulationCases/run_faraday.py"] + sys.argv[2:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+def test_production_runner_records_a_failed_cut(landing_run, tmp_path):
+    out = tmp_path / "runtime"
+    proc = _run_faraday(landing_run["cut_case"], "--restart-from", landing_run["state"], "--out",
+                        out, script=FAILING_CUT_RUN)
+    assert proc.returncode == 1, proc.stdout[-3000:] + proc.stderr[-3000:]
+    status = json.loads((out / "run_status.json").read_text())
+    assert status["state"] == "failed" and "no chart" in status["detail"]
+    assert status["cut"]["outcome"] == "failed" and status["cut"]["failed_at"] == "chart"
+    assert Path(status["cut"]["precut"]).is_file() and "collapse" not in status
+    rec = json.loads((out / "cut_diagnostics.json").read_text())
+    assert rec["outcome"] == "failed" and rec["failed_at"] == "chart"
+    assert json.loads((out / "run-manifest.json").read_text())["restart_mode"] == "cut"
 
 
 # --- the ordinary path ----------------------------------------------------------------------------

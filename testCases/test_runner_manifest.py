@@ -12,6 +12,7 @@ from test_runner import CASE, ROOT
 
 sys.path.insert(0, str(ROOT))
 import run_case
+from faraday_singularity.reconnect import ReconnectSettings
 
 
 def test_invalid_physics_is_refused_before_output(tmp_path):
@@ -198,18 +199,120 @@ def test_restart_refuses_a_derived_case_that_changes_the_reconnect_block(tmp_pat
     assert any(k.startswith("collapse.reconnect") for k in lineage["parent_record"]["derived_keys"])
 
 
-def test_restart_refuses_a_state_written_after_a_cut(tmp_path):
+def test_restart_refuses_a_state_written_after_a_cut_without_its_case(tmp_path):
+    """Only the runner continues a post-cut state, and only under the case of the cut: the
+    prototype (and restart_record without post_cut) refuse it, and so does a case without the
+    reconnect block of the cut."""
     state, _ = _parent_run(tmp_path)
     state.with_suffix(".json").write_text(json.dumps({"time": 0.5, "cut": {"delta": 1e-3}}))
     for derived in (run_case.DERIVED_KEYS, run_case.PROTOTYPE_DERIVED_KEYS):
-        with pytest.raises(SystemExit, match="post-cut state is not supported"):
+        with pytest.raises(SystemExit, match="one cut per run"):
             run_case.restart_record(state, CASE, tmp_path / "parent-case.json",
                                     derived_keys=derived)
+    with pytest.raises(SystemExit, match="needs the case of that cut"):
+        run_case.restart_admission(state, CASE, tmp_path / "parent-case.json", None)
     out = tmp_path / "out"
     proc = _prototype(tmp_path / "parent-case.json", "--state", state, "--outdir", out,
                       "--delta-ratio", "1.05", "--check")
-    assert proc.returncode != 0 and "post-cut state is not supported" in proc.stderr
+    assert proc.returncode != 0 and "one cut per run" in proc.stderr
     assert not out.exists()
+
+
+RECON = ReconnectSettings(delta=1.05e-3, tau_end=1e-4)
+
+
+def _write_meta(state, **meta):
+    state.with_suffix(".json").write_text(json.dumps({"time": 0.5, **meta}))
+
+
+def _child_case(tmp_path, reconnect=None, name="child.json", **collapse):
+    child = _derived(**collapse)
+    if reconnect is not None:
+        child["collapse"]["reconnect"] = reconnect
+    path = tmp_path / name
+    path.write_text(json.dumps(child))
+    return child, path
+
+
+def test_restart_admission_cuts_a_landing_state_under_a_case_that_adds_the_reconnect_block(
+        tmp_path):
+    state, parent_hash = _parent_run(tmp_path)
+    landing = {"delta": 1.05e-3, "r_neck": 1e-3, "z_neck": 4.7, "delta_over_r_neck": 1.05}
+    _write_meta(state, landing=landing)
+    child, path = _child_case(tmp_path, RECON.to_dict(), landing=[1.05e-3])
+    record, mode = run_case.restart_admission(state, child, path, RECON)
+    assert mode == run_case.CUT
+    assert record["parent_record"]["case_sha256"] == parent_hash
+    assert "collapse.reconnect" in record["parent_record"]["derived_keys"]
+    # the stop state of a neck-radius stop is a landing state too
+    _write_meta(state, stop={"reason": "pinch-off-approach", "trigger": "neck-radius",
+                             "r_neck": 1e-3})
+    assert run_case.restart_admission(state, child, path, RECON)[1] == run_case.CUT
+    # any other dump is not
+    _write_meta(state)
+    with pytest.raises(SystemExit, match="a cut starts from a landing state"):
+        run_case.restart_admission(state, child, path, RECON)
+    # a landing state of another cut radius
+    _write_meta(state, landing=dict(landing, r_neck=5e-4))
+    with pytest.raises(SystemExit, match="2.1 times the neck radius"):
+        run_case.restart_admission(state, child, path, RECON)
+    # without the block, or with the parent's own block, the restart is an ordinary one
+    _write_meta(state, landing=landing)
+    plain, plain_path = _child_case(tmp_path, name="plain.json", landing=[1.05e-3])
+    assert run_case.restart_admission(state, plain, plain_path, None)[1] == run_case.ORDINARY
+    parent = json.loads(json.dumps(CASE))
+    parent["collapse"]["reconnect"] = RECON.to_dict()
+    state2, _ = _parent_run(tmp_path / "p2", case=parent)
+    _write_meta(state2, landing=landing)
+    same, same_path = _child_case(tmp_path, RECON.to_dict(), name="same.json", landing=[1e-3])
+    assert run_case.restart_admission(state2, same, same_path, RECON)[1] == run_case.ORDINARY
+    # a legacy import is never a cut
+    with pytest.raises(SystemExit, match="only with --restart-from"):
+        run_case.restart_admission(state, child, path, RECON, legacy=True)
+
+
+def test_restart_admission_continues_a_post_cut_state_under_the_case_of_its_cut(tmp_path):
+    cut_case = json.loads(json.dumps(CASE))
+    cut_case["collapse"]["reconnect"] = RECON.to_dict()
+    state, cut_hash = _parent_run(tmp_path, case=cut_case)
+    _write_meta(state, cut={"delta": RECON.delta, "settings": RECON.to_dict()})
+    path = tmp_path / "parent-case.json"
+    record, mode = run_case.restart_admission(state, cut_case, path, RECON)
+    assert mode == run_case.POST_CUT and set(record["parent_record"]) == {
+        "path", "sha256", "format", "component_commit"}
+    # derived in where it stops: still the cut's continuation
+    child = json.loads(json.dumps(cut_case))
+    child["case_id"] = "sigterm-more"
+    child["collapse"]["neck_stop"] = 1e-4
+    child_path = tmp_path / "more.json"
+    child_path.write_text(json.dumps(child))
+    record, mode = run_case.restart_admission(state, child, child_path, RECON)
+    assert mode == run_case.POST_CUT and record["parent_record"]["derived_keys"] == [
+        "case_id", "collapse.neck_stop"]
+    # other cut settings than those the cut recorded
+    other = ReconnectSettings(delta=RECON.delta, tau_end=2e-4)
+    child["collapse"]["reconnect"] = other.to_dict()
+    child_path.write_text(json.dumps(child))
+    with pytest.raises(SystemExit, match="differs from the settings of the cut"):
+        run_case.restart_admission(state, child, child_path, other)
+
+
+def test_runner_check_reports_a_cut_restart_and_refuses_a_foreign_delta(tmp_path):
+    state, _ = _parent_run(tmp_path)
+    _write_meta(state, landing={"delta": 1.05e-3, "r_neck": 1e-3})
+    _, path = _child_case(tmp_path, RECON.to_dict())
+    out = tmp_path / "out"
+    proc = subprocess.run([sys.executable, str(ROOT / "simulationCases/run_faraday.py"), str(path),
+                           "--out", str(out), "--restart-from", str(state), "--check"],
+                          capture_output=True, text=True, timeout=120, check=False)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    report = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert report["restart_mode"] == "cut" and not out.exists()
+    _, path = _child_case(tmp_path, dict(RECON.to_dict(), delta=2e-3), name="far.json")
+    proc = subprocess.run([sys.executable, str(ROOT / "simulationCases/run_faraday.py"), str(path),
+                           "--out", str(out), "--restart-from", str(state), "--check"],
+                          capture_output=True, text=True, timeout=120, check=False)
+    assert proc.returncode != 0 and "times the neck radius" in proc.stderr and not out.exists()
 
 
 def test_runner_refuses_landing_radii_below_the_neck_stop_before_output(tmp_path):
