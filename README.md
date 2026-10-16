@@ -6,8 +6,8 @@ interface and the Worthington jet it launches.
 
 **Status:** axisymmetric solver at zero Bond number with its linear verification cases, and a
 collapse driver that records the collapse and jet observables during the run and stops before any
-pinch-off. A prototype reconnection continues a run through a neck pinch-off (below); it is not
-yet verified for production. No collapse case files or results are in the repository yet.
+pinch-off. A reconnection continues a run through a neck pinch-off by an explicit cut (below); it is
+tested on a synthetic necked cavity only, not yet on a production collapse. No collapse case files or results are in the repository yet.
 
 ## Motivation
 
@@ -61,8 +61,8 @@ and test:
   contact line, so the axisymmetric surface mode $J_0(kr)$ is exact in linear theory. Its trough
   lies on the axis.
 - A sharp-interface mesh cannot change topology by itself. The simulations cover the collapse and
-  the birth of the jet, and stop before any pinch-off or bubble entrainment, except through the
-  reconnection prototype: at a chosen neck radius $\delta$ the gas neck is cut with pyoomph's
+  the birth of the jet, and stop before any pinch-off or bubble entrainment, except through a
+  reconnection: at a chosen neck radius $\delta$ the gas neck is cut with pyoomph's
   axisymmetric reconnection planner, the two new tips are rebuilt as circular arcs that meet the
   axis at right angles, the liquid velocity is carried onto the new mesh and projected onto a
   divergence-free field by a pressure impulse that vanishes on the free surfaces, and the run
@@ -112,6 +112,11 @@ Run outputs are not stored in this repository.
 pyoomph is built from source at the CoMPhy release `comphy-2026.09.21.1`
 (`f912ac10cdbb170e58aca3a337f0aa4ed13cf1e0`), pinned in `pyproject.toml` and `uv.lock`, with MPI
 enabled.
+
+Runs of one case in fresh processes differ by about 1e-14 relative unless MKL, whose threaded
+solve is the source, runs on one thread (`MKL_NUM_THREADS=1`; `OMP_NUM_THREADS` alone does not do
+it); with it they have agreed to the byte, a restart after a cut included. Compare runs to
+round-off, or set it when a comparison must be exact.
 
 ## Running
 
@@ -177,51 +182,6 @@ and per collapse cycle within it, with the wave height `h_crest`, the crest heig
 above the mean level before that trough. Rows with `crest_jet` 1 had a jet standing on the axis
 during that crest, so their `h_crest` is the height of the jet tip, not of a wave.
 
-Reconnection prototype. With `collapse.keep_stop_state` a run keeps the state at its neck-radius
-stop as `states/stop_<step>.dump`; with `collapse.landing`, a list of cut radii `delta`, it keeps
-for each the first state whose neck radius `r_n` has fallen to `delta/1.05`, as
-`states/landing_<delta>.dump`, so that one run supplies the landing states of a study in `delta`.
-A cut radius that the run cannot reach before its neck-radius stop (below 1.05 times
-`max(neck_stop, neck_stop_elements * h_floor)`) is refused before any output, and a radius left
-without a landing state is recorded as `landing-missed` with its reason. These kept states hold the
-latest samples of the closing neck, from which the pinch time `t_p` is fitted, and a restart from
-one makes the remesh check of its step before stepping, as the run that wrote it did. Either key,
-and a different `collapse.neck_stop`, can be added to the case of an existing run and the run
-restarted from one of its dumps under the derived case (with a new `case_id` if wanted); any other
-change of the case is refused, a `collapse.reconnect` block included, since compiling the
-reconnection terms into the problem changes its trajectory at round-off. The restart manifest
-records the parent's case hash and the keys that differ.
-`simulationCases/reconnect_prototype.py` loads a landing state, checks that the run which wrote it
-has a normalised manifest with a clean source commit and the same case (or one derived from it in
-those keys or in its `collapse.reconnect` block), cuts the neck at `--delta` (or `--delta-ratio`
-times the neck radius; the settings are those of a `collapse.reconnect` block, see
-`src/faraday_singularity/reconnect.py`), projects, and takes a few steps. A cut is refused unless
-`min_landing_ratio <= delta/r_n <= max_landing_ratio` (1.03 and 1.1 by default; the window must
-contain the landing window 1.05 to 1.1): the cut geometry in units of `delta` depends on
-`delta/r_n`. It also depends on the exclusion window of pyoomph's planner (`cap_window_factor`):
-each new cap is spliced to the first surviving node beyond it whose radius is at least `delta` (on
-slender necks at `delta/r_n = 1.05` the bridge is then 13-14.5 `delta` long and the cut removes
-55-58 `delta^3` of gas); the record gives the splice radii, the bridge
-and the removed gas in cut radii (`in_cut_radii`), and a study in `delta` should vary that window
-too. The prototype writes `cut_diagnostics.json` (the planner attempts, the replaced caps, the
-volumes, the kinetic energy and axial momentum before and after the transfer and the projection,
-also within 20 cut radii of the neck, the nodes the transfer could not locate in the old mesh, and
-the pinch time with its fit window), the kept `precut` and `postcut` states, `steps.txt` (budgets,
-the three interface tips on the axis, the bridge of liquid between the bubble and the cavity, the
-jet measurements on the open surface, the element size and speed of the Courant limit, and the
-times after the cut `tau` and after the pinch `tau_p`) and the profiles of both interface chains.
-A refused or failed cut writes its partial record to `cut_diagnostics.json` with the stage it
-reached. The cuts of a study in `delta` are compared at fixed `t - t_p` with one common `t_p`, since
-`t_cut` depends on `delta` and fits of `t_p` over different windows differ. The liquid volume the
-cut adds is recorded both over the whole mesh, which includes the drift of rebuilding the whole
-free surface, and within a box around the cut, which is compared with the plan. The continuation
-stops before a second change of topology: the bridge closing, the chains approaching each other,
-the bubble's two tips meeting, a new neck narrower than `delta` on either chain, a closing fold on
-the bubble, or the bubble draining away; and at the collapse driver's neck and fold stops on the
-open surface. Dumps written after the cut carry its record, from which loading such a state
-restores the cut's mesh sizing; continuing a run from a post-cut state is not supported yet, and
-both runners refuse it.
-
 `collapse_analysis.py` sets out, for each collapse cycle that launches a jet, the evidence for
 the three similarity laws of jet birth without choosing between them: the free slopes of
 `Q_j`, `We_j` and `q_j = V_j r_j` against `r_j`, with the level of `We_j`; the cone angle and the
@@ -229,6 +189,97 @@ direction and decay of the surface velocity along the cavity wall at inception, 
 intermediate window; and, as a secondary check, fits of `r_j(t)` with the origin fixed at the
 apex-based singular time or fitted with the exponent. Every window and threshold is written to
 its summary.
+
+### Reconnection through a neck pinch-off
+
+A sharp-interface mesh cannot pinch off, so a reconnected run is made in three restarts of the
+production runner, each with the custody checks of any restart (the parent's normalised manifest,
+a clean source commit, the case lineage) and the standard runner manifest
+(`pyoomph-runner-manifest-v1`, which records `restart_mode`):
+
+```bash
+# 1. landing states: an existing run, restarted under a case derived from its own that adds
+#    collapse.landing (the cut radii delta) and, if needed, a lower collapse.neck_stop
+python simulationCases/run_faraday.py <landing-case>.json \
+    --restart-from <run>/runtime/states/state_<step>.dump --out <landing-attempt>/runtime
+
+# 2. one cut per delta: a case derived from the landing case that adds a collapse.reconnect block
+#    with that delta, restarted from the landing state of that delta
+python simulationCases/run_faraday.py <cut-case-delta>.json \
+    --restart-from <landing-attempt>/runtime/states/landing_<delta>.dump --out <cut-attempt>/runtime
+
+# 3. to go on after the cut run has ended (or was stopped): any dump it wrote after the cut,
+#    under the same case (or one derived from it in case_id, completion.value or neck_stop)
+python simulationCases/run_faraday.py <cut-case-delta>.json \
+    --restart-from <cut-attempt>/runtime/states/state_<step>.dump --out <continuation>/runtime
+```
+
+`--check` validates any of these without writing output. The cut case is the landing case with,
+in its `collapse` block, for example `"reconnect": {"delta": 0.001, "tau_end": 4e-5}` (the
+settings of `src/faraday_singularity/reconnect.py`, `ReconnectSettings`); its other keys must be the
+landing run's (`run_case.CUT_DERIVED_KEYS`), and its `landing` and `keep_stop_state`, inherited
+from the landing case, are inactive after the cut (`inactive_after_cut` in `parameters.json`).
+
+**Landing states.** With `collapse.landing`, a list of cut radii `delta`, a run keeps for each the
+first state whose neck radius `r_n` has fallen to `delta/1.05`, as `states/landing_<delta>.dump`, so
+that one run supplies the landing states of a study in `delta`; with `collapse.keep_stop_state` it
+keeps the state at its neck-radius stop as `states/stop_<step>.dump`. A cut radius that the run
+cannot reach before its neck-radius stop (below 1.05 times `max(neck_stop, neck_stop_elements *
+h_floor)`) is refused before any output, and a radius left without a landing state is recorded as
+`landing-missed` with its reason. A landing state holds the latest samples of the closing neck and
+the pinch time `t_p` fitted to them (a power law with a free exponent; `pinch`, with its window),
+and a restart from one makes the remesh check of its step before stepping, as the run that wrote it
+did. A restart may change only these keys and `collapse.neck_stop` (`run_case.DERIVED_KEYS`); a
+`collapse.reconnect` block that differs from the parent's makes the restart a cut, since the block
+compiles the reconnection terms into the problem and changes its trajectory at round-off.
+
+**The cut** (`src/faraday_singularity/surgery.py`) is made at the start of the cut run, from the
+landing state, and refused unless `min_landing_ratio <= delta/r_n <= max_landing_ratio` (1.03 and
+1.1 by default; the window must contain the landing window 1.05 to 1.1), since the cut geometry in
+units of `delta` depends on `delta/r_n`. pyoomph's planner gives the topology; each of its caps is
+replaced by a circular arc tangent to the old surface at the first surviving node beyond the
+planner's exclusion window (`cap_window_factor`) whose radius is at least `delta`, and meeting the
+axis at a right angle. On slender necks at `delta/r_n = 1.05` the bridge of liquid between the
+bubble and the cavity is then 13-14.5 `delta` long and the cut removes 55-58 `delta^3` of gas; the
+record gives the splice radii, the bridge and the removed gas in cut radii (`in_cut_radii`), and a
+study in `delta` should vary the window too. The mesh of the cut is sized in cut radii, so that the
+cuts of a study are meshed alike: the tips on the axis and the bridge (`tip_size`, `bridge_size`,
+kept for every later remesh) and the focus of the cut's remesh (`focus_size` within
+`focus_radius`), which replaces the focus the landing run left. The liquid velocity is carried
+across and projected onto a weakly divergence-free field by a pressure impulse that vanishes on
+the free surfaces; the cut is refused unless the projection converges and the discrete energy
+identity holds (the pointwise divergence of the velocity, `strong_divergence_L2`, is an order-`h`
+discretisation diagnostic, not a test). The bubble keeps the passive constant gas pressure, the
+limit of zero gas density. The run writes `cut_diagnostics.json` (the planner attempts, the replaced
+caps, the volumes, the kinetic energy and axial momentum before and after the transfer and the
+projection, also within 20 cut radii of the neck, the nodes the transfer could not locate in the
+old mesh, the landing and cut foci, and the pinch time with its fit window) and keeps the
+`precut_<delta>` and `postcut_<delta>` states. A refused or failed cut ends the run as `failed`,
+with its partial record and the stage it reached in `cut_diagnostics.json` and under `cut` in
+`run_status.json`. The liquid volume the cut adds is recorded both over the whole mesh, which
+includes the drift of rebuilding the whole free surface, and within a box around the cut, which is
+compared with the plan.
+
+**After the cut** the collapse driver measures the open chain (the cavity, from its fresh tip to
+the wall) as any free surface, jet included, and in addition stops before a second change of
+topology: the bridge closing, the chains approaching each other, the bubble's two tips meeting, a
+new neck narrower than `delta` on either chain, a closing fold on the bubble, the bubble draining
+away, or `tau_end` after the cut. The step also follows every node of both chains (a Courant limit
+`courant h/|u|` over each node's element length), the capillary time of the sharpest of the three
+tips on the axis and the cut's `dt_growth`. After a cut, no Newton failure ends a run cleanly.
+Every output after the cut carries the time after the cut `tau = t - t_cut` and after the pinch
+`tau_p = t - t_p`: the columns `tau` and `tau_p` of `collapse.txt`, `chains.txt` (both chains per
+step: the three tips with their speeds and radii of curvature, the bridge, the bubble, the necks,
+the budgets and the step limits), the profiles of the open chain with a `_bubble` profile beside
+each, the events and the dumps. The dumps carry the cut's record, from which a restart restores the
+cut and continues. The cuts of a study in `delta` are compared at fixed `t - t_p` with one common
+`t_p`, since `t_cut` depends on `delta` and fits of `t_p` over different windows differ; a
+reconnected result counts only if the jets do not depend on `delta`.
+
+`simulationCases/reconnect_prototype.py` is a development tool beside this: it cuts a landing state
+at `--delta` or `--delta-ratio` times its neck radius, with options that override the case's
+reconnect block, and takes `--steps` steps under the same driver and post-cut mode. Its manifest has
+its own schema, so its outputs feed no figure, and no runner continues its states.
 
 ## References
 
