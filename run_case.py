@@ -39,7 +39,7 @@ tests run the driver of this commit against that of commit ``9e0d8a1`` and compa
 A restart (``--restart-from``) continues the run of the same case. It may also continue it under a
 derived case, one that differs from the parent's only in ``case_id``, the description
 ``completion.value`` and the collapse keys ``keep_stop_state``, ``landing`` and ``neck_stop``
-(``DERIVED_KEYS``: what the run keeps and where it stops, not what it computes): the parent's case
+(``DERIVED_KEYS``: what the run keeps and where it stops, not the equations it solves): the parent's case
 is read from its ``parameters.json``, whose recorded hash must be the manifest's, and the restart
 manifest records the parent's case hash and the keys that differ. This is how landing states are
 made from an existing run. The restart has one of three modes (``restart_admission``), recorded as
@@ -131,10 +131,10 @@ def case_has_field(case: dict, field: str) -> bool:
 
 
 # Keys a case derived from a parent run may change at a restart: the name, a description the runner
-# does not read, and the collapse keys that decide what the run keeps and where it stops, none of
-# which changes the computed trajectory. Not collapse.reconnect: it compiles the projection and the
-# handler into the problem, whose trajectory then departs from the ordinary one at round-off, from
-# the third step in the tests (a cut, which changes it outright, is another matter).
+# does not read, and the collapse keys that decide what the run keeps and where it stops, not the
+# equations it solves. Not collapse.reconnect: it compiles the projection and the handler into the
+# problem, whose trajectory then departs from the ordinary one at round-off, from the third step in
+# the tests (a cut, which changes it outright, is another matter).
 DERIVED_KEYS = ("case_id", "completion.value", "collapse.keep_stop_state", "collapse.landing",
                 "collapse.neck_stop")
 # A restart that cuts the neck of a landing state at its start: its case adds (or changes) the

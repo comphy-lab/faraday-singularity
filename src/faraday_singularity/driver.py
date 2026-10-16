@@ -655,7 +655,8 @@ class CollapseDriver:
         bubble = None
         if self._cut_record() is not None:  # the open chain here, the bubble beside it
             header.update(self._taus(m["time"]), chain="open")
-            bubble = next(c for c in self._post_cut_state()["segs"] if not c["open"])
+            # none only in a state that has changed topology, which a stop records
+            bubble = next((c for c in self._post_cut_state()["segs"] if not c["open"]), None)
         np.savetxt(path, np.column_stack([r, z, ur, uz]), header=json.dumps(header) +
                    "\nr z u_r u_z", comments="# ")
         if bubble is not None:

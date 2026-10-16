@@ -87,8 +87,8 @@ add a second top-level `cases/` tree.
   (1) landing states, from a restart of an existing run under a derived case that adds
   `collapse.landing` (the first state with `delta/r_n >= 1.05` for each cut radius; a radius below
   1.05 times the neck-stop radius is refused before any output, `landing-missed` records one left
-  without a state) or `keep_stop_state`, and a lower `neck_stop` if needed (`run_case.DERIVED_KEYS`,
-  which do not change the computed trajectory); (2) one cut run per `delta`, a restart from the
+  without a state) or `keep_stop_state`, and a lower `neck_stop` if needed (`run_case.DERIVED_KEYS`:
+  what the run keeps and where it stops, not the equations it solves); (2) one cut run per `delta`, a restart from the
   landing state of that `delta` under the landing case plus a `collapse.reconnect` block
   (`restart_mode` `cut`, `run_case.CUT_DERIVED_KEYS`); (3) continuations from any dump of the cut
   run under its case (`post-cut`). `run_case.restart_admission` decides the mode and checks it
