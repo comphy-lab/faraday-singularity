@@ -14,8 +14,10 @@ Faraday threshold of the `J0` mode), and a collapse driver (`src/faraday_singula
 that writes the collapse and jet observables during the run (apex curvature, jet-base radius and
 speed, cone angle, running estimates of the singular time from the apex and, from the jet-base
 radius, of the origin of the jet's growth or of the time a closing base would reach the axis, crest
-and trough episodes of the axis) and stops before any pinch-off. The repository holds no collapse
-case files or results yet.
+and trough episodes of the axis) and stops before any pinch-off. A reconnection prototype
+(`src/faraday_singularity/surgery.py`, `simulationCases/reconnect_prototype.py`) can continue a run
+through a neck pinch-off by an explicit cut; it is not yet verified for production. The repository
+holds no collapse case files or results yet.
 
 ## Structure
 
@@ -68,8 +70,20 @@ add a second top-level `cases/` tree.
 - The observable decides the solver. Before any production run, confirm that the solver writes
   the interface near the axis, the jet-base radius and position, the jet speed, the cone
   semi-angle β and the singular time, at the cadence needed for the intended exponent fit.
-- A sharp-interface mesh cannot change topology. Stop each simulation before any pinch-off or
-  entrainment, and record why it stopped. Of failures of the solve, only oomph-lib giving up below
+- A sharp-interface mesh cannot change topology by itself. Stop each simulation before any
+  pinch-off or entrainment, and record why it stopped. The one exception is the reconnection
+  through a neck pinch-off: a run keeps its landing state at the neck-radius stop
+  (`collapse.keep_stop_state`), and the cut is made from it at a chosen radius `delta`
+  (`collapse.reconnect`, `reconnect.py`, `surgery.py`): pyoomph's planner gives the topology, its
+  caps are always replaced by tangent arcs, the liquid velocity is carried across and projected
+  onto a divergence-free field by a pressure impulse (refused unless the discrete energy identity
+  holds), and the bubble keeps the passive constant gas pressure (the zero-density limit). A
+  reconnected result counts only if the jets at a fixed time after the cut do not depend on
+  `delta`; report it with that `delta` study. One cut per run; stop before any second change of
+  topology (the stops in `reconnect.post_cut_stops`). The cut relies on private names of the
+  pinned pyoomph release, pinned by `testCases/test_reconnect_fem.py`; check them when the pin
+  moves. Planner tests on stored neck profiles run when `FARADAY_RECONNECT_PROFILES` names their
+  directory. Of failures of the solve, only oomph-lib giving up below
   its smallest step (the Newton solve failing at every step size) can end a run cleanly, and only
   when `classify_failure` attributes it to a closing neck or a vanishing local scale, as measured
   rather than growth-limited; any other failure, including a failed remesh, is a failed run. Runs also end cleanly at the neck-radius

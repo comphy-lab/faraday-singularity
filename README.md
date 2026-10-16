@@ -6,7 +6,8 @@ interface and the Worthington jet it launches.
 
 **Status:** axisymmetric solver at zero Bond number with its linear verification cases, and a
 collapse driver that records the collapse and jet observables during the run and stops before any
-pinch-off. No collapse case files or results are in the repository yet.
+pinch-off. A prototype reconnection continues a run through a neck pinch-off (below); it is not
+yet verified for production. No collapse case files or results are in the repository yet.
 
 ## Motivation
 
@@ -59,8 +60,14 @@ and test:
 - The container is a cylinder of radius $R_c = j_{1,1}/k$ with free-slip walls and a sliding 90°
   contact line, so the axisymmetric surface mode $J_0(kr)$ is exact in linear theory. Its trough
   lies on the axis.
-- A sharp-interface mesh cannot change topology. The simulations cover the collapse and the
-  birth of the jet, and stop before any pinch-off or bubble entrainment.
+- A sharp-interface mesh cannot change topology by itself. The simulations cover the collapse and
+  the birth of the jet, and stop before any pinch-off or bubble entrainment, except through the
+  reconnection prototype: at a chosen neck radius $\delta$ the gas neck is cut with pyoomph's
+  axisymmetric reconnection planner, the two new tips are rebuilt as circular arcs that meet the
+  axis at right angles, the liquid velocity is carried onto the new mesh and projected onto a
+  divergence-free field by a pressure impulse that vanishes on the free surfaces, and the run
+  continues with the bubble at the passive constant gas pressure (the limit of zero gas density).
+  A result of the cut is meaningful only if it does not depend on $\delta$.
 - The step size and the mesh near the axis follow the local scale of the collapse: the apex radius
   of curvature, the jet-base radius or the narrowest neck, whichever is smallest. The scale may
   grow by at most a fixed factor per step, and each rebuild of the mesh coarsens it near the axis
@@ -169,6 +176,17 @@ run `failed` whatever the state. `collapse_table.py --per-episode` gives one row
 and per collapse cycle within it, with the wave height `h_crest`, the crest height on the axis
 above the mean level before that trough. Rows with `crest_jet` 1 had a jet standing on the axis
 during that crest, so their `h_crest` is the height of the jet tip, not of a wave.
+
+Reconnection prototype. With `collapse.keep_stop_state` a run keeps the state at its neck-radius
+stop as `states/stop_<step>.dump`. `simulationCases/reconnect_prototype.py` loads such a state,
+cuts the neck at `--delta` (or `--delta-ratio` times the neck radius; the settings are those of a
+`collapse.reconnect` block, see `src/faraday_singularity/reconnect.py`), projects, and takes a few
+steps. It writes `cut_diagnostics.json` (the planner attempts, the replaced caps, the volumes and
+the kinetic energy and axial momentum before and after the transfer and the projection, the nodes
+the transfer could not locate in the old mesh), the kept `precut` and `postcut` states,
+`steps.txt` (budgets, the three interface tips on the axis, the bridge of liquid between the
+bubble and the cavity, and the jet measurements on the open surface) and the profiles of both
+interface chains.
 
 `collapse_analysis.py` sets out, for each collapse cycle that launches a jet, the evidence for
 the three similarity laws of jet birth without choosing between them: the free slopes of
