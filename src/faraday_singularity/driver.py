@@ -122,6 +122,13 @@ curvature is restored only from dumps marked ``max_curvature_kind`` ``trough-epi
 dumps may hold the largest ``|z''(0)|`` over the cycle, a bump or crest included. Without the mark
 it restarts from zero (``max_curvature_reset`` in the ``restart`` event), so the curvature that the
 next ``jet-born`` event and the run status report covers only the rows after the restart.
+
+Kept dumps lie outside the rotation of ``state_keep``: with ``keep_stop_state`` the state at a
+neck-radius stop (``stop_<step>.dump``, the landing state of a reconnection), and the ``precut`` and
+``postcut`` states of a cut (``surgery.py``). After a cut (:meth:`CollapseDriver.reset_after_cut`)
+the measured surface is the open chain, whose tip on the axis is a fresh cavity bottom: the scale,
+step and singular-time bookkeeping restart, a new cycle begins, and the first step is the cut's
+``dt0``. Dumps written after a cut carry its record, which a restart restores.
 """
 
 from __future__ import annotations
@@ -340,9 +347,11 @@ class _State:
 
 
 class CollapseDriver:
-    def __init__(self, problem, settings: CollapseSettings, outdir: Path):
+    def __init__(self, problem, settings: CollapseSettings, outdir: Path, *,
+                 keep_stop_state: bool = False):
         self.pb = problem
         self.s = settings
+        self.keep_stop_state = keep_stop_state
         self.outdir = Path(outdir)
         (self.outdir / "profiles").mkdir(parents=True, exist_ok=True)
         self.state = _State()
@@ -593,10 +602,9 @@ class CollapseDriver:
                         "ell_prev", "t_prev", "last_remesh_step", "last_singular_t",
                         "refine_blocked_until", "coarsen_held_until", "born_step")
 
-    def save_state(self):
-        """Dump the pyoomph state and the driver state; keep the last ``state_keep`` dumps."""
+    def _write_state(self, path: Path, **extra):
+        """The pyoomph state at ``path`` and the driver's bookkeeping in the JSON beside it."""
         st = self.state
-        path = self.outdir / "states" / f"state_{st.step:08d}.dump"
         path.parent.mkdir(exist_ok=True)
         self.pb.save_state(str(path), quiet=True)
         focus = self.pb.active_mesh_template().focus
@@ -604,7 +612,22 @@ class CollapseDriver:
         meta.update(time=self._t(), remesh_count=self.pb.remesh_count,
                     focus=None if focus is None else asdict(focus), dt_prev=st.dt_prev,
                     episodes=self.episodes.to_dict(), max_curvature_kind=MAX_CURVATURE_KIND)
+        cut = getattr(self.pb, "cut", None)
+        if cut is not None:
+            meta["cut"] = cut
+        meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
+
+    def keep_state(self, path: Path, **extra) -> Path:
+        """A dump outside the rotation of ``state_keep`` (``path`` under ``states/``)."""
+        self._write_state(Path(path), **extra)
+        return Path(path)
+
+    def save_state(self):
+        """Dump the pyoomph state and the driver state; keep the last ``state_keep`` dumps."""
+        st = self.state
+        path = self.outdir / "states" / f"state_{st.step:08d}.dump"
+        self._write_state(path)
         st.states.append(path)
         st.last_state_t = self._t()
         while len(st.states) > self.s.state_keep:
@@ -640,12 +663,46 @@ class CollapseDriver:
             self.episodes.hys = self.s.eta_hys
         else:  # the episode in progress began at a time this dump does not record
             self.episodes = EpisodeTracker(hys=self.s.eta_hys, history_known=False)
+        if meta.get("cut") is not None:
+            from .surgery import restore_cut
+
+            restore_cut(self.pb, meta["cut"])
         ep = self.episodes
         self._event("restart", self.measure(), from_time=meta["time"],
                     episode_history="episodes" in meta, episode=ep.index, episode_kind=ep.kind,
                     episode_start=ep.start, episode_partial=ep.partial, h_crest=ep.h_crest,
                     t_crest=ep.t_crest, crest_jet=ep.crest_jet, max_curvature_reset=reset,
                     coarsen_held_until=st.coarsen_held_until)
+
+    def reset_after_cut(self, record: dict):
+        """Restart the bookkeeping for the surface after a cut (``surgery.cut``).
+
+        The open chain now ends on the axis in a fresh cap: a cavity bottom of a new cycle. The
+        limiters of the local scale and the step, the singular-time series, the largest trough
+        curvature, the jet and the neck are reset, so that the cap's curvature is not read as a
+        collapse and the cycle is not counted twice; the next step is the cut's ``dt0``."""
+        st = self.state
+        dt0 = float(record["settings"]["dt0"])
+        st.ell_prev = st.t_prev = math.nan
+        st.dt_prev = dt0 / self.s.growth
+        self._reset_singular()
+        st.last_singular_t = -math.inf
+        st.max_curvature, st.max_curvature_time = 0.0, math.nan
+        st.born, st.born_step = False, -1
+        st.neck_seen = False
+        st.cavity_seen = True
+        st.cycle += 1
+        st.coarsen_held_until = -math.inf
+        st.refine_blocked_until = -10**9
+        m = self.measure()
+        self._event("cut", m, cycle=st.cycle, delta=record["delta"], rmin=record.get("rmin"),
+                    r_neck=record["r_neck"], z_neck=record["z_neck"],
+                    bridge=record.get("geometry", {}).get("bridge"),
+                    removed_gas=record.get("geometry", {}).get("removed_gas"),
+                    delta_KE=record.get("projection", {}).get("delta_KE"),
+                    transfer=record.get("transfer"))
+        self._snapshot(m, "cut")
+        return m
 
     # --- main loop ----------------------------------------------------------------------------
 
@@ -774,6 +831,10 @@ class CollapseDriver:
                     break
             if self._t() - st.last_state_t >= s.state_dt:
                 self.save_state()
+        if self.keep_stop_state and stop.get("trigger") == "neck-radius":
+            # the measured state of an accepted step: a landing state for a reconnection
+            stop["kept_state"] = str(self.keep_state(
+                self.outdir / "states" / f"stop_{st.step:08d}.dump", stop=stop))
         self._event("stop", m, **stop)
         self._snapshot(m, "stop")
         return {"stop": stop, "steps": st.step, "remesh_count": pb.remesh_count,

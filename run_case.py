@@ -19,6 +19,13 @@ pyoomph's own command-line parser (e.g. ``--omp 4``). Each output directory rece
 ``run_status.json``, ``diagnostics.txt`` (axis height and velocity, mode amplitude, volume, area,
 kinetic energy, dissipation and remesh count after every step), pyoomph's per-step integrals and
 free-surface snapshots (``liquid__interface/``).
+
+Two keys of the ``collapse`` block are not driver settings. ``keep_stop_state`` (default false) keeps
+the state at a neck-radius stop as ``states/stop_<step>.dump``, outside the rotation of dumps: the
+landing state of a reconnection. A ``reconnect`` block (``reconnect.ReconnectSettings``) builds the
+problem with the reconnection handler and the pressure-impulse projection, both inert during the
+run; the cut itself is made from a landing state by ``simulationCases/reconnect_prototype.py``.
+Without either key the problem, the settings and every output are those of an ordinary case.
 """
 
 from __future__ import annotations
@@ -66,6 +73,7 @@ from faraday_singularity.cases import validate_case  # noqa: E402
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import create_run_manifest, pyoomph_revision  # noqa: E402
+from faraday_singularity.reconnect import ReconnectSettings, split_collapse_block  # noqa: E402
 
 MESH_KEYS = ("h_interface", "h_axis", "h_max", "grading", "interface_points")
 CASE_FIELDS_USED = ("schema", "case_id", "geometry.kind", "time_stepping.scheme",
@@ -235,8 +243,15 @@ def main() -> int:
     dt_out = period * float(case["output"]["cadence"])
     t_end = periods * period
     settings = None
+    reconnect = None
+    keep_stop_state = False
     if collapse:
-        block = dict(case["collapse"])
+        try:
+            block, recon_block, keep_stop_state = split_collapse_block(case["collapse"])
+            if recon_block is not None:
+                reconnect = ReconnectSettings.from_dict(recon_block)
+        except ValueError as exc:
+            raise SystemExit(f"{args.case}: {exc}")
         if "snapshot_dt_periods" in block:
             block["snapshot_dt"] = block.pop("snapshot_dt_periods") * period
         settings = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
@@ -312,6 +327,10 @@ def main() -> int:
         "restart": str(args.restart.resolve()) if args.restart is not None else None,
         "argv": sys.argv,
     }
+    if reconnect is not None:
+        info["reconnect"] = reconnect.to_dict()
+    if keep_stop_state:
+        info["keep_stop_state"] = True
     write_json(args.outdir / "parameters.json", info)
 
     from faraday_singularity.problem import FaradayProblem
@@ -321,7 +340,9 @@ def main() -> int:
     write_json(args.outdir / "run_status.json", status)
     problem = None
     try:
-        problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, mesh_output=args.mesh_output)
+        extra = {"reconnect": reconnect} if reconnect is not None else {}
+        problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, mesh_output=args.mesh_output,
+                                 **extra)
         problem.set_output_directory(str(args.outdir))
         problem.write_states = write_states
         with problem:
@@ -333,7 +354,8 @@ def main() -> int:
                 problem.start_diagnostics(args.outdir / "diagnostics.txt")
                 problem.run(t_end, timestep=dt, outstep=dt_out, newton_solver_tolerance=tol)
             else:
-                driver = CollapseDriver(problem, settings, args.outdir)
+                driver = CollapseDriver(problem, settings, args.outdir,
+                                        **({"keep_stop_state": True} if keep_stop_state else {}))
                 try:
                     if args.restart is not None:
                         from pyoomph.output.states import copy_state_file
