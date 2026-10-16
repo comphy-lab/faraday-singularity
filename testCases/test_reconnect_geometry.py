@@ -1,5 +1,12 @@
 """Contract tests of the reconnection geometry: settings, chains, liquid axis spans, the planner on
-gas necks and the replacement of its caps. No finite-element problem is built.
+gas necks and the replacement of its caps, the gas volume near a cut, and the stops after a cut.
+No finite-element problem is built.
+
+Two synthetic gas necks stand in for the necks of a run: a hyperbolic neck of half-angle 10 degrees
+(``synthetic_neck``), and a slender thread (``synthetic_thread``), nearly cylindrical within about
+8 neck radii of the waist and resolved by 25 nodes per neck radius, as the neck of a collapse is at
+its stop. On the thread the planner behaves as on the stored necks of a run: it defers just above
+the neck radius, plans from ``min_landing_ratio`` on, and its caps fold back.
 
 The planner tests on stored profiles of a real neck run only when ``FARADAY_RECONNECT_PROFILES``
 names a directory with ``profile_001028.txt``, ``profile_001055.txt`` and ``profile_001076.txt``
@@ -17,6 +24,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from shapely.geometry import LineString
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -42,6 +50,8 @@ def test_settings_parse_and_round_trip():
                                  {"delta": 1e-4, "bubble_model": "fixed-volume"},
                                  {"delta": 1e-4, "restart": "bdf2"}, {"delta": 1e-4, "max_events": 2},
                                  {"delta": 1e-4, "min_landing_ratio": 1.0},
+                                 {"delta": 1e-4, "max_landing_ratio": 1.03},
+                                 {"delta": 1e-4, "max_landing_ratio": math.inf},
                                  {"delta": 1e-4, "volume_correction": True},
                                  {"delta": 1e-4, "projection": 1}])
 def test_settings_reject_invalid(bad):
@@ -51,13 +61,17 @@ def test_settings_reject_invalid(bad):
 
 def test_collapse_block_split_leaves_the_driver_block_unchanged():
     block = {"neck_stop": 3e-4, "h_floor": 2e-5}
-    rest, recon, keep = rc.split_collapse_block(block)
-    assert rest == block and recon is None and keep is False
-    rest, recon, keep = rc.split_collapse_block(dict(block, reconnect={"delta": 3e-4},
-                                                     keep_stop_state=True))
+    rest, recon, keep, landing = rc.split_collapse_block(block)
+    assert rest == block and recon is None and keep is False and landing == ()
+    rest, recon, keep, landing = rc.split_collapse_block(
+        dict(block, reconnect={"delta": 3e-4}, keep_stop_state=True, landing=[2.5e-4, 1e-3, 5e-4]))
     assert rest == block and recon == {"delta": 3e-4} and keep is True
-    with pytest.raises(ValueError):
-        rc.split_collapse_block({"keep_stop_state": "yes"})
+    assert landing == (1e-3, 5e-4, 2.5e-4)
+    for bad in ({"keep_stop_state": "yes"}, {"landing": 1e-3}, {"landing": [1e-3, 0.0]},
+                {"landing": [1e-3, True]}, {"landing": [1e-3, math.nan]},
+                {"landing": [1e-3, 1e-3]}):
+        with pytest.raises(ValueError):
+            rc.split_collapse_block(bad)
 
 
 # --- chains and the axis -------------------------------------------------------------------------
@@ -120,12 +134,13 @@ def test_tangent_arc_meets_the_axis_at_a_right_angle():
 
 
 def synthetic_neck(r_n: float, beta_deg: float = 10.0, z_n: float = 4.7, a: float = 0.05,
-                   per_radius: float = 10.0):
+                   per_radius: float = 10.0, plateau: float = 0.0):
     """A gas boundary from the bottom of a bubble on the axis, through a hyperbolic neck of radius
     ``r_n`` and asymptotic half-angle ``beta``, to the wall: ``r(z)`` ordered from the axis.
 
-    Within about 20 r_n of the neck the shape and the node spacing (``r_n/per_radius``) scale with
-    ``r_n``, so a cut at a fixed ``delta/r_n`` is geometrically similar for every ``r_n``."""
+    Within about 20 r_n of the neck the shape and the node spacing (``r_n/per_radius`` within
+    ``plateau r_n`` of the neck, growing beyond) scale with ``r_n``, so a cut at a fixed
+    ``delta/r_n`` is geometrically similar for every ``r_n``."""
     tb = math.tan(math.radians(beta_deg))
     z0 = z_n - 0.3  # bottom of the bubble
     zc = z0 + a  # centre of its spherical bottom
@@ -151,7 +166,7 @@ def synthetic_neck(r_n: float, beta_deg: float = 10.0, z_n: float = 4.7, a: floa
 
     def h(p):
         d = math.hypot(*(p - neck))
-        return min(0.02, max(r_n / per_radius, 0.1 * d))
+        return min(0.02, max(r_n / per_radius, 0.1 * max(0.0, d - plateau * r_n)))
 
     out = [P[0]]
     si = 0.0
@@ -165,6 +180,14 @@ def synthetic_neck(r_n: float, beta_deg: float = 10.0, z_n: float = 4.7, a: floa
     Q[0, 0] = 0.0
     Q[-1, 0] = R_C
     return Q[:, 0], Q[:, 1]
+
+
+def synthetic_thread(r_n: float):
+    """A slender gas thread like the neck of a collapse at its stop: ``r = sqrt(r_n^2 + (dz/8)^2)``
+    (1.6 r_n at 10 r_n from the waist, a cone of 7 degrees beyond), uniformly resolved by 25 nodes
+    per neck radius within 20 r_n of the waist."""
+    return synthetic_neck(r_n, beta_deg=math.degrees(math.atan(1.0 / 8.0)), a=0.03,
+                          per_radius=25.0, plateau=20.0)
 
 
 def test_synthetic_neck_measured_as_the_driver_does():
@@ -188,9 +211,9 @@ def test_planner_classes_on_a_synthetic_neck(synthetic_scan):
     for r, z, rn in synthetic_scan.values():
         assert rc.plan_on_profile(r, z, 0.97 * rn, s)[0] == "none"
         assert rc.plan_on_profile(r, z, 1.0 * rn, s)[0] == "none"
-        for f in (1.005, 1.01, 1.02):
-            assert rc.plan_on_profile(r, z, f * rn, s)[0] in ("none", "deferral", "unplannable",
-                                                              "refused", "plan")
+        # just above the neck the waist is shorter than 2 rmin: the planner defers
+        assert [rc.plan_on_profile(r, z, f * rn, s)[0] for f in (1.005, 1.01, 1.02)] == \
+            ["deferral", "deferral", "plan"]
         outcome, plan = rc.plan_on_profile(r, z, 1.05 * rn, s)
         assert outcome == "plan"
         ends = sorted(tuple(c.end_types) for c in plan.new_chains)
@@ -225,6 +248,99 @@ def test_replaced_caps_on_a_synthetic_neck_scale_with_the_cut(synthetic_scan):
     assert max(bridges) / min(bridges) < 1.2
 
 
+@pytest.fixture(scope="module")
+def thread_scan():
+    out = {}
+    for r_n in (1e-3, 3e-4):
+        r, z = synthetic_thread(r_n)
+        rn, _, _ = rc.neck_radius(r, z)
+        assert rn == pytest.approx(r_n, rel=1e-5)
+        out[r_n] = (r, z, rn)
+    return out
+
+
+def test_planner_classes_on_a_slender_thread(thread_scan):
+    """As on the stored necks of a run: a deferral just above the neck radius, plans from
+    ``min_landing_ratio`` up."""
+    s = rc.ReconnectSettings(delta=1.0)
+    for r, z, rn in thread_scan.values():
+        assert rc.plan_on_profile(r, z, rn, s)[0] == "none"
+        assert rc.plan_on_profile(r, z, 1.005 * rn, s)[0] == "deferral"
+        lo = s.min_landing_ratio
+        for f in (lo, 1.05, s.max_landing_ratio, 1.2):
+            assert rc.plan_on_profile(r, z, f * rn, s)[0] == "plan", f
+
+
+def _cut_on(r, z, delta):
+    s = rc.ReconnectSettings(delta=delta)
+    outcome, plan = rc.plan_on_profile(r, z, delta, s)
+    assert outcome == "plan"
+    folded = [rc.cap_backtrack(nc.points[:rc.fresh_tip_run(nc.origin, end) + 1] if end == 0 else
+                               nc.points[::-1][:rc.fresh_tip_run(nc.origin, end) + 1]) / delta
+              for nc in plan.new_chains for end in (0, -1)
+              if nc.end_types[end] == "axis" and int(nc.origin[end]) < 0]
+    simple = [LineString(nc.points).is_simple for nc in plan.new_chains]
+    edits = rc.replace_caps(plan.new_chains, delta, s)
+    chains = [rc.orient_chain(c.points, R_C, 1e-7) for c in rc.plan_chains(plan.new_chains)]
+    cg = rc.cut_geometry(chains, s.reservoir_depth, sum(plan.fragment_volumes_before))
+    return s, folded, simple, edits, chains, cg
+
+
+
+@pytest.mark.parametrize("f", [1.03, 1.05, 1.2])
+def test_planner_caps_fold_on_a_slender_thread_and_replaced_caps_do_not(thread_scan, f):
+    """The planner's caps double back by several cut radii yet pass the simplicity check the
+    meshing relies on; the replaced caps are monotone, tangent at the splice and without knife
+    edges; the liquid gains about 50-70 delta^3; and the state right after the cut meets no stop."""
+    for r, z, rn in thread_scan.values():
+        delta = f * rn
+        s, folded, simple, edits, chains, cg = _cut_on(r, z, delta)
+        assert all(simple) and len(folded) == 2 and min(folded) > 1.0
+        assert len(edits) == 2
+        for e in edits:
+            assert e.backtrack > 1.0
+            assert e.min_angle >= 30.0 and e.splice_angle > 170.0 and e.r_s >= delta
+        assert cg.bridge > 2 * delta and 40 * delta**3 < cg.removed_gas < 80 * delta**3
+        assert rc.post_cut_stops(chains, cg, s, rc.tip_size(min(e.radius for e in edits), delta, s),
+                                 fold_stop=3e-4) is None
+
+
+def test_cut_geometry_in_delta_units_depends_on_the_landing_ratio(thread_scan):
+    """Within the admitted band of delta/r_n the bridge and the removed gas, in units of delta,
+    vary by less than a quarter; at twice the neck radius they do not: a cut there is refused."""
+    r, z, rn = thread_scan[3e-4]
+    s = rc.ReconnectSettings(delta=1.0)
+    geo = {}
+    for f in (s.min_landing_ratio, s.max_landing_ratio, 2.0):
+        cg = _cut_on(r, z, f * rn)[-1]
+        geo[f] = (cg.bridge / (f * rn), cg.removed_gas / (f * rn) ** 3)
+    lo, hi, far = (geo[f] for f in (s.min_landing_ratio, s.max_landing_ratio, 2.0))
+    assert hi[0] / lo[0] < 1.25 and hi[1] / lo[1] < 1.25
+    assert far[0] / lo[0] > 1.5 and far[1] / lo[1] > 1.3
+
+
+def test_gas_volume_in_a_box():
+    # a gas cylinder of radius a from the axis tip at z = 1 up to the wall closure
+    a = 0.1
+    open_chain = rc.Chain(np.array([[0.0, 1.0], [a, 1.0], [a, 2.0], [R_C, 2.0]]), ("axis", "fixed"))
+    box = (0.5, 1.2, 1.7)
+    assert rc.gas_volume_in_box([open_chain], 3.0, box) == pytest.approx(math.pi * a**2 * 0.5)
+    # a bubble (a sphere of radius b) inside the box, and one cut by its lower edge
+    b = 0.05
+    th = np.linspace(-0.5 * math.pi, 0.5 * math.pi, 2001)
+    sphere = rc.Chain(np.column_stack([b * np.cos(th), 1.45 + b * np.sin(th)]), ("axis", "axis"))
+    sphere.points[[0, -1], 0] = 0.0
+    v = rc.gas_volume_in_box([open_chain, sphere], 3.0, box)
+    assert v == pytest.approx(math.pi * a**2 * 0.5 + 4 / 3 * math.pi * b**3, rel=1e-5)
+    half = rc.Chain(sphere.points - [0.0, 0.25], ("axis", "axis"))  # centre on z = 1.2
+    v = rc.gas_volume_in_box([open_chain, half], 3.0, box)
+    assert v == pytest.approx(math.pi * a**2 * 0.5 + 2 / 3 * math.pi * b**3, rel=1e-5)
+    # moving the surface outside the box changes nothing
+    moved = rc.Chain(np.array([[0.0, 1.0], [a, 1.0], [a, 2.0], [1.0, 2.3], [R_C, 2.1]]),
+                     ("axis", "fixed"))
+    assert rc.gas_volume_in_box([moved], 3.0, box) == rc.gas_volume_in_box([open_chain], 3.0, box)
+
+
 def test_cap_replacement_of_a_hairpin():
     """A planner-like chain whose fresh tip folds back (a needle and a connector) is rebuilt as a
     monotone arc from a surviving node."""
@@ -249,10 +365,27 @@ def test_cap_replacement_of_a_hairpin():
     assert np.all(np.diff(nc.zeta) > 0) and nc.zeta[0] == 0.0
 
 
+def _bubble(z0=4.6, length=0.08, a=0.01, waist=0.0, n=801):
+    """A bubble from the axis to the axis, ``r = a sin(pi s)`` with ``s`` from 0 to 1, narrowed at
+    mid-height by the fraction ``waist``."""
+    s = np.linspace(0.0, 1.0, n)
+    r = a * np.sin(math.pi * s) * (1.0 - waist * np.exp(-(((s - 0.5) / 0.05) ** 2)))
+    r[[0, -1]] = 0.0
+    return rc.Chain(np.column_stack([r, z0 + length * s]), ("axis", "axis"))
+
+
+def _cavity(z_tip=4.69, n=400):
+    """An open chain from the axis just above the bubble, along a thread of radius 2e-3 that
+    widens to the wall."""
+    z = np.linspace(z_tip, 4.75, n)
+    r = 2e-3 * np.sqrt(np.clip((z - z_tip) / 1e-3, 0.0, 1.0))
+    pts = np.vstack([np.column_stack([r, z]), [[0.5, 5.0], [R_C, 6.0]]])
+    return rc.Chain(pts, ("axis", "fixed"))
+
+
 def test_post_cut_stops():
     s = rc.ReconnectSettings(delta=1e-3)
-    bubble = rc.Chain(np.array([[0.0, 4.6], [0.01, 4.64], [0.0, 4.68]]), ("axis", "axis"))
-    cavity = rc.Chain(np.array([[0.0, 4.69], [0.01, 4.7], [R_C, 6.0]]), ("axis", "fixed"))
+    bubble, cavity = _bubble(), _cavity()
     cut = rc.cut_geometry([bubble, cavity], 3.0, gas_before=1.0)
     assert cut.bridge == pytest.approx(0.01)
     assert rc.post_cut_stops([bubble, cavity], cut, s, h_min=1e-5) is None
@@ -260,6 +393,73 @@ def test_post_cut_stops():
     assert rc.post_cut_stops([bubble, closing], cut, s, 1e-5)["reason"] == "bridge-closing"
     small = rc.Chain(np.array([[0.0, 4.6], [1e-3, 4.60025], [0.0, 4.6005]]), ("axis", "axis"))
     assert rc.post_cut_stops([small, cavity], cut, s, 1e-5)["reason"] == "bubble-jets-approach"
+    assert rc.post_cut_stops([bubble], cut, s, 1e-5) == {"reason": "topology-changed", "chains": 1}
+    assert rc.post_cut_stops([bubble, cavity, small], cut, s, 1e-5)["chains"] == 3
+    # the cavity coming down beside the bubble
+    beside = rc.Chain(np.array([[0.0, 4.69], [0.0103, 4.6905], [0.0102, 4.64], [0.0105, 4.6],
+                                [0.02, 4.6], [0.5, 5.0], [R_C, 6.0]]), ("axis", "fixed"))
+    stop = rc.post_cut_stops([bubble, beside], cut, s, 1e-4)
+    assert stop["reason"] == "chain-contact-approach" and stop["chain_gap"] < 3e-4
+    # the bubble drains under its constant pressure
+    thin = rc.Chain(bubble.points * [0.05, 1.0], ("axis", "axis"))
+    assert rc.post_cut_stops([thin, cavity], cut, s, 1e-5)["reason"] == "bubble-vanishing"
+
+
+def test_post_cut_stops_on_a_second_neck_of_either_chain():
+    s = rc.ReconnectSettings(delta=1e-3)
+    bubble, cavity = _bubble(), _cavity()
+    cut = rc.cut_geometry([bubble, cavity], 3.0, gas_before=1.0)
+    # a waist of the bubble wider than delta is no stop; narrower, it is a second pinch-off
+    assert rc.post_cut_stops([_bubble(waist=0.5), cavity], cut, s, 1e-5) is None
+    necked = _bubble(waist=0.95)
+    stop = rc.post_cut_stops([necked, cavity], cut, s, 1e-5)
+    assert stop["reason"] == "secondary-pinch-approach" and stop["chain"] == "bubble"
+    assert stop["r_neck"] == pytest.approx(5e-4, rel=1e-3) and stop["z_neck"] == pytest.approx(4.64)
+    assert stop["neck_limit"] == s.delta
+    # the limit is at least neck_elements elements
+    stop = rc.post_cut_stops([_bubble(waist=0.5), cavity], cut, s, 3e-3)
+    assert stop["reason"] == "secondary-pinch-approach"
+    assert stop["neck_limit"] == pytest.approx(9e-3)
+    # the bubble's axis ends are no necks: the measured neck is interior on both sides
+    assert rc.chain_neck(bubble.points, bubble.end_types)[2] == -1
+    # a waist on the open chain, behind the cavity's fresh tip
+    P = cavity.points.copy()
+    k = 300
+    P[k - 5:k + 6, 0] = np.minimum(P[k - 5:k + 6, 0], 8e-4 + 1e-5 * np.abs(np.arange(-5, 6)))
+    stop = rc.post_cut_stops([bubble, rc.Chain(P, cavity.end_types)], cut, s, 1e-5)
+    assert stop["reason"] == "secondary-pinch-approach" and stop["chain"] == "open"
+    assert stop["r_neck"] == pytest.approx(8e-4)
+
+
+def test_post_cut_stops_on_a_fold_of_the_bubble():
+    """A slot of gap 5e-4 in the bubble's surface (the groove beside a jet), with nodes 2.5e-4
+    apart: below 3 element lengths, it is a fold to stop at; a bubble that crosses itself raises."""
+    from faraday_singularity.selfcontact import InterfaceSelfIntersection
+
+    s = rc.ReconnectSettings(delta=1e-3)
+    cavity = _cavity()
+    h = 2.5e-4
+
+    def line(a, b):
+        n = max(2, math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / h) + 1)
+        return np.linspace(a, b, n)[:-1]
+
+    def slotted(gap):
+        corners = [(0.0, 4.6), (0.01, 4.6), (0.01, 4.6 + gap), (0.002, 4.6 + gap),
+                   (0.002, 4.65), (0.008, 4.66), (0.0, 4.68)]
+        pts = np.vstack([line(corners[i], corners[i + 1]) for i in range(len(corners) - 1)]
+                        + [np.array([corners[-1]])])
+        return rc.Chain(pts, ("axis", "axis"))
+
+    cut = rc.cut_geometry([slotted(0.01), cavity], 3.0, gas_before=1.0)
+    assert rc.post_cut_stops([slotted(0.01), cavity], cut, s, 1e-5, fold_stop=3e-4) is None
+    stop = rc.post_cut_stops([slotted(5e-4), cavity], cut, s, 1e-5, fold_stop=3e-4)
+    assert stop["reason"] == "self-contact-approach" and stop["chain"] == "bubble"
+    assert stop["fold_gap"] == pytest.approx(5e-4) and stop["fold_limit"] == pytest.approx(3 * 2 * h)
+    crossed = slotted(5e-4)
+    crossed.points[[200, 201]] = crossed.points[[201, 200]]  # two nodes of the bottom swapped
+    with pytest.raises(InterfaceSelfIntersection):
+        rc.post_cut_stops([crossed, cavity], cut, s, 1e-5, fold_stop=3e-4)
 
 
 # --- stored profiles of a real neck --------------------------------------------------------------
@@ -304,9 +504,8 @@ def test_planner_classes_on_stored_necks(step):
 @pytest.mark.parametrize("step", [1055, 1076])
 def test_planner_caps_fold_and_replaced_caps_do_not(step):
     """The planner's caps on this neck double back by several cut radii; the replaced caps are
-    monotone from the tip, without knife-edge angles, and tangent at the splice."""
-    from shapely.geometry import LineString
-
+    monotone from the tip, without knife-edge angles, and tangent at the splice; the liquid gains
+    as much as on the synthetic thread."""
     r, z, _ = _stored(step)
     r_n, _, _ = rc.neck_radius(r, z)
     for f in (1.03, 1.2, 2.0):
@@ -324,7 +523,9 @@ def test_planner_caps_fold_and_replaced_caps_do_not(step):
             assert e.min_angle >= 30.0 and e.splice_angle > 170.0 and e.r_s >= delta
         cg = rc.cut_geometry(rc.plan_chains(plan.new_chains), s.reservoir_depth,
                              sum(plan.fragment_volumes_before))
-        assert cg.bridge > 2 * delta and 0 < cg.removed_gas < 100 * delta**3
+        assert cg.bridge > 2 * delta and 40 * delta**3 < cg.removed_gas < 100 * delta**3
+        if f <= 1.2:
+            assert cg.removed_gas < 80 * delta**3
 
 
 @stored

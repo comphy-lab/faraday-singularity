@@ -21,14 +21,21 @@ This module holds what needs no finite-element problem:
   therefore always rebuilt: from a surviving node of the old interface at radius ``r_s >=
   cap_splice_factor * delta`` the new cap is the circular arc tangent to the old interface there
   whose centre lies on the axis, so it meets the axis at a right angle;
-* checks of the edited chains (simple, disjoint, monotone cap, no knife-edge angles) and the volume
-  the cut removes from the gas (:func:`chain_volumes`);
-* the stops of a run after the cut (:func:`post_cut_stops`).
+* checks of the edited chains (simple, disjoint, monotone cap, no knife-edge angles), the volume
+  the cut removes from the gas (:func:`chain_volumes`), and the gas volume within a box around the
+  cut (:func:`gas_volume_in_box`), which separates the volume the cut adds to the liquid from the
+  drift of rebuilding the whole free surface;
+* the stops of a run after the cut (:func:`post_cut_stops`), on both chains.
 
 Units are those of the solver: length ``1/k``. The neck radius ``r_n`` is the narrowest interior
 local minimum of ``r`` along the free surface, as the collapse driver measures it
 (:func:`neck_radius`). A cut needs ``delta`` a little above ``r_n``: just above it the planner
-defers (the waist is not yet separable), so the landing requires ``delta/r_n >= min_landing_ratio``.
+defers (the waist is not yet separable), so the landing requires ``delta/r_n >=
+min_landing_ratio``. The cut geometry in units of ``delta`` (bridge, removed gas) depends on
+``delta/r_n``, so a cut also requires ``delta/r_n <= max_landing_ratio``: a study in ``delta``
+needs, for each ``delta``, a landing state whose neck has just passed below it. A run with
+``collapse.landing`` keeps one for each of its cut radii, at the first measured state with
+``delta/r_n >= LANDING_RATIO`` (``driver.CollapseDriver``).
 """
 
 from __future__ import annotations
@@ -40,13 +47,15 @@ from typing import Any, Sequence
 import numpy as np
 
 from .collapse import Profile, necks
-from .selfcontact import check_simple_interface
+from .selfcontact import InterfaceSelfIntersection, check_simple_interface, fold_gap
 
 AXIS, FIXED = "axis", "fixed"
 FILLS = ("blend", "zero")
 RESTARTS = ("bdf1", "impulsive")
 BUBBLE_MODELS = ("constant-pressure",)
 CAPS = ("arc",)
+LANDING_RATIO = 1.05  # a landing state for cut radius delta: the first with delta / r_n >= this
+MAX_LANDING_RATIO = 1.1  # and a cut is refused above this delta / r_n (the default of the settings)
 
 
 @dataclass(frozen=True)
@@ -60,6 +69,7 @@ class ReconnectSettings:
     reservoir_depth: float = 3.0  # closes the cavity chain through the gas above the free surface
     cap_window_factor: float = 6.0  # the planner's exclusion radius around the event, in delta
     min_landing_ratio: float = 1.03  # delta / r_n at least this
+    max_landing_ratio: float = MAX_LANDING_RATIO  # and at most this, retries of the planner included
     plan_attempts: int = 5  # planner calls, the cut radius growing by retry_factor after a refusal
     retry_factor: float = 1.01
     cap: str = "arc"
@@ -99,6 +109,11 @@ class ReconnectSettings:
             positive(name)
         if not self.min_landing_ratio > 1.0:
             raise ValueError("reconnect.min_landing_ratio must exceed one")
+        if isinstance(self.max_landing_ratio, bool) or not isinstance(
+                self.max_landing_ratio, (int, float)) or not math.isfinite(self.max_landing_ratio) \
+                or not self.max_landing_ratio > self.min_landing_ratio:
+            raise ValueError("reconnect.max_landing_ratio must be finite and exceed "
+                             "min_landing_ratio")
         if not self.retry_factor > 1.0:
             raise ValueError("reconnect.retry_factor must exceed one")
         for name in ("plan_attempts", "cap_min_points", "max_events"):
@@ -144,20 +159,29 @@ class ReconnectSettings:
         return out
 
 
-def split_collapse_block(block: dict) -> tuple[dict, dict | None, bool]:
+def split_collapse_block(block: dict) -> tuple[dict, dict | None, bool, tuple[float, ...]]:
     """Separate the reconnection keys from a ``collapse`` block.
 
     Returns the block for :class:`~faraday_singularity.driver.CollapseSettings` (unchanged apart
-    from the two keys), the ``reconnect`` block or ``None``, and ``keep_stop_state``.
+    from the three keys), the ``reconnect`` block or ``None``, ``keep_stop_state``, and the cut
+    radii of ``landing`` (largest first; empty without the key), for each of which the run keeps a
+    landing state.
     """
     rest = dict(block)
     recon = rest.pop("reconnect", None)
     keep = rest.pop("keep_stop_state", False)
+    landing = rest.pop("landing", [])
     if not isinstance(keep, bool):
         raise ValueError("collapse.keep_stop_state must be true or false")
     if recon is not None and not isinstance(recon, dict):
         raise ValueError("collapse.reconnect must be an object")
-    return rest, recon, keep
+    if not isinstance(landing, list) or any(
+            isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x)
+            or not x > 0 for x in landing):
+        raise ValueError("collapse.landing must be a list of positive cut radii")
+    if len(set(landing)) != len(landing):
+        raise ValueError("collapse.landing: a cut radius is repeated")
+    return rest, recon, keep, tuple(sorted((float(x) for x in landing), reverse=True))
 
 
 # --- the neck -----------------------------------------------------------------------------------
@@ -171,6 +195,16 @@ def neck_radius(r, z) -> tuple[float, float, int]:
     if not nk:
         return math.nan, math.nan, -1
     return nk[0]
+
+
+def chain_neck(points, end_types, skip: int = 2) -> tuple[float, float, int]:
+    """:func:`neck_radius` of one chain: ``(r, z, index)`` of its narrowest interior local minimum
+    of ``r``, ignoring ``skip`` nodes at each end on the axis (a chain from the axis to the axis
+    has two); NaN without one."""
+    P = np.asarray(points, dtype=float)
+    last = len(P) - 1 - (skip if end_types[1] == AXIS else 0)
+    nk = [x for x in necks(Profile(P[:, 0], P[:, 1]), skip=skip) if x[2] <= last]
+    return nk[0] if nk else (math.nan, math.nan, -1)
 
 
 # --- chains -------------------------------------------------------------------------------------
@@ -291,6 +325,30 @@ def revolved_volume(section) -> float:
 def chain_volumes(chains, reservoir_depth: float) -> list[float]:
     """Gas volume each chain bounds (the open chain closed through the gas above the surface)."""
     return [revolved_volume(closed_section(c.points, c.end_types, reservoir_depth)) for c in chains]
+
+
+def gas_volume_in_box(chains, reservoir_depth: float, box: Sequence[float]) -> float:
+    """Gas volume the chains bound within ``r <= box[0]``, ``box[1] <= z <= box[2]``.
+
+    Before and after a cut, with the chains through the free-surface nodes of the two meshes, the
+    difference is the gas the cut turned into liquid there, without the drift of the remesh over
+    the rest of the free surface (the rebuilt spline sags differently from the old elements). The
+    polygons through the nodes (with the midside nodes of the quadratic elements) bound the same
+    region as the tessellated elements."""
+    from shapely.geometry import Polygon
+    from shapely.geometry import box as shapely_box
+
+    clip = shapely_box(0.0, float(box[1]), float(box[0]), float(box[2]))
+    total = 0.0
+    for c in chains:
+        section = Polygon(closed_section(c.points, c.end_types, reservoir_depth))
+        part = section.intersection(clip)
+        for poly in getattr(part, "geoms", [part]):
+            if poly.geom_type != "Polygon" or poly.is_empty:
+                continue
+            total += revolved_volume(np.asarray(poly.exterior.coords)[:-1])
+            total -= sum(revolved_volume(np.asarray(h.coords)[:-1]) for h in poly.interiors)
+    return total
 
 
 # --- caps ---------------------------------------------------------------------------------------
@@ -568,13 +626,25 @@ def plan_on_profile(r, z, rmin: float, settings: ReconnectSettings) -> tuple[str
 
 
 def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: ReconnectSettings,
-                   h_min: float) -> dict | None:
+                   h_min: float, *, neck_elements: float = 3.0, fold_ratio: float = 4.0,
+                   fold_stop: float = 1e-3, fold_stop_elements: float = 3.0,
+                   fold_search: float = 4.0) -> dict | None:
     """The stop a state after the cut calls for, if any.
 
     The mesh cannot follow a second change of topology: the bridge closing again (the bubble and
     cavity tips, on different chains, meeting across it), the chains touching elsewhere, the
-    bubble's two tips meeting (it would become a ring), or the bubble draining away under its
-    constant pressure."""
+    bubble's two tips meeting (it would become a ring), a new neck on either chain narrower than
+    ``max(delta, neck_elements h_min)`` (``secondary-pinch-approach``: the thread behind a fresh cap
+    can pinch again), a closing fold on the bubble (``self-contact-approach``, with the driver's
+    fold limits: ``fold_gap`` with ``fold_ratio``, and a gap below ``max(fold_stop,
+    fold_stop_elements h_elem)``), or the bubble draining away under its constant pressure. A
+    bubble that crosses itself raises
+    :class:`~faraday_singularity.selfcontact.InterfaceSelfIntersection`.
+
+    The collapse driver measures only the open chain (``FaradayProblem.interface_arrays``), and its
+    fold stop covers that chain within its focus region; these stops are the only ones on the
+    bubble, which before the cut was part of the open chain. Each chain is examined on its own, so
+    the bridge between the two is never a fold."""
     if len(chains) != 2:
         return {"reason": "topology-changed", "chains": len(chains)}
     bubble = next(c for c in chains if not c.is_open)
@@ -591,6 +661,21 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     length = zb[1] - zb[0]
     if length < max(settings.delta, 3.0 * h_min):
         return {"reason": "bubble-jets-approach", "bubble_length": length}
+    neck_limit = max(settings.delta, neck_elements * h_min)
+    for name, c in (("bubble", bubble), ("open", cavity)):
+        r_n, z_n, _ = chain_neck(c.points, c.end_types)
+        if math.isfinite(r_n) and r_n < neck_limit:
+            return {"reason": "secondary-pinch-approach", "trigger": "neck-radius", "chain": name,
+                    "r_neck": r_n, "z_neck": z_n, "neck_limit": neck_limit}
+    fold = fold_gap(bubble.points[:, 0], bubble.points[:, 1], ratio=fold_ratio, stop=fold_stop,
+                    stop_elements=fold_stop_elements, search_factor=fold_search)
+    if fold.crossed:
+        raise InterfaceSelfIntersection("the bubble's free surface crosses itself after the cut")
+    fold_limit = max(fold_stop, fold_stop_elements * fold.h_elem)
+    if math.isfinite(fold.gap) and fold.gap < fold_limit:
+        return {"reason": "self-contact-approach", "trigger": "fold-gap", "chain": "bubble",
+                "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
+                "fold_h_elem": fold.h_elem, "fold_limit": fold_limit}
     vb = revolved_volume(bubble.points)
     if vb < settings.bubble_stop * cut.bubble_volume:
         return {"reason": "bubble-vanishing", "bubble_volume": vb}

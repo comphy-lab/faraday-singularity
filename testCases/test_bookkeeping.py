@@ -145,8 +145,8 @@ def _sharp_then_flat_trough(t, r, t_flat=0.045):
 class PrescribedDriver(CollapseDriver):
     """Measurement given by ``fields(t)``; everything else as in the real driver."""
 
-    def __init__(self, pb, settings, outdir, fields):
-        super().__init__(pb, settings, outdir)
+    def __init__(self, pb, settings, outdir, fields, **kw):
+        super().__init__(pb, settings, outdir, **kw)
         self.fields = fields
 
     def measure(self) -> dict:
@@ -1400,3 +1400,83 @@ def test_jet_stop_is_checked_after_a_remesh(tmp_path):
     (remesh,) = [e for e in events if e["event"] == "remesh"]
     assert result["stop"]["reason"] == "jet-confirmed"
     assert result["steps"] == remesh["step"] and result["stop"]["aspect"] == pytest.approx(0.2)
+
+
+# --- landing states for a study in the cut radius ------------------------------------------------
+
+
+def _closing_neck(t):
+    """A neck closing at a constant rate, by 0.15 to 1.2 % of its radius per step of 1e-3."""
+    return {"r_neck": 2e-3 - 3e-3 * t, "z_neck": 1.0}
+
+
+def _landing_settings():
+    return _settings(t_end=1.0, dt_max=1e-3, neck_stop=1e-4, h_floor=1e-6, state_dt=0.1,
+                     state_keep=100)
+
+
+def test_landing_states_for_a_list_of_cut_radii(tmp_path):
+    from faraday_singularity.reconnect import LANDING_RATIO, MAX_LANDING_RATIO
+
+    deltas = (2.5e-4, 1e-3, 5e-4)
+    drv = PrescribedDriver(FakeProblem(), _landing_settings(), tmp_path, _closing_neck,
+                           landing=deltas)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "pinch-off-approach"
+    landings = [e for e in _read_events(tmp_path) if e["event"].startswith("landing")]
+    assert [e["event"] for e in landings] == ["landing"] * 3
+    assert [e["delta"] for e in landings] == [1e-3, 5e-4, 2.5e-4]
+    for e in landings:
+        assert LANDING_RATIO <= e["delta_over_r_neck"] < MAX_LANDING_RATIO
+        # the first state past delta / LANDING_RATIO: the step before had not reached it
+        assert e["r_neck"] + 3e-6 > e["delta"] / LANDING_RATIO
+        meta = json.loads(Path(e["path"]).with_suffix(".json").read_text())
+        assert Path(e["path"]).name == f"landing_{e['delta']:.6g}.dump"
+        assert meta["landing"]["delta"] == e["delta"] and meta["time"] == e["time"]
+        assert e["delta"] in meta["landed"]
+    # rotating dumps carry the radii kept so far
+    rotating = [json.loads(f.read_text()) for f in sorted((tmp_path / "states").glob("state_*.json"))]
+    assert rotating and all("landed" in m for m in rotating)
+
+
+def test_landing_after_a_restart_and_a_missed_landing(tmp_path):
+    s = _landing_settings()
+    drv = PrescribedDriver(FakeProblem(), s, tmp_path / "a", _closing_neck, landing=(1e-3, 5e-4))
+    drv.run(1e-9)
+    drv.close()
+    meta = json.loads((tmp_path / "a" / "states" / "landing_0.001.json").read_text())
+    assert meta["landed"] == [1e-3]
+    # resumed from the first landing state with one more radius: the kept one is not kept again
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, s, tmp_path / "b", _closing_neck, landing=(1e-3, 5e-4, 2.5e-4))
+    drv.restore(meta)
+    drv.run(1e-9)
+    drv.close()
+    kept = sorted(f.name for f in (tmp_path / "b" / "states").glob("landing_*.dump"))
+    assert kept == ["landing_0.00025.dump", "landing_0.0005.dump"]
+    full, rest = _rows(tmp_path / "a"), _rows(tmp_path / "b")
+    k = int(np.searchsorted(full["step"], meta["step"]))
+    for name in ("step", "cycle", "time", "dt", "r_neck"):  # the run continues as it was
+        assert np.array_equal(rest[name][1:], full[name][k + 1:], equal_nan=True), name
+    # a radius the neck has already passed by more than MAX_LANDING_RATIO is no landing
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, s, tmp_path / "c", _closing_neck, landing=(1.2e-3,))
+    drv.restore(meta)
+    drv.run(1e-9)
+    drv.close()
+    missed = [e for e in _read_events(tmp_path / "c") if e["event"].startswith("landing")]
+    assert [e["event"] for e in missed] == ["landing-missed"]
+    assert missed[0]["delta_over_r_neck"] > missed[0]["max_landing_ratio"]
+    assert not list((tmp_path / "c" / "states").glob("landing_*"))
+
+
+def test_dumps_without_landing_have_no_landing_record(tmp_path):
+    drv = PrescribedDriver(FakeProblem(), _landing_settings(), tmp_path, _closing_neck)
+    drv.run(1e-9)
+    drv.close()
+    metas = [json.loads(f.read_text()) for f in (tmp_path / "states").glob("*.json")]
+    assert metas and all("landed" not in m for m in metas)
+    assert not any(e["event"].startswith("landing") for e in _read_events(tmp_path))

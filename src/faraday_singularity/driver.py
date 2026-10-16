@@ -124,8 +124,12 @@ it restarts from zero (``max_curvature_reset`` in the ``restart`` event), so the
 next ``jet-born`` event and the run status report covers only the rows after the restart.
 
 Kept dumps lie outside the rotation of ``state_keep``: with ``keep_stop_state`` the state at a
-neck-radius stop (``stop_<step>.dump``, the landing state of a reconnection), and the ``precut`` and
-``postcut`` states of a cut (``surgery.py``). After a cut (:meth:`CollapseDriver.reset_after_cut`)
+neck-radius stop (``stop_<step>.dump``, the landing state of a reconnection); with ``landing``, a list
+of cut radii, for each radius ``delta`` the first measured state at which the neck has closed to
+``delta/LANDING_RATIO`` (``landing_<delta>.dump``, event ``landing``), so that one run gives the
+landing states of a study in ``delta`` (a state already narrower than ``delta/MAX_LANDING_RATIO``,
+as after a restart, is none: event ``landing-missed``); and the ``precut`` and ``postcut`` states of
+a cut (``surgery.py``). After a cut (:meth:`CollapseDriver.reset_after_cut`)
 the measured surface is the open chain, whose tip on the axis is a fresh cavity bottom: the scale,
 step and singular-time bookkeeping restart, a new cycle begins, and the first step is the cut's
 ``dt0``. Dumps written after a cut carry its record, which a restart restores.
@@ -145,6 +149,7 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
 from .mesh import Focus
+from .reconnect import LANDING_RATIO, MAX_LANDING_RATIO
 from .selfcontact import InterfaceSelfIntersection, fold_gap
 from .singular import singular_time
 
@@ -344,14 +349,16 @@ class _State:
     apex_alpha: float = math.nan
     apex_t_est: float = math.nan
     last_singular_t: float = -math.inf  # time of the latest sample offered to the series
+    landed: list = field(default_factory=list)  # cut radii of ``landing`` already kept or missed
 
 
 class CollapseDriver:
     def __init__(self, problem, settings: CollapseSettings, outdir: Path, *,
-                 keep_stop_state: bool = False):
+                 keep_stop_state: bool = False, landing=()):
         self.pb = problem
         self.s = settings
         self.keep_stop_state = keep_stop_state
+        self.landing = tuple(sorted((float(x) for x in landing), reverse=True))
         self.outdir = Path(outdir)
         (self.outdir / "profiles").mkdir(parents=True, exist_ok=True)
         self.state = _State()
@@ -612,6 +619,8 @@ class CollapseDriver:
         meta.update(time=self._t(), remesh_count=self.pb.remesh_count,
                     focus=None if focus is None else asdict(focus), dt_prev=st.dt_prev,
                     episodes=self.episodes.to_dict(), max_curvature_kind=MAX_CURVATURE_KIND)
+        if self.landing:  # only then: the dumps of other runs keep their keys
+            meta["landed"] = list(st.landed)
         cut = getattr(self.pb, "cut", None)
         if cut is not None:
             meta["cut"] = cut
@@ -654,6 +663,7 @@ class CollapseDriver:
             st.refine_blocked_until = st.last_remesh_step + self.s.min_steps_between_remesh
             st.last_remesh_step -= self.s.remesh_backoff
         st.dt_prev = meta.get("dt_prev")
+        st.landed = [float(x) for x in meta.get("landed", [])]
         st.last_state_t = meta["time"]
         self.pb.remesh_count = meta["remesh_count"]
         if meta.get("focus"):
@@ -704,6 +714,27 @@ class CollapseDriver:
         self._snapshot(m, "cut")
         return m
 
+    def _keep_landings(self, m: dict):
+        """Keep the landing state of each cut radius of ``landing`` that the neck has just passed:
+        the first measured state with ``delta/r_n >= LANDING_RATIO``, unless the neck is already
+        narrower than ``delta/MAX_LANDING_RATIO`` (a cut there is refused)."""
+        r_n = m["r_neck"]
+        if not self.landing or not (math.isfinite(r_n) and r_n > 0.0):
+            return
+        st = self.state
+        for delta in self.landing:
+            if delta in st.landed or delta < LANDING_RATIO * r_n:
+                continue
+            st.landed.append(delta)  # before the dump, so that a restart from it skips this radius
+            ratio = delta / r_n
+            info = {"delta": delta, "r_neck": r_n, "z_neck": m["z_neck"], "delta_over_r_neck": ratio}
+            if ratio > MAX_LANDING_RATIO:
+                self._event("landing-missed", m, **info, max_landing_ratio=MAX_LANDING_RATIO)
+                continue
+            path = self.keep_state(self.outdir / "states" / f"landing_{delta:.6g}.dump",
+                                   landing=info)
+            self._event("landing", m, **info, path=str(path))
+
     # --- main loop ----------------------------------------------------------------------------
 
     def _geometry_stop(self, m):
@@ -741,6 +772,7 @@ class CollapseDriver:
         self._track(m)
         self._write_row(m, 0.0, 0.0, self._singular(m))
         self._snapshot(m, "start")
+        self._keep_landings(m)
         stop = {"reason": "end-time"}
         while True:
             found = self._stop(m)
@@ -818,6 +850,7 @@ class CollapseDriver:
             if math.isfinite(m["r_neck"]) and not st.neck_seen:
                 st.neck_seen = True
                 self._event("neck", m, r_neck=m["r_neck"], z_neck=m["z_neck"])
+            self._keep_landings(m)  # with this step's bookkeeping, as every dump
             found = self._stop(m)
             if found is not None:
                 stop = found

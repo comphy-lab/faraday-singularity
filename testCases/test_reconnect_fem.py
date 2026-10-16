@@ -6,8 +6,10 @@
   and ``KE(u~) - KE(u+) = |u+ - u~|^2/2``;
 * a cut of a synthetic necked gas cavity in a shallow container (a "kinematic" cut: the velocity
   field is imposed, not computed): topology, volumes, transfer, projection, history, chart, a few
-  steps, a restart from the ``postcut`` state, and the zero fill with an impulsive restart;
-* the prototype entry point on a landing state of that cavity;
+  steps, a restart from the ``postcut`` state, a quality remesh of the two chains after the cut and
+  a step after it, the remesh after a restart in a new process, the zero fill on every node of the
+  former gas, and the zero fill with an impulsive restart;
+* the prototype entry point on a landing state of that cavity, with the lineage of its parent run;
 * the ordinary path: meshes as with the mesh class of commit 9e0d8a1 (to the byte), steps
   (to round-off), and dumps that load across the two kinds of problem.
 
@@ -16,6 +18,7 @@ Each problem compiles in seconds; the module takes about a minute.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import subprocess
@@ -36,7 +39,7 @@ from faraday_singularity.driver import CollapseDriver, CollapseSettings  # noqa:
 from faraday_singularity.mesh import FaradayCylinderMesh, Focus, MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.problem import FaradayProblem  # noqa: E402
-from faraday_singularity.reconnect import ReconnectSettings, neck_radius  # noqa: E402
+from faraday_singularity.reconnect import Chain, ReconnectSettings, neck_radius  # noqa: E402
 
 R_N = 0.02  # neck radius of the synthetic cavity
 
@@ -274,6 +277,25 @@ def _step(pb, dt):
            newton_solver_tolerance=1e-8)
 
 
+def mesh_signature(pb) -> dict:
+    """Node and element counts of the liquid mesh and a hash of its sorted node coordinates."""
+    bulk = pb.get_mesh("liquid")
+    xy = np.array(sorted((n.x(0), n.x(1)) for n in bulk.nodes()))
+    return {"nodes": len(xy), "elements": sum(1 for _ in bulk.elements()),
+            "sha256": hashlib.sha256(xy.tobytes()).hexdigest()}
+
+
+def chart_ends(pb) -> dict:
+    """The interface chart at the two ends of each chain."""
+    bulk = pb.get_mesh("liquid")
+    bind = bulk.get_boundary_index("interface")
+    pos_zeta = {(n.x(0), n.x(1)): n.get_coordinates_on_boundary(bind)[0]
+                for n in surgery.mesh_nodes(pb.get_mesh("liquid/interface"))}
+    return {("open" if c["open"] else "bubble"):
+            (pos_zeta[(c["r"][0], c["z"][0])], pos_zeta[(c["r"][-1], c["z"][-1])])
+            for c in pb.interface_segments()}
+
+
 @pytest.fixture(scope="module")
 def neck_cut(tmp_path_factory):
     out = tmp_path_factory.mktemp("neck")
@@ -283,6 +305,8 @@ def neck_cut(tmp_path_factory):
         pb.initialise()
         impose_closing_flow(pb)
         res["neck"] = neck_radius(pb.interface_segments()[0]["r"], pb.interface_segments()[0]["z"])
+        old = pb.interface_segments()[0]
+        old_open = Chain(np.column_stack([old["r"], old["z"]]), tuple(old["end_types"]))
         rec = surgery.cut(pb, s, out)
         res["record"] = rec
         res["file"] = json.loads((out / "cut_diagnostics.json").read_text())
@@ -295,14 +319,7 @@ def neck_cut(tmp_path_factory):
         res["levels"] = [[n.value_at_t(k, iu) for k in range(3)] for n in nodes[::97]]
         zeta = pb.interface_zeta
         res["chart_rule"] = (zeta.sort_along_axis, zeta.start_near_point)
-        iface = pb.get_mesh("liquid/interface")
-        bind = bulk.get_boundary_index("interface")
-        segs = pb.interface_segments()
-        pos_zeta = {(n.x(0), n.x(1)): n.get_coordinates_on_boundary(bind)[0]
-                    for n in surgery.mesh_nodes(iface)}
-        res["chart_ends"] = {("open" if c["open"] else "bubble"):
-                             (pos_zeta[(c["r"][0], c["z"][0])], pos_zeta[(c["r"][-1], c["z"][-1])])
-                             for c in segs}
+        res["chart_ends"] = chart_ends(pb)
         res["bridge0"] = rec["geometry"]["bridge"]
         # a few steps, and the same first step again from the postcut state
         _step(pb, 1e-5)
@@ -321,6 +338,25 @@ def neck_cut(tmp_path_factory):
         res["bridge_after"] = float(cav["z"][0] - bub["z"][-1])
         res["axis_state"] = pb.axis_state()
         res["open_tip"] = (float(cav["z"][0]), float(cav["u_z"][0]))
+        # a remesh of the two chains, as a quality remesh after the cut would make, and a step
+        before = pb.cut_observables()
+        spans_before = surgery._axis_spans_of_mesh(pb)
+        pb.force_remesh()
+        after = pb.cut_observables()
+        res["quality_remesh"] = {
+            "chains": len(pb.interface_segments()), "spans": (len(spans_before),
+                                                              len(surgery._axis_spans_of_mesh(pb))),
+            "volume_change": after["volume"] - before["volume"], "volume": before["volume"],
+            "ke_change": after["kinetic_energy"] / before["kinetic_energy"] - 1.0,
+            "chart_ends": chart_ends(pb)}
+        _step(pb, 1e-5 * 1.25 ** 3)
+        res["quality_remesh"]["chains_after_step"] = len(pb.interface_segments())
+        # the remesh right after an in-process restart from the postcut state, for the comparison
+        # with one in a new process
+        pb.load_state(str(post))
+        pb.force_remesh()
+        res["restart_remesh"] = mesh_signature(pb)
+        res["postcut_path"] = str(post)
         # again from the precut state, with the zero fill and an impulsive restart
         pb.load_state(rec["precut_state"]["path"])
         pb.cut = None
@@ -331,6 +367,29 @@ def neck_cut(tmp_path_factory):
         res["zero_counter"] = pb.timestepper.get_num_unsteady_steps_done()
         _step(pb, 1e-5)
         res["zero_chains_after"] = len(pb.interface_segments())
+        # the zero fill on the blended postcut field: every node in the former gas but on the free
+        # surface, the axis of the bridge included, found here without the fill's own tests
+        pb.load_state(str(post))
+        geo = rec["geometry"]
+        filled = surgery.zero_fill(pb, old_open, s.reservoir_depth, (0.0, rec["z_neck"]), 1e3)
+        import shapely
+        from shapely.geometry import Polygon
+
+        P = old_open.points
+        gas = Polygon(np.vstack([P, [[P[-1, 0], P[-1, 1] + s.reservoir_depth],
+                                     [0.0, P[-1, 1] + s.reservoir_depth]]]))
+        bulk = pb.get_mesh("liquid")
+        fi = bulk.get_nodal_field_indices()
+        surface = {(n.x(0), n.x(1)) for n in surgery.mesh_nodes(pb.get_mesh("liquid/interface"))}
+        bridge = [n for n in surgery.mesh_nodes(pb.get_mesh("liquid/axis"))
+                  if geo["z_bubble_top"] < n.x(1) < geo["z_cavity_tip"]
+                  and (n.x(0), n.x(1)) not in surface]
+        inner = [n for n in bulk.nodes() if (n.x(0), n.x(1)) not in surface and n.x(0) > 0.0
+                 and shapely.contains_xy(gas, n.x(0), n.x(1))]
+        res["zero_check"] = {
+            "counts": filled, "bridge_nodes": len(bridge), "inner_nodes": len(inner),
+            "max_speed": max(math.hypot(n.value(fi["velocity_x"]), n.value(fi["velocity_y"]))
+                             for n in bridge + inner)}
     return res
 
 
@@ -351,9 +410,19 @@ def test_cut_plans_once_and_builds_two_chains(neck_cut):
 
 
 def test_cut_volume_is_the_planned_gain(neck_cut):
+    """The gas the cut turns into liquid within a box around it is the planned gain; the change of
+    the whole mesh adds the drift of rebuilding the free surface, which at production radii exceeds
+    the gain (the box separates the two)."""
     v = neck_cut["record"]["volumes"]
     assert v["liquid_gain_plan"] > 0
+    assert v["liquid_gain_box"] == pytest.approx(v["liquid_gain_plan"], rel=2e-3)
+    assert v["liquid_gain_mesh"] == pytest.approx(v["liquid_gain_box"] + v["remesh_drift"],
+                                                  rel=1e-12)
     assert v["liquid_gain_mesh"] == pytest.approx(v["liquid_gain_plan"], rel=1e-2)
+    r_box, z_lo, z_hi = v["box"]
+    caps = neck_cut["record"]["caps"]
+    assert z_lo < min(c["z_s"] for c in caps) and z_hi > max(c["z_s"] for c in caps)
+    assert r_box > max(c["r_s"] for c in caps)
 
 
 def test_cut_transfer_falls_back_only_in_the_former_gas(neck_cut):
@@ -390,6 +459,61 @@ def test_cut_chart_runs_from_the_wall_and_up_the_bubble(neck_cut):
     assert ends["bubble"][0] < ends["bubble"][1]  # charted upwards
 
 
+def test_quality_remesh_after_the_cut(neck_cut):
+    """A remesh of the two chains after the cut (the path of pyoomph's quality remesh) keeps both
+    chains, the two liquid spans of the axis and the chart orientation, changes volume and energy
+    little, and a step converges after it."""
+    q = neck_cut["quality_remesh"]
+    assert q["chains"] == 2 and q["spans"] == (2, 2) and q["chains_after_step"] == 2
+    assert abs(q["volume_change"]) < 1e-8 * q["volume"]
+    assert abs(q["ke_change"]) < 5e-3
+    ends = q["chart_ends"]
+    assert ends["open"][0] > ends["open"][1] and ends["bubble"][0] < ends["bubble"][1]
+
+
+RESTART_REMESH = """
+import json, sys
+from dataclasses import asdict
+from pathlib import Path
+sys.path.insert(0, sys.argv[1] + "/src")
+sys.path.insert(0, sys.argv[1] + "/testCases")
+import test_reconnect_fem as t
+from faraday_singularity import surgery
+from faraday_singularity.reconnect import ReconnectSettings
+
+post, out = Path(sys.argv[2]), Path(sys.argv[3])
+meta = json.loads(post.with_suffix(".json").read_text())
+report = {}
+with t.neck_problem(out, ReconnectSettings(delta=1.05 * t.R_N, dt0=1e-5)) as pb:
+    pb.initialise()
+    for mode in ("plain", "restored"):
+        pb.load_state(str(post))
+        if mode == "restored":
+            surgery.restore_cut(pb, meta["cut"])
+        sizing = pb.active_mesh_template().cut_sizing
+        pb.force_remesh()
+        report[mode] = {"sizing": None if sizing is None else asdict(sizing),
+                        "mesh": t.mesh_signature(pb)}
+print("REPORT " + json.dumps(report))
+"""
+
+
+def test_restart_in_a_new_process_keeps_the_cut_sizing(neck_cut, tmp_path):
+    """In a new process the template that pyoomph rebuilds a stored mesh from has no cut sizing;
+    ``restore_cut`` puts it back, so the first remesh after the restart is the one an in-process
+    restart makes."""
+    proc = subprocess.run([sys.executable, "-c", RESTART_REMESH, str(ROOT),
+                           neck_cut["postcut_path"], str(tmp_path / "out")],
+                          capture_output=True, text=True, timeout=900, check=False)
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    line = next(x for x in proc.stdout.splitlines() if x.startswith("REPORT "))
+    report = json.loads(line[len("REPORT "):])
+    assert report["plain"]["sizing"] is None  # what restore_cut repairs
+    assert report["restored"]["sizing"] == neck_cut["record"]["sizing"]
+    assert report["restored"]["mesh"] == neck_cut["restart_remesh"]
+    assert report["plain"]["mesh"] != neck_cut["restart_remesh"]
+
+
 def test_steps_after_the_cut_and_restart(neck_cut):
     a, b = neck_cut["after_first"], neck_cut["after_first_again"]
     meta = neck_cut["postcut_meta"]
@@ -403,11 +527,33 @@ def test_steps_after_the_cut_and_restart(neck_cut):
 
 def test_zero_fill_and_impulsive_restart(neck_cut):
     z = neck_cut["zero"]
-    assert z["fill"]["zeroed_nodes"] == pytest.approx(z["transfer"]["unlocated"]["liquid"][0],
-                                                      rel=0.1)
+    fill, tr = z["fill"], z["transfer"]
+    # the bridge's axis nodes, which pyoomph counts on the axis mesh, are zeroed too, all but its
+    # two ends: the fresh tips, on the free surface
+    assert fill["zeroed_axis_nodes"] == tr["unlocated"]["liquid/axis"][0] - 2 > 0
+    assert fill["zeroed_axis_nodes"] == tr["former_gas_nodes"]["liquid/axis"][0] - 2
+    assert fill["zeroed_nodes"] - fill["zeroed_axis_nodes"] == pytest.approx(
+        tr["unlocated"]["liquid"][0], rel=0.1)
     pr = z["projection"]
     assert abs(pr["energy_identity_error"]) <= 1e-10 * pr["before"]["kinetic_energy"]
     assert neck_cut["zero_counter"] == 1 and neck_cut["zero_chains_after"] == 2
+
+
+def test_zero_fill_zeroes_every_node_of_the_former_gas(neck_cut):
+    c = neck_cut["zero_check"]
+    assert c["bridge_nodes"] > 0 and c["counts"]["axis"] == c["bridge_nodes"]
+    assert c["counts"]["bulk"] == c["inner_nodes"]
+    assert c["max_speed"] == 0.0
+
+
+@pytest.mark.parametrize("ratio", [1.2, 2.0])
+def test_cut_is_refused_far_above_the_neck(tmp_path, ratio):
+    s = ReconnectSettings(delta=ratio * R_N)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        with pytest.raises(surgery.CutRefused, match="above"):
+            surgery.cut(pb, s, tmp_path)
+        assert pb.cut is None and not pb.get_mesh("liquid")._templatemesh.has_pending_surgery_plan()
 
 
 def test_cut_is_refused_too_close_to_the_neck(tmp_path):
@@ -432,13 +578,26 @@ def test_prototype_cuts_a_landing_state_and_steps(tmp_path):
         driver = CollapseDriver(pb, CollapseSettings(t_end=10.0, dt_max=0.01), landing)
         state = driver.keep_state(landing / "states" / "stop_00000000.dump", stop={})
         driver.close()
-    case = {"schema": "pyoomph-case-v1", "case_id": "neck-prototype",
-            "geometry": {"kind": "axisymmetric"}, "physics": PHYSICS, "mesh": MESH,
-            "tolerances": {"newton": 1e-8},
-            "time_stepping": {"scheme": "BDF2", "steps_per_forcing_period": 100},
-            "collapse": {"reconnect": {"delta": 1.0, "dt0": 1e-5}},
-            "output": {"cadence": 0.25, "cadence_unit": "forcing periods", "write_states": False},
-            "completion": {"kind": "event", "t_max": 10, "unit": "forcing periods"}}
+    parent_case = {"schema": "pyoomph-case-v1", "case_id": "neck-landing",
+                   "geometry": {"kind": "axisymmetric"}, "physics": PHYSICS, "mesh": MESH,
+                   "tolerances": {"newton": 1e-8},
+                   "time_stepping": {"scheme": "BDF2", "steps_per_forcing_period": 100},
+                   "collapse": {"keep_stop_state": True},
+                   "output": {"cadence": 0.25, "cadence_unit": "forcing periods",
+                              "write_states": False},
+                   "completion": {"kind": "event", "t_max": 10, "unit": "forcing periods"}}
+    # the parent run's records, as run_case writes them (a stand-in commit)
+    parent_path = tmp_path / "landing-case.json"
+    parent_path.write_text(json.dumps(parent_case))
+    digest = hashlib.sha256(parent_path.read_bytes()).hexdigest()
+    (landing / "run-manifest.json").write_text(json.dumps(
+        {"schema": "pyoomph-runner-manifest-v1", "component_commit": "b" * 40,
+         "case_sha256": digest}))
+    (landing / "parameters.json").write_text(json.dumps(
+        {"case": parent_case, "provenance": {"case_sha256": digest}}))
+    case = json.loads(json.dumps(parent_case))
+    case["case_id"] = "neck-prototype"
+    case["collapse"] = {"reconnect": {"delta": 1.0, "dt0": 1e-5}}
     case_path = tmp_path / "case.json"
     case_path.write_text(json.dumps(case))
     out = tmp_path / "out"
@@ -456,6 +615,10 @@ def test_prototype_cuts_a_landing_state_and_steps(tmp_path):
     cols = (out / "steps.txt").read_text().splitlines()[0][2:].split("\t")
     tau, dt = rows[:, cols.index("tau")], rows[:, cols.index("dt")]
     assert tau[0] == 0.0 and dt[1] == pytest.approx(1e-5) and dt[2] == pytest.approx(1.25e-5)
+    # the Courant limit uses the smallest element near the cut, at most the cut's tip size
+    h_cut, U_cut = rows[1:, cols.index("h_cut")], rows[1:, cols.index("U_cut")]
+    assert np.all(h_cut <= cut["sizing"]["h_tip"]) and np.all(h_cut > 0)
+    assert np.all(dt[1:] <= 0.2 * h_cut / U_cut * (1 + 1e-12))
     assert np.all(np.isfinite(rows[:, cols.index("momentum_z")]))
     for k in range(3):
         for kind in ("open", "bubble"):
@@ -467,6 +630,9 @@ def test_prototype_cuts_a_landing_state_and_steps(tmp_path):
     assert events[:2] == ["restart", "cut"]
     manifest = json.loads((out / "run-manifest.json").read_text())
     assert manifest["state"]["path"] == str(state.resolve())
+    parent = manifest["state"]["parent_record"]
+    assert parent["case_sha256"] == digest and parent["component_commit"] == "b" * 40
+    assert parent["derived_keys"] == ["case_id", "collapse.keep_stop_state", "collapse.reconnect"]
 
 
 # --- the ordinary path ----------------------------------------------------------------------------

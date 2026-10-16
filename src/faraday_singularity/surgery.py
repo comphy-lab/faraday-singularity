@@ -2,7 +2,7 @@
 
 The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayProblem` made with
 ``reconnect`` settings, at a state whose neck radius ``r_n`` is a little below the cut radius
-``delta``:
+``delta`` (``min_landing_ratio <= delta/r_n <= max_landing_ratio``, otherwise the cut is refused):
 
 1. **Record** the budgets (volume, kinetic energy, axial momentum ``P_z``, ``int (div u)^2``) and keep
    a ``precut`` state dump.
@@ -10,17 +10,18 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
    the cavity closed through the gas above the free surface (``reservoir_depth``) so that the neck is
    a waist of the gas and the event a pinch; its volume correction is off. It only parks a plan on
    the mesh template. A deferral (waist not yet separable), a declined state or a refusal (a plain
-   ``RuntimeError``) is retried at a cut radius larger by ``retry_factor``, ``plan_attempts`` times.
+   ``RuntimeError``) is retried at a cut radius larger by ``retry_factor``, ``plan_attempts`` times,
+   but never above ``max_landing_ratio r_n``.
 3. **Caps.** Both planner caps are replaced by tangent arcs (``reconnect.replace_caps``), and the
    template is given the sizes of the tips and of the bridge (``mesh.CutSizing``).
 4. **Remesh at once**, with nothing in between that could solve, move a node or remesh: the plan
    refers to the current interface nodes exactly. pyoomph transfers the fields; nodes in the former
    gas thread and on the bridge are not located in the old mesh and get its two-nearest-node blend.
    Any failure clears the plan; the caller restores the ``precut`` state.
-5. **Fill**: keep the blend, or zero the velocity at bulk nodes inside the former gas. Nodes on the
-   free surface are never zeroed: the fresh caps take the velocity of the nearest point of the old
-   neck surface (pyoomph's transfer projects them onto it), and zeroing them would put a jump in
-   the velocity at the splice.
+5. **Fill**: keep the blend, or zero the velocity at the nodes inside the former gas, the nodes on
+   the axis of the bridge included. Nodes on the free surface are never zeroed: the fresh caps take
+   the velocity of the nearest point of the old neck surface (pyoomph's transfer projects them onto
+   it), and zeroing them would put a jump in the velocity at the splice.
 6. **History := transferred field** (``assign_initial_values_impulsive``), so that level 1 holds it.
 7. **Project**: find ``u+`` (P2) and the pressure impulse ``Pi`` (P1) with
    ``int (u+ - u~).v - Pi div v = 0`` and ``int q div u+ = 0`` for all admissible ``v`` and all ``q``;
@@ -35,6 +36,11 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
 9. The interface chart is oriented from a far point so that both chains keep their orientation
    at later remeshes; the driver's bookkeeping restarts for the new tips; a ``postcut`` dump and
    ``cut_diagnostics.json`` are written.
+
+The volume the liquid gains (``volumes``) is recorded twice: over the whole mesh, which includes the
+drift of rebuilding the whole free surface (a remesh changes the volume by more than the cut at
+production radii), and as the change of the gas volume within a box around the cut
+(``reconnect.gas_volume_in_box``), which is the cut's own and is compared with the plan.
 
 Only private names of the pinned pyoomph release make step 2 possible; ``testCases`` pins them.
 """
@@ -59,11 +65,13 @@ from pyoomph.expressions import div, evaluate_in_past, testfunction, var, weak
 from pyoomph.generic.codegen import Equations
 
 from .mesh import CutSizing
-from .reconnect import (Chain, ReconnectSettings, chain_volumes, cut_geometry, liquid_axis_spans,
-                        neck_radius, plan_chains, replace_caps, tip_size)
+from .reconnect import (Chain, ReconnectSettings, chain_volumes, cut_geometry, gas_volume_in_box,
+                        liquid_axis_spans, neck_radius, orient_chain, plan_chains, replace_caps,
+                        tip_size)
 
 INTERFACE = "liquid/interface"
 FAR_POINT = (1.0e4, -100.0)  # the chart starts at the chain end nearest this: the wall, else the bottom
+AXIS_TOL = 1e-9  # a node with |r| below this lies on the axis (the template's point merge tolerance)
 
 
 class CutRefused(RuntimeError):
@@ -260,12 +268,14 @@ def former_gas_nodes(problem, old_open: Chain, reservoir_depth: float, tol: floa
 
 
 def zero_fill(problem, old_open: Chain, reservoir_depth: float, centre: tuple[float, float],
-              reach: float) -> int:
-    """Zero the velocity (current level) at bulk nodes inside the former gas region near the cut.
+              reach: float) -> dict:
+    """Zero the velocity (current level) at the nodes inside the former gas region near the cut.
 
-    The former gas is the half-section the pre-cut open chain bounds, closed up the wall and across
-    to the axis; only nodes within ``reach`` of ``centre`` are considered, and interface nodes are
-    left alone."""
+    The former gas is the half-section the pre-cut open chain bounds, closed up the wall, across
+    and down the axis to the old tip. The nodes of the bridge lie on that closing segment of the
+    axis, where a point-in-polygon test is false: they are the nodes on the axis above the old tip.
+    Only nodes within ``reach`` of ``centre`` are considered, and interface nodes are left alone.
+    Returns the counts of zeroed nodes off the axis (``bulk``) and on it (``axis``)."""
     import shapely
 
     gas = _gas_polygon(old_open, reservoir_depth)
@@ -277,16 +287,16 @@ def zero_fill(problem, old_open: Chain, reservoir_depth: float, centre: tuple[fl
             if math.hypot(n.x(0) - centre[0], n.x(1) - centre[1]) <= reach
             and (n.x(0), n.x(1)) not in surf]
     if not cand:
-        return 0
+        return {"bulk": 0, "axis": 0}
     xy = np.array([[n.x(0), n.x(1)] for n in cand])
-    inside = shapely.contains_xy(gas, xy[:, 0], xy[:, 1])
-    count = 0
+    z_tip = float(old_open.points[0, 1])
+    on_axis = (np.abs(xy[:, 0]) <= AXIS_TOL) & (xy[:, 1] > z_tip + AXIS_TOL)
+    inside = shapely.contains_xy(gas, xy[:, 0], xy[:, 1]) | on_axis
     for n, flag in zip(cand, inside):
         if flag:
             n.set_value(iu, 0.0)
             n.set_value(iw, 0.0)
-            count += 1
-    return count
+    return {"bulk": int(np.sum(inside & ~on_axis)), "axis": int(np.sum(on_axis))}
 
 
 def _pressures(problem):
@@ -408,6 +418,11 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
     if s.delta < s.min_landing_ratio * r_n:
         raise CutRefused(f"delta {s.delta:.6g} is below {s.min_landing_ratio} times the neck "
                          f"radius {r_n:.6g}")
+    if s.delta > s.max_landing_ratio * r_n:
+        # the cut geometry in units of delta depends on delta/r_n: a cut far above the neck is not
+        # comparable with cuts at other delta that land just below their radius
+        raise CutRefused(f"delta {s.delta:.6g} is above {s.max_landing_ratio} times the neck "
+                         f"radius {r_n:.6g}; cut from a state whose neck has just passed below delta")
     record: dict = {"delta": s.delta, "t_cut": t_cut, "r_neck": r_n, "z_neck": z_n,
                     "delta_over_r_neck": s.delta / r_n, "settings": s.to_dict()}
     record["budgets_before"] = pb.cut_observables()
@@ -428,11 +443,14 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
             break
         if outcome == "none":
             raise CutRefused(f"no pinch planned at cut radius {rmin:.6g} (neck {r_n:.6g})")
+        if rmin * s.retry_factor > s.max_landing_ratio * r_n:
+            break  # a retry would cut too far above the neck
         rmin *= s.retry_factor
     record["plan_attempts"] = attempts
     if attempts[-1]["outcome"] != "plan":
         raise CutRefused(f"no plan after {len(attempts)} attempts: {attempts[-1]}")
     record["rmin"] = rmin
+    record["rmin_over_r_neck"] = rmin / r_n
 
     remeshing = False
     try:
@@ -458,6 +476,11 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
                            grading=pb.active_mesh_template().settings.grading)
         record["caps"] = [asdict(e) for e in edits]
         record["geometry"] = geom.to_dict()
+        # every change of the free surface lies between the two splices
+        z_lo, z_hi = min(e.z_s for e in edits), max(e.z_s for e in edits)
+        margin = 2.0 * rmin
+        box = (z_hi - z_lo + 2.0 * margin, z_lo - margin, z_hi + margin)
+        gas_box_before = gas_volume_in_box([old_open], s.reservoir_depth, box)
         record["sizing"] = asdict(sizing)
         template.cut_sizing = sizing
         # 4. the remesh, at once
@@ -493,13 +516,18 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
                           "axis_spans": spans, "expected_axis_spans": [list(x) for x in expected]}
         if len(spans) != len(expected):
             raise CutFailed(f"the cut mesh has axis spans {spans}, expected {expected}")
+        tol = 1e-7 * max(1.0, pb.nd.radius)
+        gas_box_after = gas_volume_in_box(
+            [orient_chain(np.column_stack([c["r"], c["z"]]), pb.nd.radius, tol) for c in segs],
+            s.reservoir_depth, box)
         record["budgets_after_transfer"] = pb.cut_observables()
         # 5. fill
-        record["fill"] = {"kind": s.fill, "zeroed_nodes": 0}
+        record["fill"] = {"kind": s.fill, "zeroed_nodes": 0, "zeroed_axis_nodes": 0}
         if s.fill == "zero":
             reach = 20.0 * max(geom.bridge, rmin)
-            record["fill"]["zeroed_nodes"] = zero_fill(pb, old_open, s.reservoir_depth, (0.0, z_n),
-                                                       reach)
+            zeroed = zero_fill(pb, old_open, s.reservoir_depth, (0.0, z_n), reach)
+            record["fill"].update(zeroed_nodes=zeroed["bulk"] + zeroed["axis"],
+                                  zeroed_axis_nodes=zeroed["axis"])
         record["budgets_after_fill"] = pb.cut_observables()
         # 6-8. projection and restart
         record["projection"] = project(pb, s, t_cut)
@@ -513,8 +541,12 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
     record["budgets_after"] = pb.cut_observables()
     volumes = {"liquid_before": record["budgets_before"]["volume"],
                "liquid_after": record["budgets_after"]["volume"],
-               "liquid_gain_plan": geom.removed_gas}
+               "liquid_gain_plan": geom.removed_gas,
+               "box": list(box), "gas_in_box_before": gas_box_before,
+               "gas_in_box_after": gas_box_after, "liquid_gain_box": gas_box_before - gas_box_after}
     volumes["liquid_gain_mesh"] = volumes["liquid_after"] - volumes["liquid_before"]
+    # what the rebuild of the free surface outside the box changed
+    volumes["remesh_drift"] = volumes["liquid_gain_mesh"] - volumes["liquid_gain_box"]
     record["volumes"] = volumes
     record["wall_seconds"] = time.time() - wall0
     pb.cut = _jsonable(record)
@@ -544,6 +576,18 @@ def _keep(problem, driver, outdir: Path, name: str, extra: dict) -> dict:
 
 
 def restore_cut(problem, record: dict) -> None:
-    """After loading a state written after a cut: the record, and the chart orientation."""
+    """After loading a state written after a cut: the record, the mesh sizing of the cut, and the
+    chart orientation.
+
+    Every remesh after a cut sizes the fresh tips and the bridge by the cut's ``CutSizing``, which
+    lives on the mesh template. pyoomph builds a reloaded mesh from a sibling of the problem's
+    original template that copies that template's attributes; in a new process the original
+    template has no cut sizing, so it is put back here from the record, or the remeshes after the
+    restart would differ from those of the run that wrote the state."""
+    if problem.reconnect is None:
+        raise RuntimeError("a state written after a cut needs a problem made with reconnect settings")
+    if "sizing" not in record:
+        raise RuntimeError("the cut record of the state has no mesh sizing")
+    problem.active_mesh_template().cut_sizing = CutSizing(**record["sizing"])
     problem.cut = record
     orient_interface_chart(problem)

@@ -20,12 +20,22 @@ pyoomph's own command-line parser (e.g. ``--omp 4``). Each output directory rece
 kinetic energy, dissipation and remesh count after every step), pyoomph's per-step integrals and
 free-surface snapshots (``liquid__interface/``).
 
-Two keys of the ``collapse`` block are not driver settings. ``keep_stop_state`` (default false) keeps
-the state at a neck-radius stop as ``states/stop_<step>.dump``, outside the rotation of dumps: the
-landing state of a reconnection. A ``reconnect`` block (``reconnect.ReconnectSettings``) builds the
+Three keys of the ``collapse`` block are not driver settings. ``keep_stop_state`` (default false)
+keeps the state at a neck-radius stop as ``states/stop_<step>.dump``, outside the rotation of dumps:
+the landing state of a reconnection. ``landing``, a list of cut radii, keeps for each radius
+``delta`` the first state whose neck has closed to ``delta/1.05`` as ``states/landing_<delta>.dump``
+(``driver.CollapseDriver``). A ``reconnect`` block (``reconnect.ReconnectSettings``) builds the
 problem with the reconnection handler and the pressure-impulse projection, both inert during the
 run; the cut itself is made from a landing state by ``simulationCases/reconnect_prototype.py``.
-Without either key the problem, the settings and every output are those of an ordinary case.
+Without these keys the problem, the settings and every output are those of an ordinary case.
+
+A restart (``--restart-from``) continues the run of the same case. It may also continue it under a
+derived case, one that differs from the parent's only in ``case_id``, the description
+``completion.value`` and the collapse keys ``keep_stop_state``, ``landing``, ``neck_stop`` and
+``reconnect`` (what the run keeps and where it stops, not what it computes): the parent's case is
+read from its ``parameters.json``, whose recorded hash must be the manifest's, and the restart
+manifest records the parent's case hash and the keys that differ. This is how landing states are
+made from an existing run.
 """
 
 from __future__ import annotations
@@ -93,8 +103,55 @@ def case_has_field(case: dict, field: str) -> bool:
     return True
 
 
+# Keys a case derived from a parent run may change at a restart: the name, a description the runner
+# does not read, and the collapse keys that decide what the run keeps and where it stops.
+DERIVED_KEYS = ("case_id", "completion.value", "collapse.keep_stop_state", "collapse.landing",
+                "collapse.neck_stop", "collapse.reconnect")
+
+
+def case_differences(a, b, prefix: str = "") -> list[str]:
+    """Dotted keys at which two case objects differ (a key in one only counts once)."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = []
+        for key in sorted(set(a) | set(b), key=str):
+            name = f"{prefix}.{key}" if prefix else str(key)
+            if key not in a or key not in b:
+                out.append(name)
+            else:
+                out += case_differences(a[key], b[key], name)
+        return out
+    return [] if a == b else [prefix]
+
+
+def derived_case_keys(parent_case: dict, case: dict) -> list[str]:
+    """The keys in which ``case`` differs from ``parent_case``; refuses any outside ``DERIVED_KEYS``."""
+    diffs = case_differences(parent_case, case)
+    foreign = [k for k in diffs if not any(k == d or k.startswith(d + ".") for d in DERIVED_KEYS)]
+    if foreign:
+        raise SystemExit("restart parent belongs to a different case: it differs in "
+                         + ", ".join(foreign))
+    return diffs
+
+
+def recorded_parent_case(parent: Path, case_sha256: str) -> dict:
+    """The case a parent run recorded in its ``parameters.json``, if that file names the hash."""
+    path = parent / "parameters.json"
+    try:
+        recorded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        recorded = None
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("case"), dict) or \
+            recorded.get("provenance", {}).get("case_sha256") != case_sha256:
+        raise SystemExit("restart parent belongs to a different case, and its parameters.json "
+                         "does not record that case to compare with")
+    return recorded["case"]
+
+
 def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = False) -> dict:
-    """Validate restart custody before output, preserving explicitly imported legacy lineage."""
+    """Validate restart custody before output, preserving explicitly imported legacy lineage.
+
+    A parent with a normalised manifest may have run the same case or one from which ``case`` is
+    derived (``DERIVED_KEYS``)."""
     state = state.resolve()
     if not state.is_file() or not state.with_suffix(".json").is_file():
         raise SystemExit("restart needs both its state dump and driver metadata")
@@ -127,18 +184,23 @@ def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = F
             raise SystemExit("restart has no parent run-manifest.json; legacy imports need --legacy-restart-from")
         recorded_path = manifest_path
         recorded = json.loads(manifest_path.read_text())
-        if recorded.get("case_sha256") != case_hash:
-            raise SystemExit("restart parent belongs to a different case")
+        parent_case_hash = str(recorded.get("case_sha256", ""))
+        derived = None
+        if parent_case_hash != case_hash:
+            derived = derived_case_keys(recorded_parent_case(parent, parent_case_hash), case)
         if recorded.get("schema") != "pyoomph-runner-manifest-v1" or not re.fullmatch(
                 r"[0-9a-f]{40}", str(recorded.get("component_commit", ""))):
             raise SystemExit("restart parent needs a normalised manifest and a clean source commit")
         parent_format = "pyoomph-runner-manifest-v1"
         parent_commit = recorded["component_commit"]
-    return {"path": str(state), "sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
-            "metadata_sha256": hashlib.sha256(state.with_suffix(".json").read_bytes()).hexdigest(),
-            "parent_record": {"path": str(recorded_path),
-                              "sha256": hashlib.sha256(recorded_path.read_bytes()).hexdigest(),
-                              "format": parent_format, "component_commit": parent_commit}}
+    out = {"path": str(state), "sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+           "metadata_sha256": hashlib.sha256(state.with_suffix(".json").read_bytes()).hexdigest(),
+           "parent_record": {"path": str(recorded_path),
+                             "sha256": hashlib.sha256(recorded_path.read_bytes()).hexdigest(),
+                             "format": parent_format, "component_commit": parent_commit}}
+    if not legacy and derived is not None:  # a restart of the same case records what it did
+        out["parent_record"].update(case_sha256=parent_case_hash, derived_keys=derived)
+    return out
 
 
 def load_case(path: Path) -> dict:
@@ -245,9 +307,10 @@ def main() -> int:
     settings = None
     reconnect = None
     keep_stop_state = False
+    landing = ()
     if collapse:
         try:
-            block, recon_block, keep_stop_state = split_collapse_block(case["collapse"])
+            block, recon_block, keep_stop_state, landing = split_collapse_block(case["collapse"])
             if recon_block is not None:
                 reconnect = ReconnectSettings.from_dict(recon_block)
         except ValueError as exc:
@@ -331,6 +394,8 @@ def main() -> int:
         info["reconnect"] = reconnect.to_dict()
     if keep_stop_state:
         info["keep_stop_state"] = True
+    if landing:
+        info["landing"] = list(landing)
     write_json(args.outdir / "parameters.json", info)
 
     from faraday_singularity.problem import FaradayProblem
@@ -355,7 +420,8 @@ def main() -> int:
                 problem.run(t_end, timestep=dt, outstep=dt_out, newton_solver_tolerance=tol)
             else:
                 driver = CollapseDriver(problem, settings, args.outdir,
-                                        **({"keep_stop_state": True} if keep_stop_state else {}))
+                                        **({"keep_stop_state": True} if keep_stop_state else {}),
+                                        **({"landing": landing} if landing else {}))
                 try:
                     if args.restart is not None:
                         from pyoomph.output.states import copy_state_file

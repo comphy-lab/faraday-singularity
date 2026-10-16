@@ -6,25 +6,36 @@ Example::
     .venv-pyoomph-f912ac10-py313/bin/python simulationCases/reconnect_prototype.py CASE.json \\
         --state RUN/states/stop_00001379.dump --outdir OUT --delta-ratio 1.05 --steps 20
 
-``CASE.json`` is the ``pyoomph-case-v1`` file of the run that wrote the state (physics, mesh and
-collapse settings must be the ones the state was computed with); its ``collapse.reconnect`` block,
-if any, gives the defaults of the cut, which the options below override. The state is a driver dump
-with its JSON beside it, normally the landing state a run with ``collapse.keep_stop_state`` keeps at
-its neck-radius stop. The cut radius is ``--delta`` or ``--delta-ratio`` times the neck radius of the
-state; it must be at least ``min_landing_ratio`` times that radius.
+``CASE.json`` is the ``pyoomph-case-v1`` file of the run that wrote the state, or one derived from
+it in the keys a restart may change (``run_case.DERIVED_KEYS``: the name, the description
+``completion.value``, and the collapse keys ``keep_stop_state``, ``landing``, ``neck_stop`` and
+``reconnect``); the physics, mesh and every other collapse setting must be the ones the state was
+computed with. The run that wrote the state is the
+directory above ``states/``: its ``run-manifest.json`` must be a normalised one with a clean source
+commit, and its case is compared with ``CASE.json`` (``run_case.restart_record``); the manifest of
+the prototype records that lineage. Its ``collapse.reconnect`` block, if any, gives the defaults of
+the cut, which the options below override. The state is a driver dump with its JSON beside it,
+normally a landing state: one a run with ``collapse.landing`` keeps for a cut radius, or the state a
+run with ``collapse.keep_stop_state`` keeps at its neck-radius stop. The cut radius is ``--delta``
+or ``--delta-ratio`` times the neck radius of the state; it must lie between ``min_landing_ratio``
+and ``max_landing_ratio`` times that radius, so a study in ``delta`` needs a landing state for each
+``delta``.
 
 The cut (``faraday_singularity.surgery.cut``) writes ``cut_diagnostics.json`` and keeps the
 ``precut``/``postcut`` states under ``states/``. Then ``--steps`` steps follow, the first ``dt0``
-long and each ``growth`` times the last, but at most ``courant`` times the tip element size over the
-largest free-surface speed near the cut. After every step ``steps.txt`` gets the budgets (volume,
-kinetic energy, axial momentum ``P_z``), the three tips on the axis (bubble bottom and top, cavity
-tip) with their axial speeds, the bridge length, the bubble volume and the open chain's jet
-measurements; ``profiles/postcut_<step>_open.txt`` and ``..._bubble.txt`` hold both chains
-(``r z u_r u_z``). The run ends after ``--steps``, at ``tau_end`` after the cut, or at a stop the
-mesh cannot follow (the bridge closing, the chains touching, the bubble's tips meeting, the bubble
-draining, a new neck or fold on the open chain). ``run_status.json`` records how it ended; the
-manifest records the state, the case and the source. This is a development tool, not a production
-runner: it does not admit restarts through ``run_case.py``.
+long and each at most ``growth`` times the last, and at most ``courant`` times the smallest element
+of the free surface near the cut (``h_cut``: the cut's tip size, or the elements of both chains
+there if smaller, as where the focus of the run is finer) over the largest free-surface speed
+there. After every step ``steps.txt`` gets the budgets (volume, kinetic energy, axial momentum
+``P_z``), the three tips on the axis (bubble bottom and top, cavity tip) with their axial speeds,
+the bridge length, the bubble volume and the open chain's jet measurements;
+``profiles/postcut_<step>_open.txt`` and ``..._bubble.txt`` hold both chains (``r z u_r u_z``).
+The run ends after ``--steps``, at ``tau_end`` after the cut, or at a stop the mesh cannot follow,
+checked right after the cut and after every step (``reconnect.post_cut_stops``: the bridge
+closing, the chains touching, the bubble's tips meeting, the bubble draining, a new neck narrower
+than ``delta`` on either chain, a fold on the bubble; and the collapse driver's neck and fold stops
+on the open chain). ``run_status.json`` records how it ended. This is a development tool, not a
+production runner: it does not admit restarts through ``run_case.py``.
 """
 
 from __future__ import annotations
@@ -43,7 +54,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 import run_case  # noqa: E402  (sets the MPI transport before pyoomph is imported)
-from faraday_singularity.driver import CollapseDriver, CollapseSettings  # noqa: E402
+from faraday_singularity.driver import FOLD_SEARCH, CollapseDriver, CollapseSettings  # noqa: E402
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import (component_commit, create_run_manifest,  # noqa: E402
@@ -56,7 +67,7 @@ COLUMNS = ("step", "time", "tau", "dt", "newton_tol", "volume", "kinetic_energy"
            "divergence_sq", "bubble_volume", "z_bubble_bottom", "w_bubble_bottom", "z_bubble_top",
            "w_bubble_top", "z_cavity_tip", "w_cavity_tip", "bridge", "bubble_r_max",
            "bubble_z_r_max", "axis_curvature", "r_j", "z_b", "Q_j", "V_j", "h_near", "U",
-           "remesh_count", "wall")
+           "h_cut", "U_cut", "remesh_count", "wall")
 
 
 def sha256(path: Path) -> str:
@@ -86,7 +97,7 @@ def parse_args(argv=None):
 
 def settings_from(case: dict, args) -> tuple[CollapseSettings, dict, float]:
     period = nondimensionalise(CaseParameters.from_dict(case["physics"])).forcing_period
-    block, recon, _keep = split_collapse_block(case["collapse"])
+    block, recon, _keep, _landing = split_collapse_block(case["collapse"])
     if "snapshot_dt_periods" in block:
         block["snapshot_dt"] = block.pop("snapshot_dt_periods") * period
     t_end = float(case["completion"]["t_max"]) * period
@@ -106,6 +117,22 @@ def write_profile(path: Path, ch: dict, header: dict):
 
     np.savetxt(path, np.column_stack([ch["r"], ch["z"], ch["u_r"], ch["u_z"]]),
                header=json.dumps(header) + "\nr z u_r u_z", comments="# ")
+
+
+def near_cut(segs, z_cut: float, reach: float) -> tuple[float, float]:
+    """``(U, h)``: the largest free-surface speed of both chains within ``reach`` of the cut, and
+    their smallest element length there (twice the node spacing: the elements are quadratic)."""
+    import numpy as np
+
+    U, h = 1e-3, math.inf
+    for c in segs:
+        near = np.hypot(c["r"], c["z"] - z_cut) < reach
+        if near.any():
+            U = max(U, float(np.hypot(c["u_r"], c["u_z"])[near].max()))
+        edges = near[:-1] | near[1:]
+        if edges.any():
+            h = min(h, 2.0 * float(np.hypot(np.diff(c["r"]), np.diff(c["z"]))[edges].min()))
+    return U, h
 
 
 def chain_record(segs) -> dict:
@@ -138,14 +165,18 @@ def main(argv=None) -> int:
     if args.delta is not None:
         recon_block["delta"] = args.delta
     settings = ReconnectSettings.from_dict(recon_block)
+    # the run that wrote the state: a clean recorded source, and this case or one derived from it
+    lineage = run_case.restart_record(state, case, args.case)
     if args.check:
-        print(json.dumps({"valid": True, "settings": settings.to_dict()}))
+        print(json.dumps({"valid": True, "settings": settings.to_dict(), "state": lineage}))
         return 0
     out = args.outdir
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise SystemExit(f"{out}: output directory is not empty")
     if out.resolve().is_relative_to(state.parent.parent):
         raise SystemExit("the output cannot be inside the run that wrote the state")
+    if sha256(state) != lineage["sha256"] or sha256(meta_path) != lineage["metadata_sha256"]:
+        raise SystemExit("the state changed during admission")
     out.mkdir(parents=True, exist_ok=True)
     params = CaseParameters.from_dict(case["physics"])
     nd = nondimensionalise(params)
@@ -154,8 +185,7 @@ def main(argv=None) -> int:
     tol = float(case["tolerances"]["newton"])
     manifest = {"schema": "faraday-reconnect-prototype-v1", "case_id": case.get("case_id"),
                 "case_file": str(args.case.resolve()), "case_sha256": sha256(args.case),
-                "state": {"path": str(state), "sha256": sha256(state),
-                          "metadata_sha256": sha256(meta_path)},
+                "state": lineage,
                 "component_commit": component_commit(ROOT), "pyoomph": pyoomph_revision(),
                 "argv": list(sys.argv if argv is None else argv),
                 "units": "dimensionless; length 1/k; time in capillary units"}
@@ -228,7 +258,7 @@ def run(problem, driver, settings: ReconnectSettings, args, out: Path, tol: floa
     stop = {"reason": "steps"}
     step = 0
 
-    def row(dt, newton_tol, wall):
+    def row(dt, newton_tol, wall, **extra):
         segs = problem.interface_segments()
         obs = problem.cut_observables()
         m = driver.measure()
@@ -239,7 +269,7 @@ def run(problem, driver, settings: ReconnectSettings, args, out: Path, tol: floa
                                          "divergence_sq")},
                   **ch, **{k: m[k] for k in ("axis_curvature", "r_j", "z_b", "Q_j", "V_j",
                                               "h_near", "U")},
-                  "remesh_count": problem.remesh_count, "wall": wall}
+                  "remesh_count": problem.remesh_count, "wall": wall, **extra}
         table.write("\t".join(f"{float(values.get(c, math.nan)):.12e}"
                               if c not in ("step", "remesh_count") else str(values[c])
                               for c in COLUMNS) + "\n")
@@ -249,26 +279,38 @@ def run(problem, driver, settings: ReconnectSettings, args, out: Path, tol: floa
                           c, header)
         return segs, m
 
+    def stops(segs, m):
+        chains = [Chain(np.column_stack([c["r"], c["z"]]), tuple(c["end_types"])) for c in segs]
+        return post_cut_stops(chains, geom, settings, h_tip,
+                              neck_elements=collapse.neck_stop_elements,
+                              fold_ratio=collapse.fold_ratio, fold_stop=collapse.fold_stop,
+                              fold_stop_elements=collapse.fold_stop_elements,
+                              fold_search=FOLD_SEARCH) or driver._geometry_stop(m)
+
+    reach = 100 * settings.delta
     segs, m = row(0.0, 0.0, 0.0)
+    dt_prev = settings.dt0 / settings.dt_growth
     try:
+        found = stops(segs, m)  # the state right after the cut, before any step
+        if found is not None:
+            return {"state": "completed", "steps": 0, "stop": found, "cut": "cut_diagnostics.json"}
         for step in range(1, args.steps + 1):
             t = problem.get_current_time(dimensional=False, as_float=True)
             if t - t_cut >= settings.tau_end:
                 stop = {"reason": "tau-end"}
                 step -= 1
                 break
-            near = [np.hypot(c["u_r"], c["u_z"])[np.hypot(c["r"], c["z"] - z_cut) < 100 * settings.delta]
-                    for c in segs]
-            U = max([float(v.max()) for v in near if len(v)] + [1e-3])
-            dt = min(settings.dt0 * settings.dt_growth ** (step - 1), settings.courant * h_tip / U)
+            U, h_near = near_cut(segs, z_cut, reach)
+            h_cut = min(h_tip, h_near)
+            dt = min(settings.dt_growth * dt_prev, settings.courant * h_cut / U)
             newton_tol = max(tol, collapse.newton_floor / dt)
             wall0 = time.time()
             problem.run(t + dt, timestep=dt, maxstep=dt, outstep=False, temporal_error=1.0,
                         newton_solver_tolerance=newton_tol)
             dt = problem.get_current_time(dimensional=False, as_float=True) - t
-            segs, m = row(dt, newton_tol, time.time() - wall0)
-            chains = [Chain(np.column_stack([c["r"], c["z"]]), tuple(c["end_types"])) for c in segs]
-            found = post_cut_stops(chains, geom, settings, h_tip) or driver._geometry_stop(m)
+            dt_prev = dt
+            segs, m = row(dt, newton_tol, time.time() - wall0, h_cut=h_cut, U_cut=U)
+            found = stops(segs, m)
             if found is not None:
                 stop = found
                 break
