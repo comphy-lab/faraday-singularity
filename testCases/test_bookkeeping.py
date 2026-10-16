@@ -1479,4 +1479,192 @@ def test_dumps_without_landing_have_no_landing_record(tmp_path):
     drv.close()
     metas = [json.loads(f.read_text()) for f in (tmp_path / "states").glob("*.json")]
     assert metas and all("landed" not in m for m in metas)
+    # nor the other keys of a reconnection: the dumps of other runs keep their keys
+    assert all("neck_samples" not in m and "resume_at" not in m for m in metas)
     assert not any(e["event"].startswith("landing") for e in _read_events(tmp_path))
+
+
+def test_landing_radii_below_the_neck_stop_are_refused(tmp_path):
+    """A run stops at the first state with r_n < max(neck_stop, neck_stop_elements h_floor); a cut
+    radius below LANDING_RATIO times that can never land, and is refused before any output."""
+    s = _settings(neck_stop=3e-4, h_floor=2e-5)
+    with pytest.raises(ValueError, match=r"0\.00025, 0\.000125"):
+        PrescribedDriver(FakeProblem(), s, tmp_path / "a", _closing_neck,
+                         landing=(1e-3, 5e-4, 2.5e-4, 1.25e-4))
+    assert not (tmp_path / "a").exists()
+    s = _settings(neck_stop=1e-4, h_floor=1e-4)  # the limit is neck_stop_elements h_floor = 3e-4
+    with pytest.raises(ValueError, match="neck_stop"):
+        CollapseDriver(FakeProblem(), s, tmp_path / "b", landing=(3e-4,))
+    CollapseDriver(FakeProblem(), s, tmp_path / "c", landing=(3.2e-4,)).close()
+
+
+def test_radii_left_at_the_stop_are_recorded_and_landed_by_a_continuation(tmp_path):
+    s = _settings(t_end=0.4, dt_max=1e-3, neck_stop=1e-4, h_floor=1e-6, state_dt=0.1,
+                  state_keep=100)
+    drv = PrescribedDriver(FakeProblem(), s, tmp_path / "a", _closing_neck, landing=(1e-3, 5e-4))
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "end-time"
+    landings = [e for e in _read_events(tmp_path / "a") if e["event"].startswith("landing")]
+    assert [(e["event"], e["delta"]) for e in landings] == [("landing", 1e-3),
+                                                           ("landing-missed", 5e-4)]
+    assert landings[1]["reason"] == "stopped-first" and landings[1]["stop_reason"] == "end-time"
+    assert out["landing"] == {"radii": [1e-3, 5e-4], "kept": [1e-3],
+                              "missed": [{"delta": 5e-4, "reason": "stopped-first"}]}
+    # the radius left at the stop is not recorded as landed: a continuation lands it
+    assert drv.state.landed == [1e-3]
+    meta = json.loads((tmp_path / "a" / "states" / "landing_0.001.json").read_text())
+    assert meta["landed"] == [1e-3]
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, _landing_settings(), tmp_path / "b", _closing_neck,
+                           landing=(1e-3, 5e-4))
+    drv.restore(meta)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["landing"]["kept"] == [5e-4] and out["landing"]["missed"] == []
+    assert (tmp_path / "b" / "states" / "landing_0.0005.dump").is_file()
+
+
+def test_a_rebuild_that_narrows_the_neck_below_the_stop_still_lands(tmp_path):
+    """The smallest admitted radius, delta = 1.06 neck_limit: the neck is just wider than
+    delta/1.05 after the step, and the rebuild of that step measures it below the neck limit, which
+    stops the run. The state after the rebuild is offered for landing too."""
+    s = _landing_settings()  # neck limit 1e-4
+    delta = 1.06e-4
+    pb = FakeProblem()
+
+    def fields(t):
+        r = 2e-3 - 3e-3 * t
+        return {"r_neck": r - (2e-6 if pb.remesh_count else 0.0), "z_neck": 1.0,
+                "h_near": 0.2 if r <= 1.015e-4 else 0.05}
+
+    drv = PrescribedDriver(pb, s, tmp_path, fields, landing=(delta,))
+    out = drv.run(1e-9)
+    drv.close()
+    events = _read_events(tmp_path)
+    (remesh,) = [e for e in events if e["event"] == "remesh"]
+    (landing,) = [e for e in events if e["event"] == "landing"]
+    assert out["stop"]["reason"] == "pinch-off-approach" and landing["step"] == remesh["step"]
+    assert landing["r_neck"] < s.neck_limit and 1.05 <= landing["delta_over_r_neck"] <= 1.1
+    meta = json.loads(Path(landing["path"]).with_suffix(".json").read_text())
+    assert "resume_at" not in meta and meta["remesh_count"] == 1  # kept after the rebuild
+
+
+def _neck_with_rebuild_from(r_from: float, strict: bool = False):
+    """``_closing_neck`` on a surface coarser than the focus wants once the neck is narrower than
+    ``r_from`` (``<=``, or ``<`` with ``strict``): a refining rebuild is due from that step on, and
+    does not take effect (``remesh-ineffective``), so it is tried again after the backoff."""
+    def fields(t):
+        f = _closing_neck(t)
+        if f["r_neck"] < r_from or (not strict and f["r_neck"] == r_from):
+            f["h_near"] = 0.2
+        return f
+    return fields
+
+
+def test_restart_from_a_landing_state_makes_its_remesh_check_first(tmp_path):
+    """The neck passes delta/1.05 at a step whose remesh check rebuilds the mesh. The landing state
+    is kept before that check (``resume_at``), and a restart from it makes the check before its
+    first step, as the parent did: both step from the rebuilt mesh, and the rebuilds after it fall
+    on the same steps."""
+    from faraday_singularity.reconnect import LANDING_RATIO
+
+    s = _landing_settings()
+    delta = 1e-3
+    fields = _neck_with_rebuild_from(delta / LANDING_RATIO)
+    pb = FakeProblem()
+    drv = PrescribedDriver(pb, s, tmp_path / "a", fields, landing=(delta,))
+    drv.run(1e-9)
+    drv.close()
+    events = _read_events(tmp_path / "a")
+    (landing,) = [e for e in events if e["event"] == "landing"]
+    remesh = [e["step"] for e in events if e["event"] == "remesh"]
+    assert remesh[0] == landing["step"] and len(remesh) >= 3
+    meta = json.loads(Path(landing["path"]).with_suffix(".json").read_text())
+    assert meta["resume_at"] == "remesh-check" and meta["remesh_count"] == 0
+    pb2 = FakeProblem()
+    pb2.t = meta["time"]  # load_state
+    drv2 = PrescribedDriver(pb2, s, tmp_path / "b", fields, landing=(delta,))
+    drv2.restore(meta)
+    drv2.run(1e-9)
+    drv2.close()
+    resumed = _read_events(tmp_path / "b")
+    assert resumed[0]["event"] == "restart" and resumed[0]["resume_at"] == "remesh-check"
+    assert [e["step"] for e in resumed if e["event"] == "remesh"] == remesh
+    full, rest = _rows(tmp_path / "a"), _rows(tmp_path / "b")
+    k = int(np.searchsorted(full["step"], meta["step"]))
+    for name in ("step", "time", "dt", "remesh_count", "r_neck"):
+        first = 1 if name == "dt" else 0  # the restart row records no step
+        assert np.array_equal(rest[name][first:], full[name][k + first:], equal_nan=True), name
+    assert pb2.remesh_count == pb.remesh_count
+    # rotating dumps are written at the end of a step: a restart from one steps at once
+    rotating = [json.loads(f.read_text()) for f in (tmp_path / "a" / "states").glob("state_*.json")]
+    assert rotating and all("resume_at" not in m for m in rotating)
+
+
+def test_restart_from_a_stop_state_with_a_lower_neck_stop_matches_a_run_with_it(tmp_path):
+    """Following the neck further from the kept stop state (a derived case with a lower
+    ``neck_stop``) gives the run that had the lower stop from the start, rebuilds included: the
+    stop state was kept before the remesh check of its step."""
+    hi, lo = (_settings(t_end=1.0, dt_max=1e-3, neck_stop=x, h_floor=1e-6, state_dt=0.1,
+                        state_keep=100) for x in (5e-4, 1e-4))
+    fields = _neck_with_rebuild_from(5e-4, strict=True)  # from the step that stops the parent
+    drv = PrescribedDriver(FakeProblem(), hi, tmp_path / "a", fields, keep_stop_state=True)
+    out = drv.run(1e-9)
+    drv.close()
+    stop = Path(out["stop"]["kept_state"])
+    meta = json.loads(stop.with_suffix(".json").read_text())
+    assert meta["resume_at"] == "remesh-check" and meta["neck_samples"][-1][0] == meta["time"]
+    ref = PrescribedDriver(FakeProblem(), lo, tmp_path / "ref", fields)
+    ref.run(1e-9)
+    ref.close()
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, lo, tmp_path / "b", fields)
+    drv.restore(meta)
+    drv.run(1e-9)
+    drv.close()
+    full, rest = _rows(tmp_path / "ref"), _rows(tmp_path / "b")
+    k = int(np.searchsorted(full["step"], meta["step"]))
+    for name in ("step", "time", "dt", "remesh_count", "r_neck"):
+        first = 1 if name == "dt" else 0
+        assert np.array_equal(rest[name][first:], full[name][k + first:], equal_nan=True), name
+    steps = [e["step"] for e in _read_events(tmp_path / "ref") if e["event"] == "remesh"]
+    assert steps and steps[0] == meta["step"]
+    assert [e["step"] for e in _read_events(tmp_path / "b") if e["event"] == "remesh"] == steps
+
+
+def test_pinch_time_from_the_neck_samples_of_a_landing_state(tmp_path):
+    """The landing state carries the latest neck samples; the pinch time fitted to them over the
+    last factor PINCH_FIT_SPAN of the radius recovers that of a power-law neck."""
+    from faraday_singularity.driver import NECK_SAMPLES, PINCH_FIT_SPAN
+
+    t_p, A, alpha = 0.9, 4e-3, 0.56
+
+    def fields(t):
+        return {"r_neck": A * (t_p - t) ** alpha, "z_neck": 1.0}
+
+    s = _landing_settings()
+    drv = PrescribedDriver(FakeProblem(), s, tmp_path / "a", fields, landing=(5e-4,))
+    drv.run(1e-9)
+    drv.close()
+    (landing,) = [e for e in _read_events(tmp_path / "a") if e["event"] == "landing"]
+    meta = json.loads(Path(landing["path"]).with_suffix(".json").read_text())
+    samples = meta["neck_samples"]
+    assert len(samples) == NECK_SAMPLES and samples[-1] == [landing["time"], landing["r_neck"]]
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, s, tmp_path / "b", fields)
+    drv.restore(meta)
+    fit = drv.pinch_time()
+    drv.close()
+    assert fit["t_p"] == pytest.approx(t_p, abs=1e-3 * (t_p - landing["time"]))
+    assert fit["alpha"] == pytest.approx(alpha, rel=1e-2)
+    assert fit["t_window"][1] == landing["time"] and fit["r_window"][1] == landing["r_neck"]
+    assert fit["r_window"][0] <= PINCH_FIT_SPAN * fit["r_window"][1] and fit["samples"] >= 10
+    assert fit["samples"] < NECK_SAMPLES  # the window, not the whole series
+    # no neck samples: no pinch time
+    fresh = PrescribedDriver(FakeProblem(), s, tmp_path / "c", fields)
+    assert math.isnan(fresh.pinch_time()["t_p"])
+    fresh.close()

@@ -124,15 +124,33 @@ it restarts from zero (``max_curvature_reset`` in the ``restart`` event), so the
 next ``jet-born`` event and the run status report covers only the rows after the restart.
 
 Kept dumps lie outside the rotation of ``state_keep``: with ``keep_stop_state`` the state at a
-neck-radius stop (``stop_<step>.dump``, the landing state of a reconnection); with ``landing``, a list
-of cut radii, for each radius ``delta`` the first measured state at which the neck has closed to
-``delta/LANDING_RATIO`` (``landing_<delta>.dump``, event ``landing``), so that one run gives the
-landing states of a study in ``delta`` (a state already narrower than ``delta/MAX_LANDING_RATIO``,
-as after a restart, is none: event ``landing-missed``); and the ``precut`` and ``postcut`` states of
-a cut (``surgery.py``). After a cut (:meth:`CollapseDriver.reset_after_cut`)
-the measured surface is the open chain, whose tip on the axis is a fresh cavity bottom: the scale,
-step and singular-time bookkeeping restart, a new cycle begins, and the first step is the cut's
-``dt0``. Dumps written after a cut carry its record, which a restart restores.
+neck-radius stop (``stop_<step>.dump``, the landing state of a reconnection); with ``landing``, a
+list of cut radii, for each radius ``delta`` the first measured state at which the neck has closed
+to ``delta/LANDING_RATIO`` (``landing_<delta>.dump``, event ``landing``), so that one run gives the
+landing states of a study in ``delta``; and the ``precut`` and ``postcut`` states of a cut
+(``surgery.py``). Every measured state is offered for landing, the stop state and the state after a
+rebuild included. A radius the run cannot land before its neck-radius stop,
+``delta < LANDING_RATIO max(neck_stop, neck_stop_elements h_floor)``, is refused when the driver is
+made (:func:`check_landing`). Event ``landing-missed`` records a radius left without a landing state:
+reason ``neck-passed`` for a state already narrower than ``delta/MAX_LANDING_RATIO`` (as after a
+restart; a cut there is refused), ``stopped-first`` at the stop for each radius the run ended before
+(these stay out of ``landed``, so that a continuation can still land them). The run's result then
+lists the radii kept and missed (``landing``).
+
+Landing and stop dumps are kept within their step: after its stop checks, before its snapshot and
+remesh checks. Their JSON records ``resume_at`` ``remesh-check``, and a restart from one makes that
+remesh check before its first step, as the run that wrote it did after keeping it, so that both step
+from the same mesh (the restart's ``start`` profile stands for the snapshot). Rotating dumps are
+written at the end of a step, and a restart from one steps at once. Kept dumps, and every dump of a
+run that keeps landing states, also hold the latest ``NECK_SAMPLES`` samples ``(t, r_n)`` of the
+closing neck, from which :meth:`CollapseDriver.pinch_time` fits the pinch time ``t_p`` that the cut
+records.
+
+After a cut (:meth:`CollapseDriver.reset_after_cut`) the measured surface is the open chain, whose
+tip on the axis is a fresh cavity bottom: the scale, step, neck and singular-time bookkeeping
+restart, a new cycle begins, and the first step is the cut's ``dt0``. Dumps written after a cut
+carry its record, which :meth:`CollapseDriver.restore` restores (``surgery.restore_cut``); no runner
+continues from such a state yet (``run_case.py`` and the prototype refuse it).
 """
 
 from __future__ import annotations
@@ -230,11 +248,37 @@ class CollapseSettings:
                 kw[key] = tuple(kw[key])
         return cls(t_end=t_end, dt_max=dt_max, **kw)
 
+    @property
+    def neck_limit(self) -> float:
+        """The neck radius below which a run stops (``pinch-off-approach``, ``neck-radius``)."""
+        return max(self.neck_stop, self.neck_stop_elements * self.h_floor)
+
 
 MIN_DT_FAILURE = "less than the minimum dt"  # oomph-lib's message when it gives up on a step
 FOLD_SEARCH = 4.0  # folds are looked for within this many stop limits
 # what a dump's max_curvature holds: the largest z''(0) > 0 of the trough episode and cycle
 MAX_CURVATURE_KIND = "trough-episode"
+# a dump kept within a step, after its stop checks and before its snapshot and remesh checks
+RESUME_REMESH_CHECK = "remesh-check"
+NECK_SAMPLES = 100  # (t, r_n) samples of the closing neck the driver keeps for the pinch time
+PINCH_FIT_SPAN = 1.5  # the pinch time is fitted to the latest samples with r_n <= this * the last
+
+
+def check_landing(landing, settings: CollapseSettings) -> None:
+    """Refuse cut radii of ``landing`` that the run cannot land before its neck-radius stop.
+
+    A landing state for ``delta`` is the first measured state with ``r_n <= delta/LANDING_RATIO``,
+    and the run stops at the first with ``r_n < settings.neck_limit``. Since the stop state is
+    itself offered for landing, every ``delta >= LANDING_RATIO * neck_limit`` is reached (unless the
+    run ends otherwise first, which ``landing-missed`` records); a smaller one is not."""
+    limit = settings.neck_limit
+    short = [float(d) for d in landing if float(d) < LANDING_RATIO * limit]
+    if short:
+        raise ValueError(
+            "collapse.landing: the run stops at the neck radius "
+            f"max(neck_stop, neck_stop_elements * h_floor) = {limit:.6g} before the neck reaches "
+            f"delta/{LANDING_RATIO} for the cut radii {', '.join(f'{d:.6g}' for d in short)}; "
+            f"lower collapse.neck_stop below {min(short) / LANDING_RATIO:.6g} or drop those radii")
 
 
 def oomph_error_message(log: str) -> str:
@@ -349,7 +393,8 @@ class _State:
     apex_alpha: float = math.nan
     apex_t_est: float = math.nan
     last_singular_t: float = -math.inf  # time of the latest sample offered to the series
-    landed: list = field(default_factory=list)  # cut radii of ``landing`` already kept or missed
+    landed: list = field(default_factory=list)  # cut radii of ``landing`` already kept or passed
+    neck_samples: list = field(default_factory=list)  # [t, r_n] of the closing neck, the latest
 
 
 class CollapseDriver:
@@ -359,6 +404,9 @@ class CollapseDriver:
         self.s = settings
         self.keep_stop_state = keep_stop_state
         self.landing = tuple(sorted((float(x) for x in landing), reverse=True))
+        check_landing(self.landing, settings)
+        # the measured state has had its stop checks but not yet its snapshot and remesh checks
+        self._checks_pending = False
         self.outdir = Path(outdir)
         (self.outdir / "profiles").mkdir(parents=True, exist_ok=True)
         self.state = _State()
@@ -609,8 +657,13 @@ class CollapseDriver:
                         "ell_prev", "t_prev", "last_remesh_step", "last_singular_t",
                         "refine_blocked_until", "coarsen_held_until", "born_step")
 
-    def _write_state(self, path: Path, **extra):
-        """The pyoomph state at ``path`` and the driver's bookkeeping in the JSON beside it."""
+    def _write_state(self, path: Path, *, kept: bool = False, **extra):
+        """The pyoomph state at ``path`` and the driver's bookkeeping in the JSON beside it.
+
+        The keys added for reconnections appear only where they apply, so that the dumps of other
+        runs keep their keys: ``landed`` in runs with ``landing``; ``neck_samples`` in kept dumps
+        and in runs that keep landing states; ``resume_at`` in dumps kept within a step; ``cut``
+        after a cut."""
         st = self.state
         path.parent.mkdir(exist_ok=True)
         self.pb.save_state(str(path), quiet=True)
@@ -619,8 +672,12 @@ class CollapseDriver:
         meta.update(time=self._t(), remesh_count=self.pb.remesh_count,
                     focus=None if focus is None else asdict(focus), dt_prev=st.dt_prev,
                     episodes=self.episodes.to_dict(), max_curvature_kind=MAX_CURVATURE_KIND)
-        if self.landing:  # only then: the dumps of other runs keep their keys
+        if self.landing:
             meta["landed"] = list(st.landed)
+        if kept or self.landing or self.keep_stop_state:
+            meta["neck_samples"] = [list(x) for x in st.neck_samples]
+        if self._checks_pending:
+            meta["resume_at"] = RESUME_REMESH_CHECK
         cut = getattr(self.pb, "cut", None)
         if cut is not None:
             meta["cut"] = cut
@@ -629,7 +686,7 @@ class CollapseDriver:
 
     def keep_state(self, path: Path, **extra) -> Path:
         """A dump outside the rotation of ``state_keep`` (``path`` under ``states/``)."""
-        self._write_state(Path(path), **extra)
+        self._write_state(Path(path), kept=True, **extra)
         return Path(path)
 
     def save_state(self):
@@ -664,6 +721,10 @@ class CollapseDriver:
             st.last_remesh_step -= self.s.remesh_backoff
         st.dt_prev = meta.get("dt_prev")
         st.landed = [float(x) for x in meta.get("landed", [])]
+        st.neck_samples = [[float(t), float(r)] for t, r in meta.get("neck_samples", [])]
+        # a dump kept within its step: the run that wrote it went on to the snapshot and remesh
+        # checks of that step, and so does the restart before its first step (run())
+        self._checks_pending = meta.get("resume_at") == RESUME_REMESH_CHECK
         st.last_state_t = meta["time"]
         self.pb.remesh_count = meta["remesh_count"]
         if meta.get("focus"):
@@ -678,11 +739,12 @@ class CollapseDriver:
 
             restore_cut(self.pb, meta["cut"])
         ep = self.episodes
+        resume = {"resume_at": RESUME_REMESH_CHECK} if self._checks_pending else {}
         self._event("restart", self.measure(), from_time=meta["time"],
                     episode_history="episodes" in meta, episode=ep.index, episode_kind=ep.kind,
                     episode_start=ep.start, episode_partial=ep.partial, h_crest=ep.h_crest,
                     t_crest=ep.t_crest, crest_jet=ep.crest_jet, max_curvature_reset=reset,
-                    coarsen_held_until=st.coarsen_held_until)
+                    coarsen_held_until=st.coarsen_held_until, **resume)
 
     def reset_after_cut(self, record: dict):
         """Restart the bookkeeping for the surface after a cut (``surgery.cut``).
@@ -700,24 +762,65 @@ class CollapseDriver:
         st.max_curvature, st.max_curvature_time = 0.0, math.nan
         st.born, st.born_step = False, -1
         st.neck_seen = False
+        st.neck_samples = []
         st.cavity_seen = True
         st.cycle += 1
         st.coarsen_held_until = -math.inf
         st.refine_blocked_until = -10**9
+        self._checks_pending = False  # the cut rebuilt the mesh; the next step follows at once
         m = self.measure()
+        geometry = record.get("geometry", {})
         self._event("cut", m, cycle=st.cycle, delta=record["delta"], rmin=record.get("rmin"),
                     r_neck=record["r_neck"], z_neck=record["z_neck"],
-                    bridge=record.get("geometry", {}).get("bridge"),
-                    removed_gas=record.get("geometry", {}).get("removed_gas"),
+                    t_pinch=record.get("pinch", {}).get("t_p"),
+                    bridge=geometry.get("bridge"), removed_gas=geometry.get("removed_gas"),
+                    in_cut_radii=record.get("in_cut_radii"),
                     delta_KE=record.get("projection", {}).get("delta_KE"),
                     transfer=record.get("transfer"))
         self._snapshot(m, "cut")
         return m
 
+    def _neck_sample(self, m: dict):
+        """Offer the measured neck to the series from which :meth:`pinch_time` fits; no neck
+        clears it, and a restart does not offer the dumped state again."""
+        samples, r_n, t = self.state.neck_samples, m["r_neck"], m["time"]
+        if not (math.isfinite(r_n) and r_n > 0.0):
+            samples.clear()
+        elif not samples or t > samples[-1][0]:
+            samples.append([t, r_n])
+            del samples[:-NECK_SAMPLES]
+
+    def pinch_time(self) -> dict:
+        """The pinch time ``t_p`` of the neck, from a power law ``r_n = A (t_p - t)^alpha`` fitted
+        (:func:`singular.singular_time`, with the run's singular-time settings) to the latest
+        neck samples over which the neck closes, back to ``PINCH_FIT_SPAN`` times the latest radius.
+
+        The record gives the fit window (times, radii, number of samples): a fit over another
+        window of the same run gives another ``t_p``, since the exponent of a real neck drifts as it
+        closes, so a study in the cut radius compares its cuts at one common ``t_p``. NaN (``None``
+        in JSON) when the series is too short or the fit is ill-conditioned."""
+        s, samples = self.s, self.state.neck_samples
+        out = {"t_p": math.nan, "alpha": math.nan, "samples": 0, "t_window": None,
+               "r_window": None, "span": PINCH_FIT_SPAN, "source": "neck_samples"}
+        if not samples:
+            return out
+        i, r_last = len(samples) - 1, samples[-1][1]
+        while i > 0 and samples[i][1] < samples[i - 1][1] <= PINCH_FIT_SPAN * r_last:
+            i -= 1
+        ts, xs = np.asarray(samples[i:], dtype=float).T
+        t0, alpha = singular_time(ts, xs, min_samples=s.singular_samples,
+                                  alpha_range=s.singular_alpha_range,
+                                  max_residual=s.singular_residual,
+                                  max_extrapolation=s.singular_extrapolation)
+        out.update(t_p=t0, alpha=alpha, samples=len(ts), t_window=[float(ts[0]), float(ts[-1])],
+                   r_window=[float(xs[0]), float(xs[-1])])
+        return out
+
     def _keep_landings(self, m: dict):
         """Keep the landing state of each cut radius of ``landing`` that the neck has just passed:
         the first measured state with ``delta/r_n >= LANDING_RATIO``, unless the neck is already
-        narrower than ``delta/MAX_LANDING_RATIO`` (a cut there is refused)."""
+        narrower than ``delta/MAX_LANDING_RATIO`` (a cut there is refused: ``landing-missed``,
+        reason ``neck-passed``)."""
         r_n = m["r_neck"]
         if not self.landing or not (math.isfinite(r_n) and r_n > 0.0):
             return
@@ -729,16 +832,36 @@ class CollapseDriver:
             ratio = delta / r_n
             info = {"delta": delta, "r_neck": r_n, "z_neck": m["z_neck"], "delta_over_r_neck": ratio}
             if ratio > MAX_LANDING_RATIO:
-                self._event("landing-missed", m, **info, max_landing_ratio=MAX_LANDING_RATIO)
+                self._event("landing-missed", m, **info, reason="neck-passed",
+                            max_landing_ratio=MAX_LANDING_RATIO)
                 continue
             path = self.keep_state(self.outdir / "states" / f"landing_{delta:.6g}.dump",
                                    landing=info)
             self._event("landing", m, **info, path=str(path))
 
+    def _landings_left(self, m: dict, stop: dict):
+        """At the stop: ``landing-missed`` (reason ``stopped-first``) for each cut radius the run
+        ended before. They stay out of ``landed``, so that a continuation can still land them."""
+        st, r_n = self.state, m["r_neck"]
+        for delta in self.landing:
+            if delta not in st.landed:
+                self._event("landing-missed", m, delta=delta, r_neck=r_n, z_neck=m["z_neck"],
+                            delta_over_r_neck=delta / r_n if r_n > 0.0 else math.nan,
+                            reason="stopped-first", stop_reason=stop.get("reason"),
+                            landing_ratio=LANDING_RATIO)
+
+    def _landing_summary(self) -> dict:
+        """The cut radii this run kept and those it missed, with the reason."""
+        events = self.state.events
+        return {"radii": list(self.landing),
+                "kept": [e["delta"] for e in events if e["event"] == "landing"],
+                "missed": [{"delta": e["delta"], "reason": e["reason"]} for e in events
+                           if e["event"] == "landing-missed"]}
+
     # --- main loop ----------------------------------------------------------------------------
 
     def _geometry_stop(self, m):
-        neck_limit = max(self.s.neck_stop, self.s.neck_stop_elements * self.s.h_floor)
+        neck_limit = self.s.neck_limit
         if math.isfinite(m["r_neck"]) and m["r_neck"] < neck_limit:
             return {"reason": "pinch-off-approach", "trigger": "neck-radius",
                     "r_neck": m["r_neck"], "z_neck": m["z_neck"], "neck_limit": neck_limit}
@@ -766,14 +889,31 @@ class CollapseDriver:
                     "post_birth_aspect": s.post_birth_aspect}
         return None
 
+    def _remesh_checks(self, m: dict) -> tuple[dict, dict | None]:
+        """The remesh check of a measured state that has passed its stop checks; after a rebuild,
+        the measurement of the new mesh, offered for landing and checked for the stops again.
+        Returns the state the next step starts from and the stop it calls for, if any."""
+        self._checks_pending = False
+        if self._maybe_remesh(m):
+            m = self.measure()
+            self._keep_landings(m)
+            return m, self._stop(m)
+        return m, None
+
     def run(self, newton_tolerance: float) -> dict:
         s, st, pb = self.s, self.state, self.pb
         m = self.measure()
         self._track(m)
         self._write_row(m, 0.0, 0.0, self._singular(m))
-        self._snapshot(m, "start")
+        self._neck_sample(m)
+        self._snapshot(m, "start")  # also stands for the snapshot check of a dump kept in its step
         self._keep_landings(m)
         stop = {"reason": "end-time"}
+        if self._checks_pending and self._stop(m) is None:
+            # restarted from a dump kept within its step (a landing or a stop state): make the
+            # remesh check its run made after keeping it, so that the restart steps from the mesh
+            # that run stepped from; the loop checks the stops of the new mesh
+            m, _ = self._remesh_checks(m)
         while True:
             found = self._stop(m)
             if found is not None:
@@ -820,8 +960,10 @@ class CollapseDriver:
             dt = self._t() - t
             st.dt_prev = dt
             m = self.measure()
+            self._checks_pending = True  # until the remesh check of this step
             self._track(m)
             self._write_row(m, dt, time.time() - wall0, self._singular(m))
+            self._neck_sample(m)
 
             if st.born and m["axis_lowest"]:  # the jet has gone; a new cavity on the axis
                 st.born = False
@@ -850,26 +992,30 @@ class CollapseDriver:
             if math.isfinite(m["r_neck"]) and not st.neck_seen:
                 st.neck_seen = True
                 self._event("neck", m, r_neck=m["r_neck"], z_neck=m["z_neck"])
-            self._keep_landings(m)  # with this step's bookkeeping, as every dump
+            # with this step's bookkeeping, as every dump; kept before the snapshot and remesh
+            # checks of the step, which a restart from it makes first (resume_at)
+            self._keep_landings(m)
             found = self._stop(m)
             if found is not None:
                 stop = found
                 break
             self._maybe_snapshot(m)
-            if self._maybe_remesh(m):
-                m = self.measure()
-                found = self._stop(m)
-                if found is not None:
-                    stop = found
-                    break
+            m, found = self._remesh_checks(m)
+            if found is not None:
+                stop = found
+                break
             if self._t() - st.last_state_t >= s.state_dt:
                 self.save_state()
         if self.keep_stop_state and stop.get("trigger") == "neck-radius":
             # the measured state of an accepted step: a landing state for a reconnection
             stop["kept_state"] = str(self.keep_state(
                 self.outdir / "states" / f"stop_{st.step:08d}.dump", stop=stop))
+        self._landings_left(m, stop)
         self._event("stop", m, **stop)
         self._snapshot(m, "stop")
-        return {"stop": stop, "steps": st.step, "remesh_count": pb.remesh_count,
-                "jet_born": st.born, "max_axis_curvature_before_birth": st.max_curvature,
-                "max_axis_curvature_time": st.max_curvature_time, "snapshots": st.snapshots}
+        out = {"stop": stop, "steps": st.step, "remesh_count": pb.remesh_count,
+               "jet_born": st.born, "max_axis_curvature_before_birth": st.max_curvature,
+               "max_axis_curvature_time": st.max_curvature_time, "snapshots": st.snapshots}
+        if self.landing:
+            out["landing"] = self._landing_summary()
+        return out

@@ -9,7 +9,10 @@
   steps, a restart from the ``postcut`` state, a quality remesh of the two chains after the cut and
   a step after it, the remesh after a restart in a new process, the zero fill on every node of the
   former gas, and the zero fill with an impulsive restart;
-* the prototype entry point on a landing state of that cavity, with the lineage of its parent run;
+* the refusal and the failure of a cut, which leave their partial record in
+  ``cut_diagnostics.json``;
+* the prototype entry point on a landing state of that cavity, with the lineage of its parent run,
+  the pinch time fitted to the neck samples of the landing state, and a failing cut;
 * the ordinary path: meshes as with the mesh class of commit 9e0d8a1 (to the byte), steps
   (to round-off), and dumps that load across the two kinds of problem.
 
@@ -305,6 +308,9 @@ def neck_cut(tmp_path_factory):
         pb.initialise()
         impose_closing_flow(pb)
         res["neck"] = neck_radius(pb.interface_segments()[0]["r"], pb.interface_segments()[0]["z"])
+        # the local kinetic energy over a half-disc that holds all the imposed flow
+        res["ke_total"] = pb.cut_observables()["kinetic_energy"]
+        res["ke_wide"] = surgery.local_kinetic_energy(pb, res["neck"][1], 1.0)
         old = pb.interface_segments()[0]
         old_open = Chain(np.column_stack([old["r"], old["z"]]), tuple(old["end_types"]))
         rec = surgery.cut(pb, s, out)
@@ -395,7 +401,7 @@ def neck_cut(tmp_path_factory):
 
 def test_cut_plans_once_and_builds_two_chains(neck_cut):
     rec = neck_cut["record"]
-    assert rec == neck_cut["file"]
+    assert rec == neck_cut["file"] and rec["outcome"] == "cut"
     assert [a["outcome"] for a in rec["plan_attempts"]] == ["plan"]
     assert rec["plan"]["events"][0]["kind"] == "pinch"
     chains = rec["mesh"]["chains"]
@@ -407,6 +413,34 @@ def test_cut_plans_once_and_builds_two_chains(neck_cut):
     assert g["z_bubble_top"] < g["z_cavity_tip"] and g["bridge"] > 2 * rec["delta"]
     for cap in rec["caps"]:
         assert cap["min_angle"] >= 30.0 and cap["r_s"] >= rec["delta"]
+
+
+def test_cut_records_the_geometry_in_cut_radii(neck_cut):
+    rec = neck_cut["record"]
+    g, rmin = rec["in_cut_radii"], rec["rmin"]
+    assert g["cut_radius"] == rmin and g["cap_window_factor"] == 6.0
+    assert g["r_s"] == pytest.approx([c["r_s"] / rmin for c in rec["caps"]])
+    assert g["replaced_survivors"] == [c["replaced_survivors"] for c in rec["caps"]]
+    assert g["splice_set_by"] in ("planner-window", "splice-factor")
+    assert g["bridge"] == pytest.approx(rec["geometry"]["bridge"] / rmin)
+    assert g["removed_gas"] == pytest.approx(rec["geometry"]["removed_gas"] / rmin**3)
+
+
+def test_cut_records_the_local_kinetic_energy(neck_cut):
+    """The kinetic energy within 20 delta of the neck, at the four stages of the cut; sampled over
+    a half-disc that holds all the flow it is the global integral, to the sampling error."""
+    assert neck_cut["ke_wide"] == pytest.approx(neck_cut["ke_total"], rel=1e-2)
+    rec = neck_cut["record"]
+    loc = rec["local_budgets"]
+    assert loc["radius"] == pytest.approx(surgery.LOCAL_RADIUS * rec["delta"])
+    assert loc["centre"] == [0.0, rec["z_neck"]]
+    ke = loc["kinetic_energy"]
+    assert set(ke) == {"before", "after_transfer", "after_fill", "after"}
+    assert 0.5 * rec["budgets_before"]["kinetic_energy"] < ke["before"] \
+        <= rec["budgets_before"]["kinetic_energy"]
+    assert ke["after"] <= rec["budgets_after"]["kinetic_energy"] and ke["after"] < ke["after_fill"]
+    # without a driver the cut has no neck samples, so no pinch time
+    assert rec["pinch"]["t_p"] is None and rec["pinch"]["source"] is None
 
 
 def test_cut_volume_is_the_planned_gain(neck_cut):
@@ -551,9 +585,41 @@ def test_cut_is_refused_far_above_the_neck(tmp_path, ratio):
     s = ReconnectSettings(delta=ratio * R_N)
     with neck_problem(tmp_path, s) as pb:
         pb.initialise()
-        with pytest.raises(surgery.CutRefused, match="above"):
+        with pytest.raises(surgery.CutRefused, match="above") as refused:
             surgery.cut(pb, s, tmp_path)
         assert pb.cut is None and not pb.get_mesh("liquid")._templatemesh.has_pending_surgery_plan()
+    # the refusal leaves its record
+    rec = json.loads((tmp_path / "cut_diagnostics.json").read_text())
+    assert rec == refused.value.record
+    assert rec["outcome"] == "refused" and rec["failed_at"] == "admission"
+    assert rec["delta_over_r_neck"] == pytest.approx(ratio, rel=1e-2) and "above" in rec["error"]
+
+
+def test_a_failed_cut_writes_its_diagnostics(tmp_path, monkeypatch):
+    """A failure after the remesh (here in the last stage, the chart) leaves the record as far as
+    it got in ``cut_diagnostics.json``, and on the exception."""
+    def broken_chart(_problem):
+        raise RuntimeError("no chart")
+
+    monkeypatch.setattr(surgery, "orient_interface_chart", broken_chart)
+    s = ReconnectSettings(delta=1.05 * R_N, dt0=1e-5)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        impose_closing_flow(pb)
+        with pytest.raises(surgery.CutFailed, match="no chart") as failed:
+            surgery.cut(pb, s, tmp_path)
+    rec = json.loads((tmp_path / "cut_diagnostics.json").read_text())
+    assert rec == failed.value.record
+    assert rec["outcome"] == "failed" and rec["failed_at"] == "chart" and "no chart" in rec["error"]
+    assert failed.value.precut == rec["precut_state"]["path"]
+    assert Path(failed.value.precut).is_file()
+    for key in ("plan_attempts", "caps", "geometry", "in_cut_radii", "transfer", "mesh",
+                "budgets_after_transfer", "budgets_after_fill", "local_budgets"):
+        assert key in rec, key
+    pr = rec["projection"]
+    assert pr["newton_residuals"] and abs(pr["energy_identity_error"]) <= 1e-10 * pr["before"][
+        "kinetic_energy"]
+    assert "postcut_state" not in rec and "volumes" not in rec
 
 
 def test_cut_is_refused_too_close_to_the_neck(tmp_path):
@@ -568,14 +634,24 @@ def test_cut_is_refused_too_close_to_the_neck(tmp_path):
 # --- the prototype entry point ----------------------------------------------------------------------
 
 
-def test_prototype_cuts_a_landing_state_and_steps(tmp_path):
-    landing = tmp_path / "landing"
+PINCH = (1e-4, 2e-2, 0.56)  # t_p, A, alpha of the neck samples given to the landing state
+
+
+@pytest.fixture(scope="module")
+def landing_run(tmp_path_factory):
+    """A landing state of the synthetic cavity, with the records of the run that wrote it (a
+    stand-in commit) and the neck samples of a power-law neck ``A (t_p - t)^alpha`` before it."""
+    root = tmp_path_factory.mktemp("prototype")
+    landing = root / "landing"
     landing.mkdir()
     s = ReconnectSettings(delta=1.05 * R_N)
     with neck_problem(landing, s) as pb:
         pb.initialise()
         impose_closing_flow(pb)
         driver = CollapseDriver(pb, CollapseSettings(t_end=10.0, dt_max=0.01), landing)
+        t_p, A, alpha = PINCH
+        ts = -1e-6 * np.arange(60)[::-1]  # up to the state, at t = 0
+        driver.state.neck_samples = [[float(t), float(A * (t_p - t) ** alpha)] for t in ts]
         state = driver.keep_state(landing / "states" / "stop_00000000.dump", stop={})
         driver.close()
     parent_case = {"schema": "pyoomph-case-v1", "case_id": "neck-landing",
@@ -587,7 +663,7 @@ def test_prototype_cuts_a_landing_state_and_steps(tmp_path):
                               "write_states": False},
                    "completion": {"kind": "event", "t_max": 10, "unit": "forcing periods"}}
     # the parent run's records, as run_case writes them (a stand-in commit)
-    parent_path = tmp_path / "landing-case.json"
+    parent_path = root / "landing-case.json"
     parent_path.write_text(json.dumps(parent_case))
     digest = hashlib.sha256(parent_path.read_bytes()).hexdigest()
     (landing / "run-manifest.json").write_text(json.dumps(
@@ -598,11 +674,16 @@ def test_prototype_cuts_a_landing_state_and_steps(tmp_path):
     case = json.loads(json.dumps(parent_case))
     case["case_id"] = "neck-prototype"
     case["collapse"] = {"reconnect": {"delta": 1.0, "dt0": 1e-5}}
-    case_path = tmp_path / "case.json"
+    case_path = root / "case.json"
     case_path.write_text(json.dumps(case))
+    return {"state": state, "case": case_path, "digest": digest}
+
+
+def test_prototype_cuts_a_landing_state_and_steps(landing_run, tmp_path):
+    state = landing_run["state"]
     out = tmp_path / "out"
     proc = subprocess.run([sys.executable, str(ROOT / "simulationCases" / "reconnect_prototype.py"),
-                           str(case_path), "--state", str(state), "--outdir", str(out),
+                           str(landing_run["case"]), "--state", str(state), "--outdir", str(out),
                            "--delta-ratio", "1.05", "--steps", "2"],
                           capture_output=True, text=True, timeout=900, check=False)
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
@@ -610,11 +691,20 @@ def test_prototype_cuts_a_landing_state_and_steps(tmp_path):
     assert status["state"] == "completed" and status["steps"] == 2
     cut = json.loads((out / "cut_diagnostics.json").read_text())
     assert cut["delta"] == pytest.approx(1.05 * cut["r_neck"])
+    # the pinch time, fitted to the neck samples the landing state carries
+    t_p, _, alpha = PINCH
+    pinch = cut["pinch"]
+    assert pinch["source"] == "neck_samples" and pinch["samples"] >= 10
+    assert pinch["t_p"] == pytest.approx(t_p, rel=1e-3)
+    assert pinch["alpha"] == pytest.approx(alpha, rel=1e-2)
+    assert pinch["t_cut_minus_t_p"] == pytest.approx(cut["t_cut"] - pinch["t_p"], abs=1e-15)
     rows = np.loadtxt(out / "steps.txt")
     assert rows.shape[0] == 3
     cols = (out / "steps.txt").read_text().splitlines()[0][2:].split("\t")
     tau, dt = rows[:, cols.index("tau")], rows[:, cols.index("dt")]
     assert tau[0] == 0.0 and dt[1] == pytest.approx(1e-5) and dt[2] == pytest.approx(1.25e-5)
+    assert np.allclose(rows[:, cols.index("tau_p")], rows[:, cols.index("time")] - pinch["t_p"],
+                       rtol=0, atol=1e-15)
     # the Courant limit uses the smallest element near the cut, at most the cut's tip size
     h_cut, U_cut = rows[1:, cols.index("h_cut")], rows[1:, cols.index("U_cut")]
     assert np.all(h_cut <= cut["sizing"]["h_tip"]) and np.all(h_cut > 0)
@@ -622,17 +712,71 @@ def test_prototype_cuts_a_landing_state_and_steps(tmp_path):
     assert np.all(np.isfinite(rows[:, cols.index("momentum_z")]))
     for k in range(3):
         for kind in ("open", "bubble"):
-            assert (out / "profiles" / f"postcut_{k:04d}_{kind}.txt").is_file()
+            path = out / "profiles" / f"postcut_{k:04d}_{kind}.txt"
+            header = json.loads(path.read_text().splitlines()[0][2:])
+            assert header["t_p"] == pinch["t_p"] and header["tau_p"] == pytest.approx(
+                header["time"] - pinch["t_p"], abs=1e-15)
     for name in (f"precut_{cut['delta']:.6g}", f"postcut_{cut['delta']:.6g}"):
         assert (out / "states" / f"{name}.dump").is_file()
         assert (out / "states" / f"{name}.json").is_file()
-    events = [json.loads(x)["event"] for x in (out / "events.jsonl").read_text().splitlines()]
-    assert events[:2] == ["restart", "cut"]
+    events = [json.loads(x) for x in (out / "events.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events[:2]] == ["restart", "cut"]
+    assert events[1]["t_pinch"] == pinch["t_p"] and events[1]["in_cut_radii"] == cut["in_cut_radii"]
     manifest = json.loads((out / "run-manifest.json").read_text())
     assert manifest["state"]["path"] == str(state.resolve())
     parent = manifest["state"]["parent_record"]
-    assert parent["case_sha256"] == digest and parent["component_commit"] == "b" * 40
+    assert parent["case_sha256"] == landing_run["digest"] and parent["component_commit"] == "b" * 40
     assert parent["derived_keys"] == ["case_id", "collapse.keep_stop_state", "collapse.reconnect"]
+    # the postcut state cannot be continued by either runner
+    post = out / "states" / f"postcut_{cut['delta']:.6g}.dump"
+    proc = subprocess.run([sys.executable, str(ROOT / "simulationCases" / "reconnect_prototype.py"),
+                           str(landing_run["case"]), "--state", str(post), "--outdir",
+                           str(tmp_path / "again"), "--delta-ratio", "1.05", "--check"],
+                          capture_output=True, text=True, timeout=300, check=False)
+    assert proc.returncode != 0 and "post-cut state is not supported" in proc.stderr
+
+
+FAILING_PROTOTYPE = """
+import sys
+sys.path.insert(0, sys.argv[1] + "/simulationCases")
+sys.path.insert(0, sys.argv[1] + "/src")
+from faraday_singularity import problem, surgery
+import reconnect_prototype
+
+def broken_chart(_problem):
+    raise RuntimeError("no chart")
+
+load, loads = problem.FaradayProblem.load_state, []
+
+def first_load_only(self, *args, **kw):  # the landing state; a reload after the cut fails
+    loads.append(args)
+    if len(loads) > 1:
+        raise RuntimeError("a reload after the failed cut")
+    return load(self, *args, **kw)
+
+surgery.orient_interface_chart = broken_chart
+problem.FaradayProblem.load_state = first_load_only
+reconnect_prototype.main(sys.argv[2:])
+"""
+
+
+def test_prototype_records_a_failed_cut(landing_run, tmp_path):
+    """A cut that fails after its remesh ends the run as ``failed``, with the failure's own message
+    and stage, its partial record in ``cut_diagnostics.json`` and the precut dump named. The problem
+    is not reloaded, so a reload that would fail too cannot replace the first failure."""
+    out = tmp_path / "out"
+    proc = subprocess.run([sys.executable, "-c", FAILING_PROTOTYPE, str(ROOT),
+                           str(landing_run["case"]), "--state", str(landing_run["state"]),
+                           "--outdir", str(out), "--delta-ratio", "1.05", "--steps", "2"],
+                          capture_output=True, text=True, timeout=900, check=False)
+    status = json.loads((out / "run_status.json").read_text())
+    assert status["state"] == "failed", proc.stdout[-3000:] + proc.stderr[-3000:]
+    assert "no chart" in status["detail"] and status["failed_at"] == "chart"
+    assert status["cut_diagnostics"] == "cut_diagnostics.json" and "restored_precut" not in status
+    assert Path(status["precut"]).is_file()
+    rec = json.loads((out / "cut_diagnostics.json").read_text())
+    assert rec["outcome"] == "failed" and rec["failed_at"] == "chart"
+    assert rec["projection"]["newton_residuals"] and rec["pinch"]["source"] == "neck_samples"
 
 
 # --- the ordinary path ----------------------------------------------------------------------------
@@ -687,10 +831,13 @@ def test_ordinary_meshes_steps_and_dumps_are_unchanged(tmp_path):
             pb.save_state(str(out / "state.dump"), quiet=True)
             runs[name] = {"first": first, "remeshed": remeshed.read_bytes(), "vec": vec,
                           "dump": out / "state.dump"}
-    # The meshes are the same to the byte. The steps are compared to round-off only: with a
-    # multithreaded MKL two runs of the same problem in one process already differ at 1e-14
-    # (single-threaded, the ordinary problem reproduces the reference bit for bit; the
-    # reconnection-enabled one, compiled with its extra residual, to round-off).
+    # The meshes are the same to the byte. The steps are compared to 1e-12 only: in one process
+    # the problems built after the first already differ from it at about 1e-14. Single-threaded
+    # and each in a fresh process, the ordinary problem reproduces the reference bit for bit; the
+    # reconnection-enabled one, compiled with its extra residual and observables, does not: it
+    # departs at round-off from the third step (about 1e-14 relative after 10 fixed steps of this
+    # case), which the step control of the collapse driver carries on. This is why a restart may
+    # not add, drop or change a reconnect block (run_case.DERIVED_KEYS).
     scale = float(np.max(np.abs(runs["ref"]["vec"])))
     for name in ("new", "recon"):
         assert runs[name]["first"] == runs["ref"]["first"]

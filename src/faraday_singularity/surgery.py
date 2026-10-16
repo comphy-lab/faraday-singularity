@@ -4,8 +4,12 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
 ``reconnect`` settings, at a state whose neck radius ``r_n`` is a little below the cut radius
 ``delta`` (``min_landing_ratio <= delta/r_n <= max_landing_ratio``, otherwise the cut is refused):
 
-1. **Record** the budgets (volume, kinetic energy, axial momentum ``P_z``, ``int (div u)^2``) and keep
-   a ``precut`` state dump.
+1. **Record** the budgets (volume, kinetic energy, axial momentum ``P_z``, ``int (div u)^2``), the
+   kinetic energy within ``LOCAL_RADIUS delta`` of the neck (:func:`local_kinetic_energy`, again
+   after the transfer, the fill and the projection) and the pinch time ``t_p`` of the neck, fitted
+   by the driver to its latest neck samples (``pinch``: the fit, its window, and ``t_cut - t_p``),
+   and keep a ``precut`` state dump. Times after the cut are compared at fixed ``t - t_p``, since
+   ``t_cut`` depends on ``delta``.
 2. **Plan.** pyoomph's ``AxisymmetricReconnection`` runs its planner once, at ``rmin = delta``, with
    the cavity closed through the gas above the free surface (``reservoir_depth``) so that the neck is
    a waist of the gas and the event a pinch; its volume correction is off. It only parks a plan on
@@ -37,6 +41,17 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
    at later remeshes; the driver's bookkeeping restarts for the new tips; a ``postcut`` dump and
    ``cut_diagnostics.json`` are written.
 
+A refused or failed cut also writes ``cut_diagnostics.json``: the record as far as it got (plan
+attempts, caps, geometry, transfer counts, axis spans, budgets, projection residuals and the energy
+identity), with ``outcome`` ``refused`` or ``failed``, the stage reached (``failed_at``) and the
+error. The record also gives the cut geometry in cut radii (``in_cut_radii``: the splice radii, arc
+radii, bridge and removed gas, the number of survivors each cap dropped, and whether the planner's
+window or ``cap_splice_factor`` set the splices; see ``reconnect.py``).
+
+A state written after the cut carries its record; :func:`restore_cut` puts the cut's mesh sizing
+back when such a state is loaded. No runner continues from a post-cut state yet: ``run_case.py``
+has no stops for the bubble chain, and the prototype makes one cut per run, so both refuse it.
+
 The volume the liquid gains (``volumes``) is recorded twice: over the whole mesh, which includes the
 drift of rebuilding the whole free surface (a remesh changes the volume by more than the cut at
 production radii), and as the change of the gas volume within a box around the cut
@@ -66,8 +81,8 @@ from pyoomph.generic.codegen import Equations
 
 from .mesh import CutSizing
 from .reconnect import (Chain, ReconnectSettings, chain_volumes, cut_geometry, gas_volume_in_box,
-                        liquid_axis_spans, neck_radius, orient_chain, plan_chains, replace_caps,
-                        tip_size)
+                        in_cut_radii, liquid_axis_spans, neck_radius, orient_chain, plan_chains,
+                        replace_caps, tip_size)
 
 INTERFACE = "liquid/interface"
 FAR_POINT = (1.0e4, -100.0)  # the chart starts at the chain end nearest this: the wall, else the bottom
@@ -75,15 +90,22 @@ AXIS_TOL = 1e-9  # a node with |r| below this lies on the axis (the template's p
 
 
 class CutRefused(RuntimeError):
-    """No cut was made; the problem is unchanged."""
+    """No cut was made; the problem is unchanged. ``record``: the partial cut record, with the
+    stage reached (``failed_at``), as written to ``cut_diagnostics.json``."""
+
+    def __init__(self, message: str, record: dict | None = None):
+        super().__init__(message)
+        self.record = record
 
 
 class CutFailed(RuntimeError):
-    """The cut failed after the problem was changed; restore the ``precut`` state (``precut``)."""
+    """The cut failed after the problem was changed; the ``precut`` state (``precut``) holds the
+    state before it. ``record`` as for :class:`CutRefused`."""
 
-    def __init__(self, message: str, precut: str | None = None):
+    def __init__(self, message: str, precut: str | None = None, record: dict | None = None):
         super().__init__(message)
         self.precut = precut
+        self.record = record
 
 
 class DriverTriggeredReconnection(AxisymmetricReconnection):
@@ -311,16 +333,43 @@ def _pressure_impulse_stats(problem) -> dict:
     return {"max_abs_Pi": float(np.max(np.abs(pi))) if len(pi) else math.nan}
 
 
-def project(problem, settings: ReconnectSettings, t_cut: float) -> dict:
+LOCAL_RADIUS = 20.0  # the local budgets of a cut are taken within this many cut radii of the neck
+LOCAL_SAMPLES = 128  # points per direction of the polar grid of the local kinetic energy
+
+
+def local_kinetic_energy(problem, z_centre: float, radius: float, n: int = LOCAL_SAMPLES) -> float:
+    """Kinetic energy of the liquid within ``radius`` of the point ``(0, z_centre)`` of the axis.
+
+    The midpoint rule on an ``n x n`` polar grid over the half-disc, with the fields at the points
+    pyoomph locates in the liquid mesh and the ``2 pi r`` measure; points outside the liquid (in the
+    gas, below the bottom) count zero. A diagnostic, not an exact integral: its error comes from the
+    grid near the free surface (on the neck of the FEM tests, 128 and 256 points per direction agree
+    to about 1e-4)."""
+    bulk = problem.get_mesh("liquid")
+    fi = bulk.get_nodal_field_indices()
+    iu, iw = 1 + fi["velocity_x"], 1 + fi["velocity_y"]
+    h_rho, h_th = radius / n, math.pi / n
+    rho = (np.arange(n) + 0.5) * h_rho
+    theta = -0.5 * math.pi + (np.arange(n) + 0.5) * h_th
+    P, T = np.meshgrid(rho, theta, indexing="ij")
+    r, z = (P * np.cos(T)).ravel(), (z_centre + P * np.sin(T)).ravel()
+    rows = bulk.evaluate_at_points(np.column_stack([r, z]).tolist(), lagrangian=False)
+    u2 = np.array([row[iu] ** 2 + row[iw] ** 2 if row[0] == 1.0 else 0.0 for row in rows])
+    return float(np.sum(u2 * math.pi * r * P.ravel()) * h_rho * h_th)
+
+
+def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None = None) -> dict:
     """Steps 6-8: impulsive history, the projection, the restart of the history at ``t_cut``.
 
-    Returns the projection diagnostics. Raises :class:`CutFailed` if the projection solve did not
-    converge, remeshed, or broke the energy identity."""
+    Returns the projection diagnostics, filled into ``out`` as they are made, so that they survive
+    a failure. Raises :class:`CutFailed` if the projection solve did not converge, remeshed, or
+    broke the energy identity."""
     s = settings
     pb = problem
+    out = {} if out is None else out
     before = pb.cut_observables()
     pb.assign_initial_values_impulsive()  # levels 1, 2 := the transferred (and filled) field
-    out: dict = {"before": before}
+    out["before"] = before
     if s.projection:
         ip, saved = _pressures(pb)
         pb._projecting = True
@@ -331,12 +380,13 @@ def project(problem, settings: ReconnectSettings, t_cut: float) -> dict:
         finally:
             pb._projecting = False
         residuals = [float(x) for x in pb.get_last_residual_convergence()]
+        out["newton_residuals"] = residuals
         if len(pb._domains_to_remesh) or getattr(pb, "_remesh_requested_inside_solve", False):
             raise CutFailed("a remesh was requested during the projection")
         after = pb.cut_observables()  # level 1 still holds u~: projection_change = |u+ - u~|^2/2
         dke = before["kinetic_energy"] - after["kinetic_energy"]
         identity = dke - after["projection_change"]
-        out.update(after=after, newton_residuals=residuals, delta_KE=dke,
+        out.update(after=after, delta_KE=dke,
                    energy_identity_error=identity,
                    delta_Pz=after["momentum_z"] - before["momentum_z"],
                    # u+ - u~ = -grad Pi with Pi = 0 on the free surfaces: delta P_z ~ int_bottom Pi
@@ -393,13 +443,38 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         log=print) -> dict:
     """Cut the neck of the current state at ``settings.delta`` and project (module docstring).
 
-    ``driver``, if given, keeps the ``precut``/``postcut`` dumps with its bookkeeping and restarts
-    the bookkeeping for the new tips; without it the dumps hold the pyoomph state only. Returns the
-    cut record, also written to ``cut_diagnostics.json``. Raises :class:`CutRefused` when no cut
-    was made, :class:`CutFailed` when the problem must be restored from the ``precut`` dump."""
-    s = settings
-    pb = problem
+    ``driver``, if given, keeps the ``precut``/``postcut`` dumps with its bookkeeping, gives the
+    pinch time of the neck (:meth:`~faraday_singularity.driver.CollapseDriver.pinch_time`) and
+    restarts the bookkeeping for the new tips; without it the dumps hold the pyoomph state only and
+    the pinch time is unknown. Returns the cut record, also written to ``cut_diagnostics.json``.
+    Raises :class:`CutRefused` when no cut was made, :class:`CutFailed` when the problem was changed
+    and must be restored from the ``precut`` dump. Either way ``cut_diagnostics.json`` then holds
+    the partial record, with ``outcome`` (``refused`` or ``failed``), the stage reached
+    (``failed_at``) and the error, and the exception carries it as ``record``. Any other exception
+    also writes the file (``outcome`` ``failed``) and is re-raised as it is."""
     out = Path(outdir)
+    record: dict = {"delta": settings.delta}
+    progress = {"stage": "admission"}
+    try:
+        return _cut(problem, settings, out, record, progress, driver=driver, tag=tag, log=log)
+    except BaseException as e:
+        outcome = "refused" if isinstance(e, CutRefused) else "failed"
+        failed = _jsonable({**record, "outcome": outcome, "failed_at": progress["stage"],
+                            "error": f"{type(e).__name__}: {e}"})
+        if isinstance(e, (CutRefused, CutFailed)):
+            e.record = failed
+        with contextlib.suppress(OSError):  # the failure itself must reach the caller
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "cut_diagnostics.json").write_text(json.dumps(failed, indent=1) + "\n")
+        raise
+
+
+def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, driver, tag,
+         log) -> dict:
+    """The sequence of :func:`cut`, filling ``record`` as it goes and ``progress["stage"]``."""
+    def stage(name):
+        progress["stage"] = name
+
     if pb.recon is None:
         raise CutRefused("the problem was not made with reconnect settings")
     if pb.cut is not None:
@@ -413,6 +488,9 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
     old = chains_before[0]
     old_open = Chain(np.column_stack([old["r"], old["z"]]), tuple(old["end_types"]))
     r_n, z_n, _ = neck_radius(old["r"], old["z"])
+    record.update(t_cut=t_cut, r_neck=r_n, z_neck=z_n,
+                  delta_over_r_neck=s.delta / r_n if r_n > 0.0 else math.nan,
+                  settings=s.to_dict())
     if not math.isfinite(r_n):
         raise CutRefused("the free surface has no neck")
     if s.delta < s.min_landing_ratio * r_n:
@@ -423,13 +501,23 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         # comparable with cuts at other delta that land just below their radius
         raise CutRefused(f"delta {s.delta:.6g} is above {s.max_landing_ratio} times the neck "
                          f"radius {r_n:.6g}; cut from a state whose neck has just passed below delta")
-    record: dict = {"delta": s.delta, "t_cut": t_cut, "r_neck": r_n, "z_neck": z_n,
-                    "delta_over_r_neck": s.delta / r_n, "settings": s.to_dict()}
+    # the time origin of a study in delta: the pinch time of the neck before the cut (decision 16)
+    pinch = (driver.pinch_time() if driver is not None else
+             {"t_p": math.nan, "source": None, "reason": "no driver: no neck samples"})
+    pinch["t_cut_minus_t_p"] = t_cut - pinch["t_p"]
+    record["pinch"] = pinch
+    stage("precut")
     record["budgets_before"] = pb.cut_observables()
+    local_radius = LOCAL_RADIUS * s.delta
+    local = {"radius": local_radius, "centre": [0.0, z_n], "samples": LOCAL_SAMPLES,
+             "kinetic_energy": {"before": local_kinetic_energy(pb, z_n, local_radius)}}
+    record["local_budgets"] = local
     record["precut_state"] = _keep(pb, driver, out, f"precut_{tag}", {"cut_stage": "precut"})
 
     # 2. plan
+    stage("plan")
     attempts = []
+    record["plan_attempts"] = attempts
     rmin = s.delta
     template = pb.get_mesh("liquid")._templatemesh
     for _ in range(s.plan_attempts):
@@ -446,7 +534,6 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         if rmin * s.retry_factor > s.max_landing_ratio * r_n:
             break  # a retry would cut too far above the neck
         rmin *= s.retry_factor
-    record["plan_attempts"] = attempts
     if attempts[-1]["outcome"] != "plan":
         raise CutRefused(f"no plan after {len(attempts)} attempts: {attempts[-1]}")
     record["rmin"] = rmin
@@ -454,6 +541,7 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
 
     remeshing = False
     try:
+        stage("caps")
         plan, _extra = template._pending_surgery_plans[INTERFACE]
         gas_before = float(sum(plan.fragment_volumes_before))
         record["plan"] = {"events": [{"kind": e.kind, "z_center": e.z_center} for e in plan.events],
@@ -463,8 +551,12 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
                                            for c in plan.new_chains]}
         # 3. caps, and the sizes of the new mesh
         edits = replace_caps(plan.new_chains, rmin, s)
+        record["caps"] = [asdict(e) for e in edits]
         chains = plan_chains(plan.new_chains)
         geom = cut_geometry(chains, s.reservoir_depth, gas_before)
+        record["geometry"] = geom.to_dict()
+        # the splices, bridge and removed gas in cut radii: the planner's window usually sets them
+        record["in_cut_radii"] = in_cut_radii(edits, geom, rmin, s)
         # the plan's gas spans and volumes, for the edited chains (informational in pyoomph)
         plan.axis_spans_inside = np.array(
             [[c.points[0, 1], c.points[-1, 1] + (s.reservoir_depth if c.is_open else 0.0)]
@@ -474,8 +566,6 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         sizing = CutSizing(h_tip=h_tip, h_bridge=min(h_tip, geom.bridge / s.bridge_elements),
                            curvature=s.curvature_sizing,
                            grading=pb.active_mesh_template().settings.grading)
-        record["caps"] = [asdict(e) for e in edits]
-        record["geometry"] = geom.to_dict()
         # every change of the free surface lies between the two splices
         z_lo, z_hi = min(e.z_s for e in edits), max(e.z_s for e in edits)
         margin = 2.0 * rmin
@@ -484,6 +574,7 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         record["sizing"] = asdict(sizing)
         template.cut_sizing = sizing
         # 4. the remesh, at once
+        stage("remesh")
         remeshing = True
         with captured_stdout() as printed:
             pb.force_remesh({template})
@@ -495,25 +586,28 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
             raise CutRefused(f"the plan could not be built ({type(e).__name__}: {e})") from e
         raise CutFailed(f"the cut remesh failed ({type(e).__name__}: {e})",
                         record["precut_state"]["path"]) from e
-    record["transfer"] = transfer_warnings("".join(printed))
-    record["transfer"]["former_gas_nodes"] = former_gas_nodes(pb, old_open, s.reservoir_depth,
-                                                              0.05 * rmin)
-    # the fresh tips on the axis get no transferred value of the interface's only own field, the
-    # kinematic Lagrange multiplier _kin_bc; it has no time history, so this is Newton's start only
-    record["transfer"]["corner_fields"] = sorted(
-        pb.get_mesh(INTERFACE + "/axis").get_nodal_field_indices())
 
     try:
+        stage("mesh-check")
+        record["transfer"] = transfer_warnings("".join(printed))
+        record["transfer"]["former_gas_nodes"] = former_gas_nodes(pb, old_open, s.reservoir_depth,
+                                                                  0.05 * rmin)
+        # the fresh tips on the axis get no transferred value of the interface's only own field,
+        # the kinematic Lagrange multiplier _kin_bc; it has no time history, so this is Newton's
+        # start only
+        record["transfer"]["corner_fields"] = sorted(
+            pb.get_mesh(INTERFACE + "/axis").get_nodal_field_indices())
         segs = pb.interface_segments()
+        record["mesh"] = {"chains": [{"open": c["open"], "nodes": len(c["r"]),
+                                      "z_ends": [float(c["z"][0]), float(c["z"][-1])]}
+                                     for c in segs]}
         if len(segs) != 2 or sum(c["open"] for c in segs) != 1:
             raise CutFailed(f"the cut mesh has {len(segs)} interface chains")
         spans = _axis_spans_of_mesh(pb)
         tips = [float(c["z"][k]) for c in segs for k in (0, -1)
                 if c["end_types"][0 if k == 0 else 1] == "axis"]
         expected = liquid_axis_spans(tips)
-        record["mesh"] = {"chains": [{"open": c["open"], "nodes": len(c["r"]),
-                                      "z_ends": [float(c["z"][0]), float(c["z"][-1])]} for c in segs],
-                          "axis_spans": spans, "expected_axis_spans": [list(x) for x in expected]}
+        record["mesh"].update(axis_spans=spans, expected_axis_spans=[list(x) for x in expected])
         if len(spans) != len(expected):
             raise CutFailed(f"the cut mesh has axis spans {spans}, expected {expected}")
         tol = 1e-7 * max(1.0, pb.nd.radius)
@@ -521,7 +615,9 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
             [orient_chain(np.column_stack([c["r"], c["z"]]), pb.nd.radius, tol) for c in segs],
             s.reservoir_depth, box)
         record["budgets_after_transfer"] = pb.cut_observables()
+        local["kinetic_energy"]["after_transfer"] = local_kinetic_energy(pb, z_n, local_radius)
         # 5. fill
+        stage("fill")
         record["fill"] = {"kind": s.fill, "zeroed_nodes": 0, "zeroed_axis_nodes": 0}
         if s.fill == "zero":
             reach = 20.0 * max(geom.bridge, rmin)
@@ -529,8 +625,12 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
             record["fill"].update(zeroed_nodes=zeroed["bulk"] + zeroed["axis"],
                                   zeroed_axis_nodes=zeroed["axis"])
         record["budgets_after_fill"] = pb.cut_observables()
+        local["kinetic_energy"]["after_fill"] = local_kinetic_energy(pb, z_n, local_radius)
         # 6-8. projection and restart
-        record["projection"] = project(pb, s, t_cut)
+        stage("projection")
+        record["projection"] = {}
+        project(pb, s, t_cut, record["projection"])
+        stage("chart")
         orient_interface_chart(pb)
     except CutFailed as e:
         e.precut = record["precut_state"]["path"]
@@ -538,7 +638,9 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
     except BaseException as e:
         raise CutFailed(f"after the cut remesh: {type(e).__name__}: {e}",
                         record["precut_state"]["path"]) from e
+    stage("postcut")
     record["budgets_after"] = pb.cut_observables()
+    local["kinetic_energy"]["after"] = local_kinetic_energy(pb, z_n, local_radius)
     volumes = {"liquid_before": record["budgets_before"]["volume"],
                "liquid_after": record["budgets_after"]["volume"],
                "liquid_gain_plan": geom.removed_gas,
@@ -548,6 +650,7 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
     # what the rebuild of the free surface outside the box changed
     volumes["remesh_drift"] = volumes["liquid_gain_mesh"] - volumes["liquid_gain_box"]
     record["volumes"] = volumes
+    record["outcome"] = "cut"
     record["wall_seconds"] = time.time() - wall0
     pb.cut = _jsonable(record)
     if driver is not None:
@@ -555,8 +658,11 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
     record["postcut_state"] = _keep(pb, driver, out, f"postcut_{tag}", {"cut_stage": "postcut"})
     pb.cut = _jsonable(record)
     (out / "cut_diagnostics.json").write_text(json.dumps(pb.cut, indent=1) + "\n")
-    log(f"cut at delta {s.delta:.6g} (rmin {rmin:.6g}, r_n {r_n:.6g}): bridge {geom.bridge:.4g}, "
-        f"removed gas {geom.removed_gas:.4g}, delta KE {record['projection'].get('delta_KE')}")
+    g = record["in_cut_radii"]
+    log(f"cut at delta {s.delta:.6g} (rmin {rmin:.6g}, r_n {r_n:.6g}): splices at r_s/rmin "
+        f"{', '.join(f'{x:.3g}' for x in g['r_s'])} ({g['splice_set_by']}), bridge "
+        f"{g['bridge']:.3g} rmin, removed gas {g['removed_gas']:.3g} rmin^3, "
+        f"delta KE {record['projection'].get('delta_KE')}, t_cut - t_p {pinch['t_cut_minus_t_p']}")
     return pb.cut
 
 

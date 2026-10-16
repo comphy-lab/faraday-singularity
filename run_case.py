@@ -24,18 +24,24 @@ Three keys of the ``collapse`` block are not driver settings. ``keep_stop_state`
 keeps the state at a neck-radius stop as ``states/stop_<step>.dump``, outside the rotation of dumps:
 the landing state of a reconnection. ``landing``, a list of cut radii, keeps for each radius
 ``delta`` the first state whose neck has closed to ``delta/1.05`` as ``states/landing_<delta>.dump``
-(``driver.CollapseDriver``). A ``reconnect`` block (``reconnect.ReconnectSettings``) builds the
-problem with the reconnection handler and the pressure-impulse projection, both inert during the
-run; the cut itself is made from a landing state by ``simulationCases/reconnect_prototype.py``.
-Without these keys the problem, the settings and every output are those of an ordinary case.
+(``driver.CollapseDriver``); a radius the run cannot reach before its neck-radius stop, below 1.05
+times ``max(neck_stop, neck_stop_elements h_floor)``, is refused before any output. A ``reconnect``
+block (``reconnect.ReconnectSettings``) builds the problem with the reconnection handler and the
+pressure-impulse projection, both inert during the run, but compiled into it: the run is then not
+bit for bit that of the ordinary case (it departs at round-off, which the step control carries on).
+The cut itself is made from a landing state by ``simulationCases/reconnect_prototype.py``, which
+builds its own problem with the reconnect block. Without these keys the problem, the settings and
+every output are those of an ordinary case.
 
 A restart (``--restart-from``) continues the run of the same case. It may also continue it under a
 derived case, one that differs from the parent's only in ``case_id``, the description
-``completion.value`` and the collapse keys ``keep_stop_state``, ``landing``, ``neck_stop`` and
-``reconnect`` (what the run keeps and where it stops, not what it computes): the parent's case is
-read from its ``parameters.json``, whose recorded hash must be the manifest's, and the restart
+``completion.value`` and the collapse keys ``keep_stop_state``, ``landing`` and ``neck_stop``
+(``DERIVED_KEYS``: what the run keeps and where it stops, not what it computes): the parent's case
+is read from its ``parameters.json``, whose recorded hash must be the manifest's, and the restart
 manifest records the parent's case hash and the keys that differ. This is how landing states are
-made from an existing run.
+made from an existing run. A different ``reconnect`` block is refused, since it changes the
+computed trajectory. A state written after a cut is refused too: this runner has no stops for the
+bubble below the cut (``reconnect.post_cut_stops``), and post-cut continuation is not supported yet.
 """
 
 from __future__ import annotations
@@ -78,7 +84,7 @@ def _shared_memory_btl() -> str | None:
 if "OMPI_MCA_btl" not in os.environ and (_btl := _shared_memory_btl()) is not None:
     os.environ["OMPI_MCA_btl"] = _btl
 
-from faraday_singularity.driver import CollapseDriver, CollapseSettings  # noqa: E402
+from faraday_singularity.driver import CollapseDriver, CollapseSettings, check_landing  # noqa: E402
 from faraday_singularity.cases import validate_case  # noqa: E402
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
@@ -104,9 +110,14 @@ def case_has_field(case: dict, field: str) -> bool:
 
 
 # Keys a case derived from a parent run may change at a restart: the name, a description the runner
-# does not read, and the collapse keys that decide what the run keeps and where it stops.
+# does not read, and the collapse keys that decide what the run keeps and where it stops. Not
+# collapse.reconnect: it compiles the projection and the handler into the problem, whose
+# trajectory then departs from the ordinary one at round-off.
 DERIVED_KEYS = ("case_id", "completion.value", "collapse.keep_stop_state", "collapse.landing",
-                "collapse.neck_stop", "collapse.reconnect")
+                "collapse.neck_stop")
+# The reconnection prototype builds its own problem with the reconnect block and cuts the state it
+# loads, so its case may also add or change that block.
+PROTOTYPE_DERIVED_KEYS = DERIVED_KEYS + ("collapse.reconnect",)
 
 
 def case_differences(a, b, prefix: str = "") -> list[str]:
@@ -123,10 +134,10 @@ def case_differences(a, b, prefix: str = "") -> list[str]:
     return [] if a == b else [prefix]
 
 
-def derived_case_keys(parent_case: dict, case: dict) -> list[str]:
-    """The keys in which ``case`` differs from ``parent_case``; refuses any outside ``DERIVED_KEYS``."""
+def derived_case_keys(parent_case: dict, case: dict, allowed=DERIVED_KEYS) -> list[str]:
+    """The keys in which ``case`` differs from ``parent_case``; refuses any outside ``allowed``."""
     diffs = case_differences(parent_case, case)
-    foreign = [k for k in diffs if not any(k == d or k.startswith(d + ".") for d in DERIVED_KEYS)]
+    foreign = [k for k in diffs if not any(k == d or k.startswith(d + ".") for d in allowed)]
     if foreign:
         raise SystemExit("restart parent belongs to a different case: it differs in "
                          + ", ".join(foreign))
@@ -147,14 +158,23 @@ def recorded_parent_case(parent: Path, case_sha256: str) -> dict:
     return recorded["case"]
 
 
-def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = False) -> dict:
+def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = False,
+                   derived_keys=DERIVED_KEYS) -> dict:
     """Validate restart custody before output, preserving explicitly imported legacy lineage.
 
     A parent with a normalised manifest may have run the same case or one from which ``case`` is
-    derived (``DERIVED_KEYS``)."""
+    derived in ``derived_keys``. A state written after a cut is refused: no runner continues one."""
     state = state.resolve()
     if not state.is_file() or not state.with_suffix(".json").is_file():
         raise SystemExit("restart needs both its state dump and driver metadata")
+    try:
+        meta = json.loads(state.with_suffix(".json").read_text())
+    except ValueError:
+        meta = None
+    if isinstance(meta, dict) and meta.get("cut") is not None:
+        raise SystemExit("the state was written after a cut; continuing a run from a post-cut "
+                         "state is not supported yet (one cut per run; run_case.py has no stops "
+                         "for the bubble chain)")
     parent = state.parent.parent
     manifest_path = parent / "run-manifest.json"
     case_hash = hashlib.sha256(case_path.read_bytes()).hexdigest()
@@ -187,7 +207,8 @@ def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = F
         parent_case_hash = str(recorded.get("case_sha256", ""))
         derived = None
         if parent_case_hash != case_hash:
-            derived = derived_case_keys(recorded_parent_case(parent, parent_case_hash), case)
+            derived = derived_case_keys(recorded_parent_case(parent, parent_case_hash), case,
+                                        derived_keys)
         if recorded.get("schema") != "pyoomph-runner-manifest-v1" or not re.fullmatch(
                 r"[0-9a-f]{40}", str(recorded.get("component_commit", ""))):
             raise SystemExit("restart parent needs a normalised manifest and a clean source commit")
@@ -318,6 +339,10 @@ def main() -> int:
         if "snapshot_dt_periods" in block:
             block["snapshot_dt"] = block.pop("snapshot_dt_periods") * period
         settings = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
+        try:
+            check_landing(landing, settings)
+        except ValueError as exc:
+            raise SystemExit(f"{args.case}: {exc}")
 
     if not math.isfinite(periods) or periods <= 0 or not math.isfinite(dt_out) or dt_out <= 0:
         raise SystemExit("completion time and output cadence must be positive and finite")

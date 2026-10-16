@@ -7,28 +7,36 @@ Example::
         --state RUN/states/stop_00001379.dump --outdir OUT --delta-ratio 1.05 --steps 20
 
 ``CASE.json`` is the ``pyoomph-case-v1`` file of the run that wrote the state, or one derived from
-it in the keys a restart may change (``run_case.DERIVED_KEYS``: the name, the description
-``completion.value``, and the collapse keys ``keep_stop_state``, ``landing``, ``neck_stop`` and
-``reconnect``); the physics, mesh and every other collapse setting must be the ones the state was
-computed with. The run that wrote the state is the
-directory above ``states/``: its ``run-manifest.json`` must be a normalised one with a clean source
-commit, and its case is compared with ``CASE.json`` (``run_case.restart_record``); the manifest of
-the prototype records that lineage. Its ``collapse.reconnect`` block, if any, gives the defaults of
-the cut, which the options below override. The state is a driver dump with its JSON beside it,
-normally a landing state: one a run with ``collapse.landing`` keeps for a cut radius, or the state a
-run with ``collapse.keep_stop_state`` keeps at its neck-radius stop. The cut radius is ``--delta``
-or ``--delta-ratio`` times the neck radius of the state; it must lie between ``min_landing_ratio``
-and ``max_landing_ratio`` times that radius, so a study in ``delta`` needs a landing state for each
-``delta``.
+it in the keys a restart may change and in its ``reconnect`` block
+(``run_case.PROTOTYPE_DERIVED_KEYS``: the name, the description ``completion.value``, and the
+collapse keys ``keep_stop_state``, ``landing``, ``neck_stop`` and ``reconnect``); the physics, mesh
+and every other collapse setting must be the ones the state was computed with. The run that wrote
+the state is the directory above ``states/``: its ``run-manifest.json`` must be a normalised one
+with a clean source commit, and its case is compared with ``CASE.json``
+(``run_case.restart_record``); the manifest of the prototype records that lineage. Its
+``collapse.reconnect`` block, if any, gives the defaults of the cut, which the options below
+override. The state is a driver dump with its JSON beside it, normally a landing state: one a run
+with ``collapse.landing`` keeps for a cut radius, or the state a run with
+``collapse.keep_stop_state`` keeps at its neck-radius stop. The cut radius is ``--delta`` or
+``--delta-ratio`` times the neck radius of the state; it must lie between ``min_landing_ratio`` and
+``max_landing_ratio`` times that radius, so a study in ``delta`` needs a landing state for each
+``delta``. A state written after a cut is refused: one cut per run, and continuing a post-cut state
+is not supported yet.
 
 The cut (``faraday_singularity.surgery.cut``) writes ``cut_diagnostics.json`` and keeps the
-``precut``/``postcut`` states under ``states/``. Then ``--steps`` steps follow, the first ``dt0``
+``precut``/``postcut`` states under ``states/``; a refused or failed cut writes the partial record
+there instead, with the stage reached (``failed_at``), and ``run_status.json`` names it. The run
+then ends: the problem is not restored, since ``states/precut_<delta>.dump`` holds the state before
+the cut. Then ``--steps`` steps follow, the first ``dt0``
 long and each at most ``growth`` times the last, and at most ``courant`` times the smallest element
 of the free surface near the cut (``h_cut``: the cut's tip size, or the elements of both chains
 there if smaller, as where the focus of the run is finer) over the largest free-surface speed
-there. After every step ``steps.txt`` gets the budgets (volume, kinetic energy, axial momentum
-``P_z``), the three tips on the axis (bubble bottom and top, cavity tip) with their axial speeds,
-the bridge length, the bubble volume and the open chain's jet measurements;
+there. After every step ``steps.txt`` gets the time after the cut ``tau = t - t_cut`` and after the
+pinch ``tau_p = t - t_p`` (``t_p`` fitted to the neck samples of the landing state, ``pinch`` in
+``cut_diagnostics.json``; NaN when the state carries none; a study in ``delta`` compares at one
+common ``t_p``, since fits over different windows differ), the budgets (volume, kinetic energy,
+axial momentum ``P_z``), the three tips on the axis (bubble bottom and top, cavity tip) with their
+axial speeds, the bridge length, the bubble volume and the open chain's jet measurements;
 ``profiles/postcut_<step>_open.txt`` and ``..._bubble.txt`` hold both chains (``r z u_r u_z``).
 The run ends after ``--steps``, at ``tau_end`` after the cut, or at a stop the mesh cannot follow,
 checked right after the cut and after every step (``reconnect.post_cut_stops``: the bridge
@@ -63,9 +71,9 @@ from faraday_singularity.reconnect import (Chain, CutGeometry, ReconnectSettings
                                            neck_radius, post_cut_stops, revolved_volume,
                                            split_collapse_block)
 
-COLUMNS = ("step", "time", "tau", "dt", "newton_tol", "volume", "kinetic_energy", "momentum_z",
-           "divergence_sq", "bubble_volume", "z_bubble_bottom", "w_bubble_bottom", "z_bubble_top",
-           "w_bubble_top", "z_cavity_tip", "w_cavity_tip", "bridge", "bubble_r_max",
+COLUMNS = ("step", "time", "tau", "tau_p", "dt", "newton_tol", "volume", "kinetic_energy",
+           "momentum_z", "divergence_sq", "bubble_volume", "z_bubble_bottom", "w_bubble_bottom",
+           "z_bubble_top", "w_bubble_top", "z_cavity_tip", "w_cavity_tip", "bridge", "bubble_r_max",
            "bubble_z_r_max", "axis_curvature", "r_j", "z_b", "Q_j", "V_j", "h_near", "U",
            "h_cut", "U_cut", "remesh_count", "wall")
 
@@ -165,8 +173,10 @@ def main(argv=None) -> int:
     if args.delta is not None:
         recon_block["delta"] = args.delta
     settings = ReconnectSettings.from_dict(recon_block)
-    # the run that wrote the state: a clean recorded source, and this case or one derived from it
-    lineage = run_case.restart_record(state, case, args.case)
+    # the run that wrote the state: a clean recorded source, and this case or one derived from it;
+    # not a state written after a cut
+    lineage = run_case.restart_record(state, case, args.case,
+                                      derived_keys=run_case.PROTOTYPE_DERIVED_KEYS)
     if args.check:
         print(json.dumps({"valid": True, "settings": settings.to_dict(), "state": lineage}))
         return 0
@@ -212,13 +222,15 @@ def main(argv=None) -> int:
             try:
                 driver.restore(meta)
                 status.update(run(problem, driver, settings, args, out, tol, collapse))
-            except CutRefused as exc:
-                status.update(state="refused", detail=str(exc))
-            except CutFailed as exc:
-                status.update(state="failed", detail=str(exc), precut=exc.precut)
-                if exc.precut:  # a failure inside the remesh leaves a half-rebuilt problem
-                    problem.load_state(exc.precut)
-                    status["restored_precut"] = True
+            except (CutRefused, CutFailed) as exc:
+                # the run ends here; the problem is not restored (a failed remesh can leave it
+                # half rebuilt, and a failing reload would hide this failure): the precut dump
+                # holds the state before the cut
+                status.update(state="refused" if isinstance(exc, CutRefused) else "failed",
+                              detail=str(exc), cut_diagnostics="cut_diagnostics.json",
+                              failed_at=(exc.record or {}).get("failed_at"))
+                if isinstance(exc, CutFailed):
+                    status["precut"] = exc.precut
             finally:
                 driver.close()
                 problem.close_diagnostics()
@@ -250,6 +262,8 @@ def run(problem, driver, settings: ReconnectSettings, args, out: Path, tol: floa
     geom = CutGeometry(**record["geometry"])
     h_tip = record["sizing"]["h_tip"]
     t_cut = record["t_cut"]
+    t_p = record["pinch"]["t_p"]
+    t_p = math.nan if t_p is None else float(t_p)  # None in JSON: no estimate
     z_cut = record["z_neck"]
     (out / "profiles").mkdir(exist_ok=True)
     table = (out / "steps.txt").open("w", buffering=1)
@@ -264,7 +278,8 @@ def run(problem, driver, settings: ReconnectSettings, args, out: Path, tol: floa
         m = driver.measure()
         ch = chain_record(segs) if len(segs) == 2 else {}
         t = problem.get_current_time(dimensional=False, as_float=True)
-        values = {"step": step, "time": t, "tau": t - t_cut, "dt": dt, "newton_tol": newton_tol,
+        values = {"step": step, "time": t, "tau": t - t_cut, "tau_p": t - t_p, "dt": dt,
+                  "newton_tol": newton_tol,
                   **{k: obs[k] for k in ("volume", "kinetic_energy", "momentum_z",
                                          "divergence_sq")},
                   **ch, **{k: m[k] for k in ("axis_curvature", "r_j", "z_b", "Q_j", "V_j",
@@ -273,7 +288,9 @@ def run(problem, driver, settings: ReconnectSettings, args, out: Path, tol: floa
         table.write("\t".join(f"{float(values.get(c, math.nan)):.12e}"
                               if c not in ("step", "remesh_count") else str(values[c])
                               for c in COLUMNS) + "\n")
-        header = {"time": t, "tau": t - t_cut, "step": step}
+        finite = math.isfinite(t_p)
+        header = {"time": t, "tau": t - t_cut, "tau_p": t - t_p if finite else None,
+                  "t_p": t_p if finite else None, "step": step}
         for c in segs:
             write_profile(out / "profiles" / f"postcut_{step:04d}_{'open' if c['open'] else 'bubble'}.txt",
                           c, header)

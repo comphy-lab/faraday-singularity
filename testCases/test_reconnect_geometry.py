@@ -52,11 +52,22 @@ def test_settings_parse_and_round_trip():
                                  {"delta": 1e-4, "min_landing_ratio": 1.0},
                                  {"delta": 1e-4, "max_landing_ratio": 1.03},
                                  {"delta": 1e-4, "max_landing_ratio": math.inf},
+                                 # the window must hold every landing state a run keeps
+                                 {"delta": 1e-4, "min_landing_ratio": 1.07},
+                                 {"delta": 1e-4, "max_landing_ratio": 1.08},
                                  {"delta": 1e-4, "volume_correction": True},
                                  {"delta": 1e-4, "projection": 1}])
 def test_settings_reject_invalid(bad):
     with pytest.raises(ValueError):
         rc.ReconnectSettings.from_dict(bad)
+
+
+def test_settings_admit_every_landing_state_a_run_keeps():
+    s = rc.ReconnectSettings(delta=1e-4)
+    assert s.min_landing_ratio <= rc.LANDING_RATIO < rc.MAX_LANDING_RATIO <= s.max_landing_ratio
+    for kw in ({"min_landing_ratio": rc.LANDING_RATIO}, {"max_landing_ratio": rc.MAX_LANDING_RATIO},
+               {"max_landing_ratio": 1.2}):
+        rc.ReconnectSettings(delta=1e-4, **kw)
 
 
 def test_collapse_block_split_leaves_the_driver_block_unchanged():
@@ -305,6 +316,38 @@ def test_planner_caps_fold_on_a_slender_thread_and_replaced_caps_do_not(thread_s
                                  fold_stop=3e-4) is None
 
 
+def test_the_planner_window_sets_the_cut_and_the_splice_factor_below_it_does_not(thread_scan):
+    """On a slender thread the first survivor beyond the planner's window lies at about 1.4 cut
+    radii, so splice factors up to that drop no survivor and give the same cut (``splice_set_by``
+    ``planner-window``), while the window factor moves the splices, the bridge and the removed
+    gas."""
+    r, z, rn = thread_scan[3e-4]
+    delta = 1.05 * rn
+
+    def summary(**kw):
+        s = rc.ReconnectSettings(delta=delta, **kw)
+        outcome, plan = rc.plan_on_profile(r, z, delta, s)
+        assert outcome == "plan"
+        edits = rc.replace_caps(plan.new_chains, delta, s)
+        cg = rc.cut_geometry(rc.plan_chains(plan.new_chains), s.reservoir_depth,
+                             sum(plan.fragment_volumes_before))
+        return rc.in_cut_radii(edits, cg, delta, s)
+
+    base, splice, window4, window8 = (summary(), summary(cap_splice_factor=1.3),
+                                      summary(cap_window_factor=4.0),
+                                      summary(cap_window_factor=8.0))
+    assert base["splice_set_by"] == splice["splice_set_by"] == "planner-window"
+    assert base["replaced_survivors"] == [0, 0] and min(base["r_s"]) > 1.3
+    for key in ("r_s", "arc_radius", "bridge", "removed_gas"):
+        assert splice[key] == base[key], key
+    assert 12 < base["bridge"] < 17 and 50 < base["removed_gas"] < 65
+    assert window4["bridge"] < 0.8 * base["bridge"] and window8["bridge"] > 1.15 * base["bridge"]
+    assert window4["removed_gas"] < base["removed_gas"] < window8["removed_gas"]
+    above = summary(cap_splice_factor=1.6)  # above the first survivor: it drops some
+    assert above["splice_set_by"] == "splice-factor" and min(above["replaced_survivors"]) > 0
+    assert min(above["r_s"]) >= 1.6
+
+
 def test_cut_geometry_in_delta_units_depends_on_the_landing_ratio(thread_scan):
     """Within the admitted band of delta/r_n the bridge and the removed gas, in units of delta,
     vary by less than a quarter; at twice the neck radius they do not: a cut there is refused."""
@@ -526,6 +569,33 @@ def test_planner_caps_fold_and_replaced_caps_do_not(step):
         assert cg.bridge > 2 * delta and 40 * delta**3 < cg.removed_gas < 100 * delta**3
         if f <= 1.2:
             assert cg.removed_gas < 80 * delta**3
+
+
+@stored
+@pytest.mark.parametrize("step", [1028, 1055, 1076])
+def test_cut_of_a_stored_neck_at_the_landing_ratio(step):
+    """At delta/r_n = LANDING_RATIO the splices on a stored neck are the first survivors beyond the
+    planner's window (``cap_splice_factor`` changes nothing), the bridge is 12-17 delta long and the
+    cut removes 50-65 delta^3 of gas, and no stop after the cut fires with the fold settings of the
+    run the profiles come from (fold_stop 3e-4, fold_stop_elements 3, fold_ratio 4); the open chain
+    keeps a neck wider than delta (``open_neck``), which ``post_cut_stops`` watches."""
+    r, z, _ = _stored(step)
+    r_n, _, _ = rc.neck_radius(r, z)
+    delta = rc.LANDING_RATIO * r_n
+    s = rc.ReconnectSettings(delta=delta)
+    outcome, plan = rc.plan_on_profile(r, z, delta, s)
+    assert outcome == "plan"
+    edits = rc.replace_caps(plan.new_chains, delta, s)
+    chains = [rc.orient_chain(c.points, R_C, 1e-7) for c in rc.plan_chains(plan.new_chains)]
+    cg = rc.cut_geometry(chains, s.reservoir_depth, sum(plan.fragment_volumes_before))
+    g = rc.in_cut_radii(edits, cg, delta, s)
+    assert g["splice_set_by"] == "planner-window" and min(g["r_s"]) > 1.3
+    assert 12 < g["bridge"] < 17 and 50 < g["removed_gas"] < 65
+    h_min = rc.tip_size(min(e.radius for e in edits), delta, s)
+    assert rc.post_cut_stops(chains, cg, s, h_min, neck_elements=3.0, fold_ratio=4.0,
+                             fold_stop=3e-4, fold_stop_elements=3.0) is None
+    open_neck = rc.chain_neck(next(c for c in chains if c.is_open).points, ("axis", "fixed"))[0]
+    assert not open_neck < delta  # a neck narrower than delta would stop the run at the cut
 
 
 @stored

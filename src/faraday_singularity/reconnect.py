@@ -20,7 +20,19 @@ This module holds what needs no finite-element problem:
   backward connector, with wedge angles of a few degrees) and cannot be meshed. Each cap is
   therefore always rebuilt: from a surviving node of the old interface at radius ``r_s >=
   cap_splice_factor * delta`` the new cap is the circular arc tangent to the old interface there
-  whose centre lies on the axis, so it meets the axis at a right angle;
+  whose centre lies on the axis, so it meets the axis at a right angle.
+
+  The planner's exclusion window, ``cap_window_factor * delta`` about the event (6 by default),
+  usually sets the cut geometry, not ``cap_splice_factor``: on slender threads (the synthetic one
+  of the tests and the stored necks they can read) the first survivor beyond the window already
+  lies at ``r_s/delta`` of about 1.4-1.5, so a splice factor below that drops no survivor and
+  changes nothing (``replaced_survivors`` 0; the cut record's ``in_cut_radii`` then says
+  ``splice_set_by`` ``planner-window``). There, at ``delta/r_n = 1.05``, the bridge is 13-14.5 delta
+  long and the cut removes 55-58 delta^3 of gas; with a window of 4 about 10-11 delta and 36-39
+  delta^3, with 8 about 17-18 delta and 78-84 delta^3. The liquid that fills the bridge carries the
+  inflow of the neck wall, so the impulse of the projection, and with it the first jet speeds, may
+  depend on ``cap_window_factor``: a study in ``delta`` needs a sensitivity to it (e.g. 4 and 8),
+  as to the fill;
 * checks of the edited chains (simple, disjoint, monotone cap, no knife-edge angles), the volume
   the cut removes from the gas (:func:`chain_volumes`), and the gas volume within a box around the
   cut (:func:`gas_volume_in_box`), which separates the volume the cut adds to the liquid from the
@@ -35,7 +47,9 @@ min_landing_ratio``. The cut geometry in units of ``delta`` (bridge, removed gas
 ``delta/r_n``, so a cut also requires ``delta/r_n <= max_landing_ratio``: a study in ``delta``
 needs, for each ``delta``, a landing state whose neck has just passed below it. A run with
 ``collapse.landing`` keeps one for each of its cut radii, at the first measured state with
-``delta/r_n >= LANDING_RATIO`` (``driver.CollapseDriver``).
+``delta/r_n >= LANDING_RATIO``, and none above ``MAX_LANDING_RATIO`` (``driver.CollapseDriver``);
+the settings refuse a window ``[min_landing_ratio, max_landing_ratio]`` that does not contain
+``[LANDING_RATIO, MAX_LANDING_RATIO]``, so that every landing state a run keeps can be cut.
 """
 
 from __future__ import annotations
@@ -114,6 +128,14 @@ class ReconnectSettings:
                 or not self.max_landing_ratio > self.min_landing_ratio:
             raise ValueError("reconnect.max_landing_ratio must be finite and exceed "
                              "min_landing_ratio")
+        # every landing state a run keeps (driver.CollapseDriver: LANDING_RATIO <= delta/r_n <=
+        # MAX_LANDING_RATIO) must be one the cut accepts
+        if not self.min_landing_ratio <= LANDING_RATIO:
+            raise ValueError(f"reconnect.min_landing_ratio must be at most {LANDING_RATIO}: runs "
+                             f"keep landing states from delta/r_n = {LANDING_RATIO} on")
+        if not self.max_landing_ratio >= MAX_LANDING_RATIO:
+            raise ValueError(f"reconnect.max_landing_ratio must be at least {MAX_LANDING_RATIO}: "
+                             f"runs keep landing states up to delta/r_n = {MAX_LANDING_RATIO}")
         if not self.retry_factor > 1.0:
             raise ValueError("reconnect.retry_factor must exceed one")
         for name in ("plan_attempts", "cap_min_points", "max_events"):
@@ -566,6 +588,22 @@ class CutGeometry:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def in_cut_radii(edits: Sequence[CapEdit], geometry: CutGeometry, rmin: float,
+                 settings: ReconnectSettings) -> dict:
+    """The cut geometry in units of the cut radius ``rmin`` and what set its splices.
+
+    ``splice_set_by`` is ``planner-window`` when no cap dropped a surviving node, so that the
+    splices are the first survivors beyond the planner's window (``cap_window_factor``) and
+    ``cap_splice_factor`` changed nothing, and ``splice-factor`` otherwise."""
+    return {"cut_radius": rmin, "cap_window_factor": settings.cap_window_factor,
+            "cap_splice_factor": settings.cap_splice_factor,
+            "r_s": [e.r_s / rmin for e in edits], "arc_radius": [e.radius / rmin for e in edits],
+            "replaced_survivors": [e.replaced_survivors for e in edits],
+            "splice_set_by": ("planner-window" if all(e.replaced_survivors == 0 for e in edits)
+                              else "splice-factor"),
+            "bridge": geometry.bridge / rmin, "removed_gas": geometry.removed_gas / rmin**3}
 
 
 def cut_geometry(chains: Sequence[Chain], reservoir_depth: float,

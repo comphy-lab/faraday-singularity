@@ -158,18 +158,80 @@ def _derived(**collapse):
 
 def test_restart_admits_a_case_derived_in_the_kept_states_and_stops(tmp_path):
     state, parent_hash = _parent_run(tmp_path)
-    child = _derived(keep_stop_state=True, landing=[1e-3, 5e-4], neck_stop=1e-4,
-                     reconnect={"delta": 1e-3})
+    child = _derived(keep_stop_state=True, landing=[1e-3, 5e-4], neck_stop=1e-4)
     path = tmp_path / "child.json"
     path.write_text(json.dumps(child))
     lineage = run_case.restart_record(state, child, path)
     rec = lineage["parent_record"]
     assert rec["case_sha256"] == parent_hash
     assert rec["derived_keys"] == ["case_id", "collapse.keep_stop_state", "collapse.landing",
-                                   "collapse.neck_stop", "collapse.reconnect"]
+                                   "collapse.neck_stop"]
     # the same case: the record of an ordinary restart
     same = run_case.restart_record(state, CASE, tmp_path / "parent-case.json")
     assert set(same["parent_record"]) == {"path", "sha256", "format", "component_commit"}
+
+
+@pytest.mark.parametrize("parent_block, child_block", [(None, {"delta": 1e-3}),
+                                                       ({"delta": 1e-3}, None),
+                                                       ({"delta": 1e-3}, {"delta": 5e-4})])
+def test_restart_refuses_a_derived_case_that_changes_the_reconnect_block(tmp_path, parent_block,
+                                                                         child_block):
+    """A reconnect block compiles the projection and the handler into the problem, whose trajectory
+    then departs from the ordinary one at round-off: a restart may not add, drop or change it.
+    The prototype, which builds its own problem with it, may (``PROTOTYPE_DERIVED_KEYS``)."""
+    parent = json.loads(json.dumps(CASE))
+    if parent_block is not None:
+        parent["collapse"]["reconnect"] = parent_block
+    state, _ = _parent_run(tmp_path, case=parent)
+    child = json.loads(json.dumps(parent))
+    child["case_id"] = "sigterm-landing"
+    child["collapse"].pop("reconnect", None)
+    if child_block is not None:
+        child["collapse"]["reconnect"] = child_block
+    child["collapse"]["landing"] = [1e-2]
+    path = tmp_path / "child.json"
+    path.write_text(json.dumps(child))
+    with pytest.raises(SystemExit, match="different case: it differs in collapse.reconnect"):
+        run_case.restart_record(state, child, path)
+    lineage = run_case.restart_record(state, child, path,
+                                      derived_keys=run_case.PROTOTYPE_DERIVED_KEYS)
+    assert any(k.startswith("collapse.reconnect") for k in lineage["parent_record"]["derived_keys"])
+
+
+def test_restart_refuses_a_state_written_after_a_cut(tmp_path):
+    state, _ = _parent_run(tmp_path)
+    state.with_suffix(".json").write_text(json.dumps({"time": 0.5, "cut": {"delta": 1e-3}}))
+    for derived in (run_case.DERIVED_KEYS, run_case.PROTOTYPE_DERIVED_KEYS):
+        with pytest.raises(SystemExit, match="post-cut state is not supported"):
+            run_case.restart_record(state, CASE, tmp_path / "parent-case.json",
+                                    derived_keys=derived)
+    out = tmp_path / "out"
+    proc = _prototype(tmp_path / "parent-case.json", "--state", state, "--outdir", out,
+                      "--delta-ratio", "1.05", "--check")
+    assert proc.returncode != 0 and "post-cut state is not supported" in proc.stderr
+    assert not out.exists()
+
+
+def test_runner_refuses_landing_radii_below_the_neck_stop_before_output(tmp_path):
+    """The run stops at max(neck_stop, neck_stop_elements h_floor) = 3e-4 here; the cut radii 2.5e-4
+    and 1.25e-4 would need the neck at 2.38e-4 and 1.19e-4, which the run never reaches."""
+    case = json.loads(json.dumps(CASE))
+    case["collapse"].update(neck_stop=3e-4, h_floor=2e-5,
+                            landing=[1e-3, 5e-4, 2.5e-4, 1.25e-4])
+    path = tmp_path / "case.json"
+    path.write_text(json.dumps(case))
+    out = tmp_path / "out"
+    proc = subprocess.run([sys.executable, str(ROOT / "simulationCases/run_faraday.py"), str(path),
+                           "--out", str(out), "--check"], capture_output=True, text=True,
+                          timeout=120, check=False)
+    assert proc.returncode != 0 and "collapse.landing" in proc.stderr
+    assert "0.00025, 0.000125" in proc.stderr and not out.exists()
+    case["collapse"]["landing"] = [1e-3, 5e-4, 3.2e-4]  # above 1.05 * 3e-4: reached
+    path.write_text(json.dumps(case))
+    proc = subprocess.run([sys.executable, str(ROOT / "simulationCases/run_faraday.py"), str(path),
+                           "--out", str(out), "--check"], capture_output=True, text=True,
+                          timeout=120, check=False)
+    assert proc.returncode == 0, proc.stderr[-2000:]
 
 
 @pytest.mark.parametrize("change, key", [(("physics", "fluid", "Oh"), "physics.fluid.Oh"),
