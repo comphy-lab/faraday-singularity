@@ -187,12 +187,21 @@ class ReconnectSettings:
     # apex_extent apex radii wide, sized from the radius predicted apex_lookahead steps ahead
     apex_extent: float = 8.0
     apex_lookahead: int = 20
+    # elements per local scale of the features after the cut (the tips, the bases of the jets, the
+    # necks); None takes the collapse's elements_per_scale, so that one landing state can be cut at
+    # several resolutions of the run after the cut
+    elements_per_scale: float | None = None
     # the spline of a rebuild after the cut runs through every node of the interface ("nodes") or,
     # for a sensitivity test only, through its vertices ("vertices"), which smooths away the very
     # midside nodes the interface guard reads
     rebuild_spline: str = "nodes"
 
     def __post_init__(self):
+        eps = self.elements_per_scale
+        if eps is not None and (isinstance(eps, bool) or not isinstance(eps, (int, float))
+                                or not math.isfinite(eps) or not eps > 0):
+            raise ValueError("reconnect.elements_per_scale must be positive and finite, or null")
+
         def positive(name):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0 \

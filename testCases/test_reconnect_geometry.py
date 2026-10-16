@@ -1306,3 +1306,16 @@ def test_the_settings_of_the_interface_after_the_cut_are_checked_and_are_cut_key
     # a cut recorded before these settings existed is not continued: the run is cut again
     old = {k: v for k, v in recorded.items() if k not in ("edge_turn_refine", "jacobian_min")}
     assert not s.continues_cut(old)
+
+
+def test_the_resolution_after_the_cut_is_a_cut_key_that_defaults_to_the_collapse():
+    s = rc.ReconnectSettings(delta=1e-3)
+    assert s.elements_per_scale is None
+    assert rc.ReconnectSettings.from_dict({"delta": 1e-3, "elements_per_scale": 8}).elements_per_scale == 8
+    assert rc.ReconnectSettings.from_dict({"delta": 1e-3, "elements_per_scale": None}).elements_per_scale is None
+    for bad in (0, -1.0, float("inf"), True, "8"):
+        with pytest.raises(ValueError):
+            rc.ReconnectSettings.from_dict({"delta": 1e-3, "elements_per_scale": bad})
+    recorded = json.loads(json.dumps(s.to_dict()))
+    assert not rc.ReconnectSettings(delta=1e-3, elements_per_scale=8).continues_cut(recorded)
+    assert s.continues_cut(recorded)

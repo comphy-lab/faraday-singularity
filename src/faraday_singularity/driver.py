@@ -856,7 +856,9 @@ class CollapseDriver:
         s, cut, st = self.s, self._cut_record(), self.state
         regions = feature_regions(segs, cavity, tips, pc["record"], cut, self.reconnect,
                                   h_floor=s.h_floor, h_axis=self.pb.mesh_settings.h_axis,
-                                  elements_per_scale=s.elements_per_scale,
+                                  elements_per_scale=(s.elements_per_scale
+                                                      if self.reconnect.elements_per_scale is None
+                                                      else self.reconnect.elements_per_scale),
                                   focus_extent=s.focus_extent,
                                   apexes=self._apex_prediction(pc["apexes"]))
         refine = interface_guard(pc["edges"], self.reconnect, fresh=self._fresh_mesh(),
