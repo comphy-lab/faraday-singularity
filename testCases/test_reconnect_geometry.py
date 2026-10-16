@@ -57,6 +57,9 @@ def test_settings_parse_and_round_trip():
                                  {"delta": 1e-4, "max_landing_ratio": 1.08},
                                  {"delta": 1e-4, "volume_correction": True},
                                  {"delta": 1e-4, "cap_splice_factor": 1.0},  # removed
+                                 {"delta": 1e-4, "tip_elements": 8.0},  # removed
+                                 {"delta": 1e-4, "tip_size": 0.3}, {"delta": 1e-4, "bridge_size": 0.0},
+                                 {"delta": 1e-4, "focus_radius": -1.0},
                                  {"delta": 1e-4, "projection": 1}])
 def test_settings_reject_invalid(bad):
     with pytest.raises(ValueError):
@@ -316,7 +319,7 @@ def test_planner_caps_fold_on_a_slender_thread_and_replaced_caps_do_not(thread_s
             assert e.min_angle >= 30.0 and e.splice_angle > 170.0 and e.r_s >= delta
         assert 12 * delta < cg.bridge < 19 * delta
         assert 50 * delta**3 < cg.removed_gas < 72 * delta**3
-        assert rc.post_cut_stops(chains, cg, s, rc.tip_size(min(e.radius for e in edits), delta, s),
+        assert rc.post_cut_stops(chains, cg, s, rc.tip_size(delta, s),
                                  fold_stop=3e-4) is None
 
 
@@ -609,7 +612,7 @@ def test_cut_of_a_stored_neck_at_the_landing_ratio(step):
     g = rc.in_cut_radii(edits, cg, delta, s)
     assert g["splice_set_by"] == ["planner-window"] * 2 and min(g["r_s"]) > 1.3
     assert 12.5 < g["bridge"] < 15 and 53 < g["removed_gas"] < 60
-    h_min = rc.tip_size(min(e.radius for e in edits), delta, s)
+    h_min = rc.tip_size(delta, s)
     assert rc.post_cut_stops(chains, cg, s, h_min, neck_elements=3.0, fold_ratio=4.0,
                              fold_stop=3e-4, fold_stop_elements=3.0) is None
     open_neck = rc.chain_neck(next(c for c in chains if c.is_open).points, ("axis", "fixed"))[0]

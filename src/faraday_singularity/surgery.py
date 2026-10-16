@@ -16,8 +16,15 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
    the mesh template. A deferral (waist not yet separable), a declined state or a refusal (a plain
    ``RuntimeError``) is retried at a cut radius larger by ``retry_factor``, ``plan_attempts`` times,
    but never above ``max_landing_ratio r_n``.
-3. **Caps.** Both planner caps are replaced by tangent arcs (``reconnect.replace_caps``), and the
-   template is given the sizes of the tips and of the bridge (``mesh.CutSizing``).
+3. **Caps.** Both planner caps are replaced by tangent arcs (``reconnect.replace_caps``). The mesh
+   of the cut is sized in cut radii, so that the cuts of a study in ``delta`` are meshed alike: the
+   template is given the element sizes at the tips on the axis and along the bridge
+   (``mesh.CutSizing``: ``tip_size`` and ``bridge_size`` times the cut radius, kept for every later
+   remesh), and the focus of this remesh is set to ``focus_size`` cut radii on the interface nodes
+   within ``focus_radius`` cut radii of the axis. That focus replaces the one the run that wrote the
+   landing state left, whose size depends on when that run last rebuilt its mesh and on its
+   ``h_floor``; both are recorded (``focus``). The collapse driver sets the focus again by its own
+   rule at its next rebuild.
 4. **Remesh at once**, with nothing in between that could solve, move a node or remesh: the plan
    refers to the current interface nodes exactly. pyoomph transfers the fields; nodes in the former
    gas thread and on the bridge are not located in the old mesh and get its two-nearest-node blend.
@@ -83,7 +90,7 @@ from pyoomph.equations.topological_changes import AxisymmetricReconnection
 from pyoomph.expressions import div, evaluate_in_past, testfunction, var, weak
 from pyoomph.generic.codegen import Equations
 
-from .mesh import CutSizing
+from .mesh import CutSizing, Focus
 from .reconnect import (Chain, ReconnectSettings, chain_volumes, cut_geometry, gas_volume_in_box,
                         in_cut_radii, liquid_axis_spans, neck_radius, orient_chain, plan_chains,
                         replace_caps, tip_size)
@@ -574,17 +581,27 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
             [[c.points[0, 1], c.points[-1, 1] + (s.reservoir_depth if c.is_open else 0.0)]
              for c in chains])
         plan.fragment_volumes_after = chain_volumes(chains, s.reservoir_depth)
-        h_tip = tip_size(min(e.radius for e in edits), rmin, s)
-        sizing = CutSizing(h_tip=h_tip, h_bridge=min(h_tip, geom.bridge / s.bridge_elements),
-                           curvature=s.curvature_sizing,
-                           grading=pb.active_mesh_template().settings.grading)
+        # the mesh of the cut in units of the cut radius, so that the cuts of a study in delta are
+        # meshed alike: the tips and the bridge (kept for every later remesh) and the focus of
+        # this remesh, which replaces the one the landing run left (sized by its own history)
+        sizing = CutSizing(h_tip=tip_size(rmin, s), h_bridge=s.bridge_size * rmin,
+                           curvature=s.curvature_sizing, grading=template.settings.grading)
+        landing_focus = template.focus
+        cut_focus = Focus(size=s.focus_size * rmin, radius=min(pb.nd.radius, s.focus_radius * rmin),
+                          grading=(landing_focus.grading if landing_focus is not None
+                                   else template.settings.grading))
+        record["focus"] = {"landing": None if landing_focus is None else asdict(landing_focus),
+                           "cut": asdict(cut_focus)}
         # every change of the free surface lies between the two splices
         z_lo, z_hi = min(e.z_s for e in edits), max(e.z_s for e in edits)
         margin = 2.0 * rmin
         box = (z_hi - z_lo + 2.0 * margin, z_lo - margin, z_hi + margin)
         gas_box_before = gas_volume_in_box([old_open], s.reservoir_depth, box)
         record["sizing"] = asdict(sizing)
+        record["sizing_in_cut_radii"] = {"h_tip": s.tip_size, "h_bridge": s.bridge_size,
+                                         "focus_size": s.focus_size, "focus_radius": s.focus_radius}
         template.cut_sizing = sizing
+        template.focus = cut_focus
         # 4. the remesh, at once
         stage("remesh")
         remeshing = True
@@ -594,6 +611,8 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
     except BaseException as e:
         clear_plan(pb)
         template.cut_sizing = None
+        if not remeshing and "focus" in record:  # put back the landing state's focus
+            template.focus = landing_focus
         if not isinstance(e, Exception):  # an interruption is no outcome of the cut
             raise
         if not remeshing:  # nothing has changed but the plan, now dropped
@@ -688,7 +707,9 @@ def _keep(problem, driver, outdir: Path, name: str, extra: dict) -> dict:
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         problem.save_state(str(path), quiet=True)
-        meta = {"time": problem.get_current_time(dimensional=False, as_float=True), **extra}
+        focus = problem.active_mesh_template().focus
+        meta = {"time": problem.get_current_time(dimensional=False, as_float=True),
+                "focus": None if focus is None else asdict(focus), **extra}
         if problem.cut is not None:
             meta["cut"] = problem.cut
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
@@ -703,7 +724,8 @@ def restore_cut(problem, record: dict) -> None:
     lives on the mesh template. pyoomph builds a reloaded mesh from a sibling of the problem's
     original template that copies that template's attributes; in a new process the original
     template has no cut sizing, so it is put back here from the record, or the remeshes after the
-    restart would differ from those of the run that wrote the state."""
+    restart would differ from those of the run that wrote the state. The focus is not restored
+    here: it is the driver's, dumped with its bookkeeping (``CollapseDriver.restore``)."""
     if problem.reconnect is None:
         raise RuntimeError("a state written after a cut needs a problem made with reconnect settings")
     if "sizing" not in record:

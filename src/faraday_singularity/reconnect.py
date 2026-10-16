@@ -94,9 +94,14 @@ class ReconnectSettings:
     cap_min_points: int = 16  # control points of each arc, at least
     cap_tangent_fit: float = 2.0  # the tangent at the splice is fitted over this many r_s of arc
     min_cap_angle: float = 30.0  # smallest interior angle (deg) of a cap polyline
-    tip_elements: float = 8.0  # element size at the fresh tips: arc radius / tip_elements,
-    tip_floor: float = 1.0 / 64.0  # at most delta/4 and not below tip_floor * delta
-    bridge_elements: float = 8.0  # at least this many elements along the bridge of liquid
+    # Mesh sizes of the cut, in cut radii, so that the meshes of a study in delta are similar: at
+    # every tip on the axis (fresh caps and the bubble's far end) and along the bridge, kept for
+    # every remesh after the cut; and the focus of the cut's remesh, which replaces the focus left
+    # by the run that wrote the landing state (the driver's rule sets it again at its next rebuild)
+    tip_size: float = 1.0 / 16.0  # at most 1/4: gmsh then follows a cap without inverting elements
+    bridge_size: float = 1.0 / 16.0  # at most 1/4
+    focus_size: float = 1.0 / 16.0
+    focus_radius: float = 20.0  # interface nodes with r <= focus_radius * cut radius
     curvature_sizing: int = 20  # gmsh MeshSizeFromCurvature after the cut (0: off)
     fill: str = "blend"  # liquid velocity in the former gas: pyoomph's nearest-node blend, or zero
     projection: bool = True
@@ -120,8 +125,8 @@ class ReconnectSettings:
                     or not math.isfinite(value):
                 raise ValueError(f"reconnect.{name} must be positive and finite")
         for name in ("delta", "reservoir_depth", "cap_window_factor", "retry_factor",
-                     "cap_tangent_fit", "min_cap_angle", "tip_elements",
-                     "tip_floor", "bridge_elements", "projection_tolerance", "energy_tolerance",
+                     "cap_tangent_fit", "min_cap_angle", "tip_size", "bridge_size", "focus_size",
+                     "focus_radius", "projection_tolerance", "energy_tolerance",
                      "dt0", "dt_growth", "courant", "bridge_stop", "bubble_stop"):
             positive(name)
         if not self.min_landing_ratio > 1.0:
@@ -161,14 +166,22 @@ class ReconnectSettings:
             raise ValueError("reconnect.tau_end must be positive")
         if not self.min_cap_angle < 90.0:
             raise ValueError("reconnect.min_cap_angle must be below 90 degrees")
+        for name in ("tip_size", "bridge_size"):
+            if not getattr(self, name) <= 0.25:
+                raise ValueError(f"reconnect.{name} must be at most 1/4 (of the cut radius)")
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReconnectSettings":
         if not isinstance(data, dict):
             raise ValueError("collapse.reconnect must be an object")
-        if "cap_splice_factor" in data:
-            raise ValueError("collapse.reconnect.cap_splice_factor was removed: the planner's window "
-                             "(cap_window_factor) sets the splice, with a floor at delta")
+        removed = {"cap_splice_factor": "the planner's window (cap_window_factor) sets the splice, "
+                                        "with a floor at delta",
+                   "tip_elements": "tip_size gives the tip element size in cut radii",
+                   "tip_floor": "tip_size gives the tip element size in cut radii",
+                   "bridge_elements": "bridge_size gives the bridge element size in cut radii"}
+        for key, why in removed.items():
+            if key in data:
+                raise ValueError(f"collapse.reconnect.{key} was removed: {why}")
         known = set(cls.__dataclass_fields__)
         unknown = sorted(set(data) - known)
         if unknown:
@@ -401,11 +414,12 @@ class CapEdit:
     splice_angle: float  # interior angle at the splice, degrees (180: tangent)
 
 
-def tip_size(radius: float, delta: float, settings: ReconnectSettings) -> float:
-    """Element size at a fresh tip: ``radius/tip_elements`` but at most ``delta/4`` (a cap needs a
-    size floor at or below a quarter of the cut radius for gmsh to follow its curvature without
-    inverting curved elements), and at least ``tip_floor * delta``."""
-    return max(min(radius / settings.tip_elements, 0.25 * delta), settings.tip_floor * delta)
+def tip_size(delta: float, settings: ReconnectSettings) -> float:
+    """Element size at the tips on the axis after a cut at radius ``delta``: ``tip_size * delta``, a
+    fixed fraction of the cut radius (at most a quarter of it, which a cap needs for gmsh to follow
+    its curvature without inverting curved elements), so that the meshes of a study in ``delta``
+    are similar whatever the arc radius or the focus of the landing state."""
+    return settings.tip_size * delta
 
 
 def fresh_tip_run(origin: np.ndarray, end: int) -> int:
@@ -532,7 +546,7 @@ def replace_caps(new_chains, delta: float, settings: ReconnectSettings) -> list[
             n_pts = s.cap_min_points
             arc, R, z_tip = tangent_arc(P[k], t, n_pts)
             arc_len = R * abs(0.5 * math.pi - math.radians(beta))
-            h_tip = tip_size(R, delta, s)
+            h_tip = tip_size(delta, s)
             n_pts = max(n_pts, int(math.ceil(arc_len / h_tip)),
                         int(math.ceil(abs(z_tip_old - z_splice) / (5.0 * median_dz))))
             arc, R, z_tip = tangent_arc(P[k], t, n_pts)

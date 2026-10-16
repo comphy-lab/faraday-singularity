@@ -45,7 +45,10 @@ from faraday_singularity.problem import FaradayProblem  # noqa: E402
 from faraday_singularity.reconnect import Chain, ReconnectSettings, neck_radius  # noqa: E402
 
 R_N = 0.02  # neck radius of the synthetic cavity
-FAST_CUT = {"delta": 1.05 * R_N, "dt0": 1e-5}  # the cut of the synthetic cavity in most tests
+# the cut of the synthetic cavity in most tests: its mesh sizes, a quarter of the cut radius, are
+# about those of the cavity's mesh, so that the tests stay small
+FAST_CUT = {"delta": 1.05 * R_N, "dt0": 1e-5, "tip_size": 0.25, "bridge_size": 0.25,
+            "focus_size": 0.25}
 
 
 # --- private names ------------------------------------------------------------------------------
@@ -303,7 +306,7 @@ def chart_ends(pb) -> dict:
 @pytest.fixture(scope="module")
 def neck_cut(tmp_path_factory):
     out = tmp_path_factory.mktemp("neck")
-    s = ReconnectSettings(delta=1.05 * R_N, dt0=1e-5)
+    s = ReconnectSettings(**FAST_CUT)
     res = {}
     with neck_problem(out, s) as pb:
         pb.initialise()
@@ -367,7 +370,7 @@ def neck_cut(tmp_path_factory):
         # again from the precut state, with the zero fill and an impulsive restart
         pb.load_state(rec["precut_state"]["path"])
         pb.cut = None
-        s2 = ReconnectSettings(delta=1.05 * R_N, dt0=1e-5, fill="zero", restart="impulsive")
+        s2 = ReconnectSettings(**dict(FAST_CUT, fill="zero", restart="impulsive"))
         out2 = out / "zero"
         out2.mkdir()
         res["zero"] = surgery.cut(pb, s2, out2)
@@ -430,6 +433,34 @@ def test_cut_records_the_geometry_in_cut_radii(neck_cut):
     assert "cap_splice_factor" not in g and "cap_splice_factor" not in rec["settings"]
     assert g["bridge"] == pytest.approx(rec["geometry"]["bridge"] / rmin)
     assert g["removed_gas"] == pytest.approx(rec["geometry"]["removed_gas"] / rmin**3)
+
+
+def test_the_cut_mesh_is_sized_in_cut_radii_whatever_the_landing_focus(tmp_path):
+    """The tips, the bridge and the focus of the cut's remesh are fixed fractions of the cut radius:
+    two landing states that differ only in the focus their run left are cut onto the same mesh."""
+    meshes, records = [], []
+    for k, landing in enumerate((Focus(size=R_N / 3, radius=0.1, grading=0.3),
+                                 Focus(size=R_N / 12, radius=0.6, grading=0.3))):
+        out = tmp_path / f"cut{k}"
+        s = ReconnectSettings(**FAST_CUT)
+        with neck_problem(out, s) as pb:
+            pb.initialise()
+            impose_closing_flow(pb)
+            pb.active_mesh_template().focus = landing
+            rec = surgery.cut(pb, s, out)
+            meshes.append(mesh_signature(pb))
+            records.append(rec)
+            assert pb.active_mesh_template().focus == Focus(**rec["focus"]["cut"])
+    assert meshes[0] == meshes[1]
+    for rec, landing in zip(records, (R_N / 3, R_N / 12)):
+        rmin = rec["rmin"]
+        assert rec["focus"]["landing"]["size"] == landing
+        assert rec["focus"]["cut"] == {"size": pytest.approx(0.25 * rmin),
+                                       "radius": pytest.approx(20 * rmin), "grading": 0.3}
+        assert rec["sizing"]["h_tip"] == pytest.approx(0.25 * rmin)
+        assert rec["sizing"]["h_bridge"] == pytest.approx(0.25 * rmin)
+        assert rec["sizing_in_cut_radii"] == {"h_tip": 0.25, "h_bridge": 0.25, "focus_size": 0.25,
+                                              "focus_radius": 20.0}
 
 
 def test_cut_records_the_local_kinetic_energy(neck_cut):
@@ -519,16 +550,18 @@ sys.path.insert(0, sys.argv[1] + "/src")
 sys.path.insert(0, sys.argv[1] + "/testCases")
 import test_reconnect_fem as t
 from faraday_singularity import surgery
+from faraday_singularity.mesh import Focus
 from faraday_singularity.reconnect import ReconnectSettings
 
 post, out = Path(sys.argv[2]), Path(sys.argv[3])
 meta = json.loads(post.with_suffix(".json").read_text())
 report = {}
-with t.neck_problem(out, ReconnectSettings(delta=1.05 * t.R_N, dt0=1e-5)) as pb:
+with t.neck_problem(out, ReconnectSettings(**t.FAST_CUT)) as pb:
     pb.initialise()
     for mode in ("plain", "restored"):
         pb.load_state(str(post))
-        if mode == "restored":
+        if mode == "restored":  # as CollapseDriver.restore does: the dumped focus, then the cut
+            pb.active_mesh_template().focus = Focus(**meta["focus"])
             surgery.restore_cut(pb, meta["cut"])
         sizing = pb.active_mesh_template().cut_sizing
         pb.force_remesh()
@@ -608,7 +641,7 @@ def test_a_failed_cut_writes_its_diagnostics(tmp_path, monkeypatch):
         raise RuntimeError("no chart")
 
     monkeypatch.setattr(surgery, "orient_interface_chart", broken_chart)
-    s = ReconnectSettings(delta=1.05 * R_N, dt0=1e-5)
+    s = ReconnectSettings(**FAST_CUT)
     with neck_problem(tmp_path, s) as pb:
         pb.initialise()
         impose_closing_flow(pb)
@@ -704,7 +737,7 @@ def landing_run(tmp_path_factory):
         {"case": parent_case, "provenance": {"case_sha256": digest}}))
     case = json.loads(json.dumps(parent_case))
     case["case_id"] = "neck-prototype"
-    case["collapse"] = {"reconnect": {"delta": 1.0, "dt0": 1e-5}}
+    case["collapse"] = {"reconnect": dict(FAST_CUT, delta=1.0)}
     case_path = root / "case.json"
     case_path.write_text(json.dumps(case))
     return {"state": state, "case": case_path, "digest": digest}
