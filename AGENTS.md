@@ -73,17 +73,26 @@ add a second top-level `cases/` tree.
 - A sharp-interface mesh cannot change topology by itself. Stop each simulation before any
   pinch-off or entrainment, and record why it stopped. The one exception is the reconnection
   through a neck pinch-off: a run keeps its landing state at the neck-radius stop
-  (`collapse.keep_stop_state`), and the cut is made from it at a chosen radius `delta`
-  (`collapse.reconnect`, `reconnect.py`, `surgery.py`): pyoomph's planner gives the topology, its
+  (`collapse.keep_stop_state`), or one for each cut radius of `collapse.landing` (the first state
+  with `delta/r_n >= 1.05`), and the cut is made from it at radius `delta`
+  (`collapse.reconnect`, `reconnect.py`, `surgery.py`), refused unless `delta/r_n` lies between
+  `min_landing_ratio` and `max_landing_ratio`, so each `delta` of a study needs its own landing
+  state: pyoomph's planner gives the topology, its
   caps are always replaced by tangent arcs, the liquid velocity is carried across and projected
   onto a divergence-free field by a pressure impulse (refused unless the discrete energy identity
   holds), and the bubble keeps the passive constant gas pressure (the zero-density limit). A
   reconnected result counts only if the jets at a fixed time after the cut do not depend on
   `delta`; report it with that `delta` study. One cut per run; stop before any second change of
-  topology (the stops in `reconnect.post_cut_stops`). The cut relies on private names of the
-  pinned pyoomph release, pinned by `testCases/test_reconnect_fem.py`; check them when the pin
-  moves. Planner tests on stored neck profiles run when `FARADAY_RECONNECT_PROFILES` names their
-  directory. Of failures of the solve, only oomph-lib giving up below
+  topology (the stops in `reconnect.post_cut_stops`, on both chains: the driver measures only the
+  open one). Landing states come from restarts of existing runs under a derived case, which may
+  differ from the parent's only in `case_id`, `completion.value` and the collapse keys
+  `keep_stop_state`, `landing`, `neck_stop` and `reconnect` (`run_case.DERIVED_KEYS`); the
+  prototype checks the same lineage for the state it cuts and records it. The cut relies on private
+  names of the pinned pyoomph release, pinned by `testCases/test_reconnect_fem.py`; check them when
+  the pin moves. A restart after the cut must restore the cut's mesh sizing on the template
+  (`surgery.restore_cut`). Planner tests on stored neck profiles run when
+  `FARADAY_RECONNECT_PROFILES` names their directory; a synthetic slender thread covers the same
+  planner classes by default. Of failures of the solve, only oomph-lib giving up below
   its smallest step (the Newton solve failing at every step size) can end a run cleanly, and only
   when `classify_failure` attributes it to a closing neck or a vanishing local scale, as measured
   rather than growth-limited; any other failure, including a failed remesh, is a failed run. Runs also end cleanly at the neck-radius

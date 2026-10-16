@@ -178,15 +178,31 @@ above the mean level before that trough. Rows with `crest_jet` 1 had a jet stand
 during that crest, so their `h_crest` is the height of the jet tip, not of a wave.
 
 Reconnection prototype. With `collapse.keep_stop_state` a run keeps the state at its neck-radius
-stop as `states/stop_<step>.dump`. `simulationCases/reconnect_prototype.py` loads such a state,
-cuts the neck at `--delta` (or `--delta-ratio` times the neck radius; the settings are those of a
-`collapse.reconnect` block, see `src/faraday_singularity/reconnect.py`), projects, and takes a few
-steps. It writes `cut_diagnostics.json` (the planner attempts, the replaced caps, the volumes and
-the kinetic energy and axial momentum before and after the transfer and the projection, the nodes
-the transfer could not locate in the old mesh), the kept `precut` and `postcut` states,
-`steps.txt` (budgets, the three interface tips on the axis, the bridge of liquid between the
-bubble and the cavity, and the jet measurements on the open surface) and the profiles of both
-interface chains.
+stop as `states/stop_<step>.dump`; with `collapse.landing`, a list of cut radii `delta`, it keeps
+for each the first state whose neck radius `r_n` has fallen to `delta/1.05`, as
+`states/landing_<delta>.dump`, so that one run supplies the landing states of a study in `delta`.
+Either key, and a different `collapse.neck_stop` or `collapse.reconnect` block, can be added to the
+case of an existing run and the run restarted from one of its dumps under the derived case (with a
+new `case_id` if wanted); any other change of the case is refused, and the restart manifest
+records the parent's case hash and the keys that differ.
+`simulationCases/reconnect_prototype.py` loads a landing state, checks that the run which wrote it
+has a normalised manifest with a clean source commit and the same case (or one derived from it in
+those keys), cuts the neck at `--delta` (or `--delta-ratio` times the neck radius; the settings are
+those of a `collapse.reconnect` block, see `src/faraday_singularity/reconnect.py`), projects, and
+takes a few steps. A cut is refused unless `min_landing_ratio <= delta/r_n <= max_landing_ratio`
+(1.03 and 1.1 by default): the cut geometry in units of `delta` depends on `delta/r_n`. The
+prototype writes `cut_diagnostics.json` (the planner attempts, the replaced caps, the volumes, the
+kinetic energy and axial momentum before and after the transfer and the projection, the nodes the
+transfer could not locate in the old mesh), the kept `precut` and `postcut` states, `steps.txt`
+(budgets, the three interface tips on the axis, the bridge of liquid between the bubble and the
+cavity, the jet measurements on the open surface, and the element size and speed of the Courant
+limit) and the profiles of both interface chains. The liquid volume the cut adds is recorded both
+over the whole mesh, which includes the drift of rebuilding the whole free surface, and within a box
+around the cut, which is compared with the plan. The continuation stops before a second change of
+topology: the bridge closing, the chains approaching each other, the bubble's two tips meeting, a
+new neck narrower than `delta` on either chain, a closing fold on the bubble, or the bubble draining
+away; and at the collapse driver's neck and fold stops on the open surface. Dumps written after the
+cut carry its record, from which a restart restores the cut's mesh sizing.
 
 `collapse_analysis.py` sets out, for each collapse cycle that launches a jet, the evidence for
 the three similarity laws of jet birth without choosing between them: the free slopes of
