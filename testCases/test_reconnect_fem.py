@@ -95,6 +95,16 @@ def test_private_pyoomph_names_the_cut_relies_on():
     assert "except WaistNotYetSeparable" in detect and "except InterfaceStateNotPlannable" in detect
     assert issubclass(topo.WaistNotYetSeparable, RuntimeError)
     assert issubclass(topo.InterfaceStateNotPlannable, RuntimeError)
+    # after a cut: pyoomph's net for an element turned inside out within a step, armed at run time
+    # (FaradayProblem.arm_inverted_element_remesh), and the export the curved-element check reads
+    from pyoomph import _pyoomph_core
+
+    assert hasattr(_pyoomph_core, "set_detect_inverted_elements")
+    assert "_domains_remesh_on_inversion" in inspect.getsource(Problem.__init__)
+    assert "self._domains_remesh_on_inversion" in inspect.getsource(
+        Problem._solve_with_inversion_remesh)
+    assert "force_remesh(self._domains_remesh_on_inversion)" in inspect.getsource(
+        Problem._solve_with_inversion_remesh)
 
 
 # --- the projection on a manufactured field ---------------------------------------------------------
@@ -711,6 +721,124 @@ def test_after_a_cut_the_driver_does_not_coarsen_the_tips_the_cut_made(tmp_path)
         assert 0.9 * h_tip <= h.min() and h.max() <= 1.25 * s.focus_size * rec["rmin"], (name, h)
 
 
+def _bend_element(pb, turn_deg: float) -> dict:
+    """Move the midside node of the bubble's element at its widest point off the chord, towards the
+    gas, so that the element's tangent turns by ``turn_deg`` across it (``s/L = tan(turn/2)/4``),
+    at every time level and in its Lagrangian position (the reference of the mesh's smoothing):
+    a kink of the interface in the state itself, as a rebuild would read it. Returns the element's
+    chord ``L`` and the new place of its midside node ``at``."""
+    seg = next(c for c in pb.interface_segments() if not c["open"])
+    P = np.column_stack([seg["r"], seg["z"]])
+    k = 2 * int(np.argmax(P[1::2, 0])) + 1
+    a, b = P[k - 1], P[k + 1]
+    L = float(np.hypot(*(b - a)))
+    t = (b - a) / L
+    new = 0.5 * (a + b) + L * math.tan(math.radians(turn_deg) / 2) / 4 * np.array([-t[1], t[0]])
+    node = next(n for n in surgery.mesh_nodes(pb.get_mesh("liquid/interface"))
+                if (n.x(0), n.x(1)) == (P[k, 0], P[k, 1]))
+    for level in range(node.ntstorage()):
+        for i in (0, 1):
+            node.set_x_at_t(level, i, float(new[i]))
+    for i in (0, 1):
+        node.set_x_lagr(i, float(new[i]))
+    pb.invalidate_cached_mesh_data()
+    return {"L": L, "at": new}
+
+
+def test_after_a_cut_an_element_bent_by_40_degrees_is_refined_away(tmp_path):
+    """An element of the bubble bent by 40 degrees after the cut (below the stop of 90 on the
+    freshly built mesh, above the 30 at which the guard asks for a refinement) is refined by the
+    rebuild after the first step, in a region of its own (kink_bubble, a quarter of its chord):
+    on the new mesh no element there turns by more than 30 degrees, and the run goes on."""
+    from faraday_singularity.reconnect import p2_edges
+
+    s = ReconnectSettings(**FAST_CUT)
+    settings = CollapseSettings(t_end=10.0, dt_max=0.01, max_steps=2)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        impose_closing_flow(pb)
+        driver = CollapseDriver(pb, settings, tmp_path, reconnect=s)
+        surgery.cut(pb, s, tmp_path, driver=driver, log=lambda *_: None)
+        bent = _bend_element(pb, 40.0)
+        driver._post_cut_cache = None  # the state has changed
+        from pyoomph import _pyoomph_core
+
+        assert not _pyoomph_core.get_detect_inverted_elements()
+        result = driver.run(1e-8)
+        # the net for an element turned inside out was armed for the run after the cut, and is
+        # disarmed when the driver closes (the detection is process-wide)
+        assert result["cut"]["inverted_element_remesh"] is True
+        assert result["cut"]["inverted_element_remeshes"] == 0
+        assert _pyoomph_core.get_detect_inverted_elements()
+        driver.close()
+        assert not _pyoomph_core.get_detect_inverted_elements()
+        assert not pb._domains_remesh_on_inversion
+        bubble = next(c for c in pb.interface_segments() if not c["open"])
+        e = p2_edges(np.column_stack([bubble["r"], bubble["z"]]))
+        # the absolute floor of the quality of an element (pyoomph's: smallest over mean
+        # Jacobian), for an element that has fallen below it since its build
+        assert pb.quality_floor_reading(1e-3) is None
+        q = [(e.get_quality_factor(), e.get_initial_quality_factor())
+             for e in pb.get_mesh("liquid").elements()]
+        q_k, q0_k = max(q, key=lambda x: x[1] - x[0])
+        assert q0_k > q_k
+        floor = 0.5 * (q_k + q0_k)
+        reading = pb.quality_floor_reading(floor)
+        assert reading["trigger"] == "absolute-quality" and reading["ratio"] <= q_k < floor
+        assert reading["quality_floor"] == floor and "size_ratio_min" in reading
+        # only elements that have fallen below the floor since their build count: one built below
+        # it would be made again by every rebuild
+        for f in (0.5, 0.9, 0.99, 0.999):
+            expect = [x for x, q0 in q if x < f <= q0]
+            got = pb.quality_floor_reading(f)
+            assert (got is None) == (not expect), f
+            if expect:
+                assert got["ratio"] == pytest.approx(min(expect))
+    near = np.hypot(e["mid"][:, 0] - bent["at"][0], e["mid"][:, 1] - bent["at"][1]) <= 2 * bent["L"]
+    assert near.sum() >= 4 and e["turn"][near].max() < 30.0, e["turn"][near]
+    assert result["stop"]["reason"] == "max-steps"
+    rows = _columns(tmp_path / "chains.txt")
+    assert rows["edge_turn_bubble"][0] == pytest.approx(40.0, abs=0.5)
+    assert rows["edge_turn_bubble"][-1] < 30.0
+    events = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    remesh = [x for x in events if x["event"] == "remesh"]
+    assert remesh and remesh[0]["step"] == 1 and "kink_bubble" in remesh[0]["asked_by"]
+    kink = {g["name"]: g for g in remesh[0]["regions"]}["kink_bubble"]
+    assert kink["target"] == pytest.approx(bent["L"] / 4, rel=0.1)
+    assert kink["new_size"] <= 0.3 * bent["L"]
+
+
+def test_after_a_cut_a_failed_step_leaves_the_profiles_of_the_last_good_state(tmp_path):
+    """After a cut no failure of a step ends a run cleanly, and the problem then holds a rejected
+    iterate: the driver writes the profiles of both chains of the state the failing step started
+    from (profile_<step>_lastgood.txt and its _bubble beside it) before it raises."""
+    s = ReconnectSettings(**FAST_CUT)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        impose_closing_flow(pb)
+        driver = CollapseDriver(pb, CollapseSettings(t_end=10.0, dt_max=0.01), tmp_path,
+                                reconnect=s)
+        surgery.cut(pb, s, tmp_path, driver=driver, log=lambda *_: None)
+        expected = {("open" if c["open"] else "bubble"):
+                    np.column_stack([c[k] for k in ("r", "z", "u_r", "u_z")])
+                    for c in pb.interface_segments()}
+
+        def failing(*_args, **_kw):
+            raise RuntimeError("OomphException")
+
+        pb.run = failing
+        with pytest.raises(RuntimeError, match="OomphException"):
+            driver.run(1e-8)
+        driver.close()
+    good = tmp_path / "profiles" / "profile_000000_lastgood.txt"
+    for path, chain in ((good, "open"), (good.with_name("profile_000000_lastgood_bubble.txt"),
+                                         "bubble")):
+        header = json.loads(path.read_text().splitlines()[0][2:])
+        assert header["reason"] == "lastgood" and header["chain"] == chain and header["step"] == 0
+        assert "OomphException" in header["error"] and header["tau"] == 0.0
+        assert np.array_equal(np.loadtxt(path), expected[chain])
+
+
 class FlaggingNeckProblem(NeckProblem):
     """The neck problem with thresholds of element distortion that flag every step pyoomph checks,
     so that the driver rebuilds the mesh after a cut at about every other step."""
@@ -749,22 +877,27 @@ def _mesh_report(pb, kept_radius: float, near: float) -> dict:
 # than the cavity's h_axis, and a landing focus finer still (the bubble's bottom keeps it)
 FEATURE_CUT = dict(FAST_CUT, tip_size=0.125, focus_size=0.125)
 FEATURE_LANDING = Focus(size=R_N / 12, radius=0.6, grading=0.3)
+# the landing run's h_floor of those runs: half the cut's focus size, above the size the rule asks
+# for at the tips (ell/400), so that the tips are refined to it, twofold, and the run stays small
+FEATURE_FLOOR = 0.5 * 0.125 * 1.05 * R_N
 
 
 @pytest.fixture(scope="module")
 def post_cut_features(tmp_path_factory):
     """A run after a cut of the synthetic cavity whose landing state was meshed at a focus of R_N/12
-    near the axis, finer than the cut's focus (delta/8), with a rule that would refine the tips the
-    cut made to ell/400 (about 5e-4, above an h_floor of 1e-6) and distortion flags that make the
-    driver rebuild the mesh: the mesh after the cut and after every rebuild of the driver."""
+    near the axis, finer than the cut's focus (delta/8), with a rule that asks for ell/400 at the
+    tips the cut made (about 1e-4, below an h_floor of delta/16) and distortion flags that make the
+    driver rebuild the mesh: the mesh after the cut and after every rebuild of the driver, and the
+    lower bound of the scaled Jacobian of its curved elements (``curved_jacobian_bound``), with the
+    nodes and elements of the last mesh."""
     out = tmp_path_factory.mktemp("features")
     s = ReconnectSettings(**FEATURE_CUT)
     settings = CollapseSettings(t_end=10.0, dt_max=0.01, max_steps=4, elements_per_scale=400.0,
-                                h_floor=1e-6)
+                                h_floor=FEATURE_FLOOR)
     nd = nondimensionalise(CaseParameters.from_dict(PHYSICS))
     pb = FlaggingNeckProblem(nd, mesh=MeshSettings(**MESH), reconnect=s)
     pb.set_output_directory(str(out))
-    res = {"meshes": [], "out": out}
+    res = {"meshes": [], "out": out, "jacobians": []}
     with pb:
         pb.initialise()
         pb.active_mesh_template().focus = FEATURE_LANDING
@@ -776,16 +909,21 @@ def post_cut_features(tmp_path_factory):
         res["record"] = rec
         report = (lambda: _mesh_report(pb, rec["focus"]["kept"]["radius"], 5 * rec["rmin"]))
         res["meshes"].append(report())
+        res["jacobians"].append(pb.curved_jacobian_bound(s.jacobian_min))
         original = pb.force_remesh
 
         def recording(*args, **kw):
             original(*args, **kw)
             res["meshes"].append(report())
+            res["jacobians"].append(pb.curved_jacobian_bound(s.jacobian_min))
 
         pb.force_remesh = recording
         res["result"] = driver.run(1e-8)
         driver.close()
         res["focus"] = pb.active_mesh_template().focus
+        values, elements, _, fields = pb.get_mesh("liquid").to_numpy(False, True, 0, False)[:4]
+        res["last_mesh"] = (np.asarray(values)[:, [fields["coordinate_x"], fields["coordinate_y"]]],
+                            np.asarray(elements))
     res["events"] = [json.loads(x) for x in (out / "events.jsonl").read_text().splitlines()]
     return res
 
@@ -809,34 +947,82 @@ def test_after_a_cut_the_bubble_bottom_keeps_its_landing_resolution(post_cut_fea
     assert res["result"]["stop"]["reason"] == "max-steps"
 
 
-def test_after_a_cut_the_tips_are_meshed_at_the_cut_radius_sizing(post_cut_features):
-    """Near the tips the cut made, the elements are the cut's focus size, delta/8: the rule's own
-    size there, ell/400, about 5e-4, lies above the landing run's h_floor (1e-6)
-    and would have refined them some fivefold; after a cut the focus is floored at the cut's focus
-    size, and every rebuild sizes the tips' regions at it."""
+def test_after_a_cut_the_tips_are_meshed_at_their_own_scale_down_to_h_floor(post_cut_features):
+    """Near the tips the cut made, the rule's own size, ell/400 (about 1e-4), lies below the landing
+    run's h_floor (half the cut's focus size here): the tips are meshed at their own scale clipped
+    to between h_floor and the cut's focus size, so the first rebuild refines their regions to
+    h_floor, twofold, and every later one keeps them there; the driver's focus is floored at h_floor
+    only, not at the cut's focus size, which met a sharp tip with one or two elements. A rebuild
+    for distortion keeps the size of every region."""
     res = post_cut_features
     rmin = res["record"]["rmin"]
     h_cut = 0.125 * rmin
     table = _columns(res["out"] / "collapse.txt")
-    assert np.all(table["ell"] / 400 < 0.5 * h_cut)  # the size the rule would have asked for
-    assert np.all(table["h_focus"] == pytest.approx(h_cut, rel=1e-12))
-    for m in res["meshes"]:
+    assert np.all(table["ell"] / 400 < FEATURE_FLOOR)  # the size the rule asks for
+    assert np.all(table["h_focus"] == pytest.approx(FEATURE_FLOOR, rel=1e-12))
+    first, later = res["meshes"][0], res["meshes"][2:]
+    for name, h in first["tips"].items():  # the cut's mesh: its focus size
+        assert len(h) > 10 and 0.6 * h_cut <= h.min() and h.max() <= 1.4 * h_cut, (name, h)
+    assert later
+    for m in later:
         for name, h in m["tips"].items():
-            assert len(h) > 10 and 0.6 * h_cut <= h.min() and h.max() <= 1.4 * h_cut, (name, h)
+            assert len(h) > 20, (name, h)
+            assert 0.6 * FEATURE_FLOOR <= h.min() and h.max() <= 1.4 * FEATURE_FLOOR, (name, h)
     regions = {g.name: g for g in res["focus"].regions}
     for name in ("cavity_tip", "bubble_top"):
-        assert regions[name].size == pytest.approx(h_cut)
+        assert regions[name].size == pytest.approx(FEATURE_FLOOR)
         assert regions[name].radius >= 20 * rmin * (1 - 1e-12)
     rows = _columns(res["out"] / "chains.txt")
-    later = np.isfinite(rows["size_cavity_tip"])
-    assert later.any() and np.all(rows["size_cavity_tip"][later] == pytest.approx(h_cut))
-    assert np.all(rows["h_cavity_tip"] <= 1.4 * h_cut) and np.all(rows["h_bubble_top"] <= 1.4 * h_cut)
+    sized = np.isfinite(rows["size_cavity_tip"])
+    assert sized.any()
+    assert np.all(rows["size_cavity_tip"][sized][1:] == pytest.approx(FEATURE_FLOOR))
+    assert np.all(rows["h_cavity_tip"][sized][1:] <= 1.4 * FEATURE_FLOOR)
     distortion = [e for e in res["events"] if e.get("reason") == "distortion"]
     assert distortion
-    for e in distortion:  # a rebuild for distortion keeps the size of every region
-        sizes = {g["name"]: g["new_size"] for g in e["regions"]}
-        assert sizes["cavity_tip"] == sizes["bubble_top"] == pytest.approx(h_cut)
-        assert sizes["bubble_bottom"] == pytest.approx(FEATURE_LANDING.size)
+    for e in distortion:  # a rebuild for distortion keeps the size of every region it has
+        sizes = {g["name"]: g for g in e["regions"]}
+        for name in ("cavity_tip", "bubble_top"):
+            g = sizes[name]
+            if math.isfinite(g["size"]):
+                assert g["new_size"] == pytest.approx(g["size"])
+        assert sizes["bubble_bottom"]["new_size"] == pytest.approx(FEATURE_LANDING.size)
+
+
+def test_after_a_cut_every_mesh_has_valid_curved_elements(post_cut_features):
+    """The cut's mesh and every rebuild after it: the lower bound of the scaled Jacobian of every
+    curved element (the Bezier bound) is at least the cut's jacobian_min, 0.2, as the run accepts
+    them; on the last mesh it is checked against the Jacobian sampled over its worst elements,
+    which also checks the order of the nodes it assumes."""
+    from faraday_singularity.reconnect import p2_jacobian_bounds
+
+    res = post_cut_features
+    assert len(res["jacobians"]) == len(res["meshes"]) >= 3
+    for j in res["jacobians"]:
+        assert j["min"] >= 0.2 and j["below"] == 0 and j["elements"] > 1000, j
+    xy, elements = res["last_mesh"]  # the state the run ended on, stepped since its last rebuild
+    bounds = p2_jacobian_bounds(xy, elements)
+    assert bounds.min() >= 0.2
+    assert np.median(bounds) == pytest.approx(1.0, abs=1e-2)  # nearly straight-sided elements
+    for k in np.argsort(bounds)[:20]:
+        X = xy[elements[k]]
+        lin = (X[0, 0] - X[2, 0]) * (X[1, 1] - X[2, 1]) - (X[0, 1] - X[2, 1]) * (X[1, 0] - X[2, 0])
+        assert lin > 0.0  # counterclockwise, as pyoomph orients every element
+        assert bounds[k] <= _jacobian_sampled(X).min() / lin + 1e-9
+
+
+def _jacobian_sampled(X, n=40):
+    """``det(dx/ds)`` of a quadratic triangle (oomph-lib's order of nodes) sampled over its
+    reference triangle, from the derivatives of its Lagrange shape functions."""
+    out = []
+    for i in range(n + 1):
+        for j in range(n + 1 - i):
+            s1, s2 = i / n, j / n
+            s3 = 1.0 - s1 - s2
+            d1 = np.array([4 * s1 - 1, 0.0, -(4 * s3 - 1), 4 * s2, -4 * s2, 4 * (s3 - s1)])
+            d2 = np.array([0.0, 4 * s2 - 1, -(4 * s3 - 1), 4 * s1, 4 * (s3 - s2), -4 * s1])
+            a, b = d1 @ X, d2 @ X
+            out.append(a[0] * b[1] - a[1] * b[0])
+    return np.array(out)
 
 
 def test_after_a_cut_no_mesh_has_a_jump_in_element_length(post_cut_features):
@@ -848,6 +1034,29 @@ def test_after_a_cut_no_mesh_has_a_jump_in_element_length(post_cut_features):
     for m in post_cut_features["meshes"]:
         for chain, ratio in m["adjacent"].items():
             assert ratio < 2.0, (chain, ratio)
+
+
+def test_the_vertex_spline_of_a_rebuild_is_an_option_for_sensitivity_tests_only():
+    """With ``rebuild_spline`` ``vertices`` (off by default) a rebuild after a cut splines each
+    chain through its vertices, every other node, so that a midside node off its place along the
+    curve does not shape the new surface; the stops test the spline of those same nodes. A chain
+    with an even number of nodes has no vertices to take."""
+    from faraday_singularity.reconnect import ReconnectSettings as RS
+
+    assert RS(delta=1e-3).rebuild_spline == "nodes"
+    t = FaradayCylinderMesh(3.8, 2.0, lambda r: 0 * r, MeshSettings(), reconnect=True)
+    th = [math.pi * k / 8 for k in range(1, 8)]
+    bubble = ([(0.0, 0.48)] + [(0.02 * math.sin(x), 0.5 - 0.02 * math.cos(x)) for x in th]
+              + [(0.0, 0.52)])
+    cavity = [(0.0, 0.6)] + [(0.1 * k, 0.6 + 0.01 * k) for k in range(1, 38)] + [(3.8, 1.0)]
+    assert len(bubble) % 2 == 1 and len(cavity) % 2 == 1
+    every = t._current_chains([bubble, cavity])
+    t.rebuild_spline = "vertices"
+    vertices = t._current_chains([bubble, cavity])
+    for a, b in zip(every, vertices):
+        assert np.array_equal(b.points, a.points[::2]) and b.end_types == a.end_types
+    with pytest.raises(RuntimeError, match="even number of nodes"):
+        t._current_chains([bubble, cavity[:5] + cavity[6:]])
 
 
 def test_gmsh_sizing_from_curvature_amplifies_a_jump_in_node_spacing(tmp_path):
@@ -1466,6 +1675,66 @@ def test_production_runner_records_a_failed_cut(landing_run, tmp_path):
 # --- the ordinary path ----------------------------------------------------------------------------
 
 
+HAIRPIN_RUN = """
+import runpy, sys
+sys.path.insert(0, sys.argv[1] + "/src")
+import numpy as np
+from faraday_singularity import driver, surgery
+
+original = driver.CollapseDriver.reset_after_cut
+
+
+def hairpin(self, record):  # right after the cut: a midside node 0.55 chords off its chord
+    m = original(self, record)
+    pb = self.pb
+    seg = next(c for c in pb.interface_segments() if not c["open"])
+    P = np.column_stack([seg["r"], seg["z"]])
+    k = 2 * int(np.argmax(P[1::2, 0])) + 1
+    a, b = P[k - 1], P[k + 1]
+    L = float(np.hypot(*(b - a)))
+    t = (b - a) / L
+    new = 0.5 * (a + b) + 0.55 * L * np.array([-t[1], t[0]])  # towards the gas
+    node = next(n for n in surgery.mesh_nodes(pb.get_mesh("liquid/interface"))
+                if (n.x(0), n.x(1)) == (P[k, 0], P[k, 1]))
+    for level in range(node.ntstorage()):
+        for i in (0, 1):
+            node.set_x_at_t(level, i, float(new[i]))
+    for i in (0, 1):
+        node.set_x_lagr(i, float(new[i]))
+    pb.invalidate_cached_mesh_data()
+    self._post_cut_cache = None
+    return m
+
+
+driver.CollapseDriver.reset_after_cut = hairpin
+sys.argv = [sys.argv[1] + "/simulationCases/run_faraday.py"] + sys.argv[2:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+def test_production_runner_stops_cleanly_on_an_unresolved_interface(landing_run, tmp_path):
+    """An element of the bubble whose midside node stands 0.55 chords off its chord after the cut,
+    the hairpin of 131 degrees on which a production run failed with a Newton residual of inf at
+    every step size, ends the run before its first step as a clean stop: interface-unresolved,
+    trigger edge-turn (above the 90 degrees of a freshly built mesh), the end state dumped, and the
+    run completed, not failed."""
+    out = tmp_path / "runtime"
+    proc = _run_faraday(landing_run["cut_case"], "--restart-from", landing_run["state"], "--out",
+                        out, script=HAIRPIN_RUN)
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    status = json.loads((out / "run_status.json").read_text())
+    assert status["state"] == "completed" and status["cut"]["outcome"] == "cut"
+    stop = status["collapse"]["stop"]
+    assert stop["reason"] == "interface-unresolved" and stop["trigger"] == "edge-turn"
+    assert stop["chain"] == "bubble" and stop["turn"] == pytest.approx(131.1, abs=0.5)
+    assert stop["fresh"] is True and stop["limit"] == 90.0 and status["collapse"]["steps"] == 0
+    end = Path(stop["end_state"])
+    assert end.is_file() and end.with_suffix(".json").is_file() and end.parent == out / "states"
+    events = [json.loads(x) for x in (out / "events.jsonl").read_text().splitlines()]
+    assert events[-1]["event"] == "stop" and events[-1]["reason"] == "interface-unresolved"
+    assert _columns(out / "chains.txt")["edge_turn_bubble"][0] == pytest.approx(131.1, abs=0.5)
+
+
 def _reference_mesh_class():
     """``FaradayCylinderMesh`` as at commit 9e0d8a1 (on pyoomph's plain ``GmshTemplate``)."""
     try:
@@ -1594,6 +1863,45 @@ def test_the_ordinary_driver_runs_as_at_9e0d8a1(tmp_path):
     for name in sorted(n for n in names if n.startswith("profiles/") or n == "diagnostics.txt"):
         assert (a / name).read_text().splitlines()[0] == (b / name).read_text().splitlines()[0]
         assert np.allclose(np.loadtxt(a / name), np.loadtxt(b / name), rtol=1e-10, atol=1e-13), name
+
+
+def test_pre_cut_runs_are_as_at_4d2ea17(tmp_path):
+    """Before a cut nothing has changed: the short ordinary run of the collapse driver above, with
+    rebuilds and dumps, gives the same output files, to the byte (the wall time aside), as the
+    driver and problem of commit 4d2ea17, each in a fresh process with MKL on one thread."""
+    ref = tmp_path / "ref"
+    try:
+        archive = subprocess.run(["git", "-C", str(ROOT), "archive", "4d2ea17", "src"],
+                                 capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("commit 4d2ea17 is not available")
+    ref.mkdir()
+    subprocess.run(["tar", "-x", "-C", str(ref)], input=archive, check=True)
+    physics = dict(PHYSICS, forcing={"Gamma": 0.3, "detuning": 1.0, "phase": 0.0},
+                   initial={"amplitude": 0.2}, container={"mode": 1, "depth": 2.0})
+    env = dict(os.environ, MKL_NUM_THREADS="1", OMP_NUM_THREADS="1")
+    runs = {}
+    for name, src_dir in (("4d2ea17", ref / "src"), ("head", ROOT / "src")):
+        out = tmp_path / name
+        proc = subprocess.run([sys.executable, "-c", DRIVER_RUN, str(src_dir), str(out),
+                               json.dumps(physics)], capture_output=True, text=True, timeout=900,
+                              cwd=tmp_path, env=env, check=False)
+        assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+        runs[name] = out
+    a, b = runs["4d2ea17"], runs["head"]
+    names = sorted(f.relative_to(a).as_posix() for f in a.rglob("*") if f.is_file()
+                   and not f.relative_to(a).parts[0].startswith("_"))
+    assert names == sorted(f.relative_to(b).as_posix() for f in b.rglob("*") if f.is_file()
+                           and not f.relative_to(b).parts[0].startswith("_"))
+    assert json.loads((a / "result.json").read_text())["remesh_count"] >= 2
+    head_a, rows_a = _table(a / "collapse.txt")
+    head_b, rows_b = _table(b / "collapse.txt")
+    wall = head_a[2:].split("\t").index("wall")
+    keep = [k for k in range(rows_a.shape[1]) if k != wall]
+    assert head_a == head_b and np.array_equal(rows_a[:, keep], rows_b[:, keep], equal_nan=True)
+    for name in names:
+        if name != "collapse.txt" and not name.endswith(".dump"):
+            assert (a / name).read_bytes() == (b / name).read_bytes(), name
 
 
 def test_dumps_do_not_change_the_trajectory(tmp_path):

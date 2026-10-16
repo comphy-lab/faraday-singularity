@@ -1944,18 +1944,33 @@ def test_after_a_cut_a_kink_the_rebuild_would_meet_stops_the_run_cleanly(tmp_pat
 # --- after a cut: the spacing the remesh rule reads, the dumps, a continuation ------------------
 
 
+def _with_midside_nodes(vertices, arc=None, speed=None) -> np.ndarray:
+    """The parameters of the nodes of quadratic elements from those of their vertices: each element
+    gains a midside node half way between its vertices, as a mesh's interface has it, in its
+    parameter or, given the arc length ``arc`` of the parameter and its derivative ``speed``, in
+    arc length."""
+    v = np.asarray(vertices, dtype=float)
+    m = 0.5 * (v[:-1] + v[1:])
+    if arc is not None:
+        target = 0.5 * (arc(v[:-1]) + arc(v[1:]))
+        for _ in range(8):
+            m = m - (arc(m) - target) / speed(m)
+    return np.concatenate([np.column_stack([v[:-1], m]).ravel(), v[-1:]])
+
+
 class CutSurfaceProblem(CutProblem):
     """An open chain that is a trough ``z = 4.69 + r^2/(2 R)`` on the axis (apex radius ``R``) out
     to ``r = 0.2``, above a spherical bubble of radius ``R_b`` (0.1, blunter than the trough: the
     trough sets the local scale) whose top lies at 4.68, with the nodes of both chains spaced as on
-    a mesh after the cut: half the finer of the cut's sizing, ``h_tip + CUT_GRADING d`` with ``d``
-    the distance to the nearest tip and to the bridge, and the focus of the last rebuild: the
-    focus size near the axis (``radius``), or with regions the size of the finest region that holds
-    the node and ``outside`` elsewhere. A rebuild cannot coarsen the focus beyond ``coarsest``, as
-    where the mesh also follows the curvature. With ``dimple = (D, w)`` a jet hangs from the
-    bubble's top into it, ``z -> z - D exp(-(r/w)^2)`` on its upper half, and with ``bottom = (D,
-    w)`` its bottom rises into one, ``z -> z + D exp(-(r/w)^2)`` on its lower half; ``bubble_spacing``
-    spaces the bubble's nodes that many times wider than the mesh rule."""
+    a mesh after the cut, quadratic elements (a midside node half way between two vertices) as
+    long as the finer of the cut's sizing, ``h_tip + CUT_GRADING d`` with ``d`` the distance to
+    the nearest tip and to the bridge, and the focus of the last rebuild at the finer end of the
+    element: the focus size near the axis (``radius``), or with regions the size of the finest
+    region that holds the node and ``outside`` elsewhere. A rebuild cannot coarsen the focus
+    beyond ``coarsest``, as where the mesh also follows the curvature. With ``dimple = (D, w)`` a
+    jet hangs from the bubble's top into it, ``z -> z - D exp(-(r/w)^2)`` on its upper half, and
+    with ``bottom = (D, w)`` its bottom rises into one, ``z -> z + D exp(-(r/w)^2)`` on its lower
+    half; ``bubble_spacing`` spaces the bubble's nodes that many times wider than the mesh rule."""
 
     def __init__(self, h_tip, focus_size, R=0.08, coarsest=math.inf, R_b=0.1, dimple=None,
                  bottom=None, bubble_spacing=1.0, outside=0.01, **kw):
@@ -2001,19 +2016,24 @@ class CutSurfaceProblem(CutProblem):
             return self._bubble[1]
         sizing = {"h_tip": self.h_tip, "h_bridge": self.h_tip, "grading": CUT_GRADING}
         tips = [self.bubble_point(0.0)[1], self.bubble_point(math.pi)[1], 4.69]
+        def size(x):
+            r, z = self.bubble_point(x)
+            return self.bubble_spacing * min(self.focus_at(r, z),
+                                             float(cut_size_field([r], [z], tips, sizing)[0]))
+
         th = [0.0]
         while th[-1] < math.pi:
             x = th[-1]
             r, z = self.bubble_point(x)
-            h = self.bubble_spacing * min(self.focus_at(r, z),
-                                          float(cut_size_field([r], [z], tips, sizing)[0]))
-            dx = 0.5 * h / self.R_b
-            for _ in range(4):  # a chord of half an element
+            # an element as long as the size at its finer end, from vertex to vertex
+            h = min(size(x), size(x + size(x) / self.R_b))
+            dx = h / self.R_b
+            for _ in range(4):
                 r1, z1 = self.bubble_point(x + dx)
-                dx *= 0.5 * h / math.hypot(r1 - r, z1 - z)
+                dx *= h / math.hypot(r1 - r, z1 - z)
             th.append(x + dx)
         th[-1] = math.pi
-        P = np.array([self.bubble_point(x) for x in th])
+        P = np.array([self.bubble_point(x) for x in _with_midside_nodes(th)])
         P[[0, -1], 0] = 0.0
         seg = self._chain("bubble", P[:, 0], P[:, 1], ("axis", "axis"))
         self._bubble = (key, seg)
@@ -2021,13 +2041,29 @@ class CutSurfaceProblem(CutProblem):
 
     def interface_segments(self):
         bubble = self.bubble_chain()
-        pts = [(0.0, 4.69)]
-        while pts[-1][0] < 0.2:
-            r, z = pts[-1]
-            h = min(self.focus_at(r, z), self.h_tip + CUT_GRADING * math.hypot(r, z - 4.69))
-            r += 0.5 * h / math.sqrt(1.0 + (r / self.R) ** 2)  # half an element of arc length
-            pts.append((r, 4.69 + r * r / (2.0 * self.R)))
-        P = np.array(pts)
+        def size(r):
+            z = 4.69 + r * r / (2.0 * self.R)
+            return min(self.focus_at(r, z), self.h_tip + CUT_GRADING * math.hypot(r, z - 4.69))
+
+        R = self.R
+
+        def arc(r):
+            return 0.5 * (r * np.sqrt(1 + (r / R) ** 2) + R * np.arcsinh(r / R))
+
+        def speed(r):
+            return np.sqrt(1 + (r / R) ** 2)
+
+        rs = [0.0]
+        while rs[-1] < 0.2:
+            r = rs[-1]
+            # an element of arc length as long as the size at its finer end
+            h = min(size(r), size(r + size(r)))
+            s, x = arc(r) + h, r + h / speed(r)
+            for _ in range(8):
+                x -= (arc(x) - s) / speed(x)
+            rs.append(float(x))
+        rs = _with_midside_nodes(rs, arc=arc, speed=speed)
+        P = np.column_stack([rs, 4.69 + rs * rs / (2.0 * R)])
         s = np.linspace(0.0, 1.0, 101)[1:]
         P = np.vstack([P, np.column_stack([P[-1, 0] + (R_C - P[-1, 0]) * s, P[-1, 1] + s])])
         return [bubble, self._chain("open", P[:, 0], P[:, 1], ("axis", "fixed"))]
@@ -2055,23 +2091,38 @@ def _remesh_regions(event: dict) -> dict:
     return {g["name"]: g for g in event["regions"]}
 
 
-@pytest.mark.parametrize("R", [0.08, 4e-3])
-def test_after_a_cut_the_tips_the_cut_made_keep_its_focus_size(tmp_path, R):
-    """The tips the cut made, the cavity's and the bubble's top, keep the cut's focus size,
-    focus_size cut radii (6.25e-4 here): a broad trough on the open chain (R = 0.08, a focus of
-    0.01 by the rule before the cut) does not coarsen them, and a sharp one (R = 4e-3, ell/8 =
-    5e-4) does not refine them, as the landing run's h_floor (1e-5) would let it: the driver's focus
-    is floored at the cut's focus size after a cut, and no rebuild is made."""
+@pytest.mark.parametrize("R", [0.08, 4e-3, 2e-3])
+def test_after_a_cut_the_tips_the_cut_made_are_meshed_at_their_own_scale(tmp_path, R):
+    """The tips the cut made, the cavity's and the bubble's top, are meshed at their own scale,
+    between the landing run's h_floor (1e-5) and the cut's focus size (focus_size cut radii,
+    6.25e-4 here), the coarsest size they may have, not a fixed one: a broad trough on the open
+    chain (R = 0.08, ell/8 = 0.01) does not coarsen them; a sharper one (R = 4e-3, ell/8 = 5e-4)
+    lies within the rule's tolerance (refine_ratio 1.5) of the cut's 6.25e-4, so no rebuild is
+    made; a sharp one (R = 2e-3, ell/8 = 2.5e-4) refines the cavity's tip in its own region, 20 ell
+    wide, while the rest of the cut's region (cavity_tip_cut, 20 cut radii) and the bubble's top
+    keep the cut's focus size. The driver's focus follows the rule, floored at h_floor only."""
     s, pb, _ = _surface_cut(tmp_path, max_steps=12, problem={"R": R})
     tab, rows = _rows(tmp_path), _chains_rows(tmp_path)
     h_cut = 6.25e-4
-    assert not [e for e in _read_events(tmp_path) if e["event"].startswith("remesh")]
-    assert np.all(tab["remesh_count"] == 0)
-    assert tab["h_focus"][0] == pytest.approx(max(R / s.elements_per_scale, h_cut))
-    for tip in ("cavity_tip", "bubble_top"):  # the longest element in each tip's region
-        assert rows[f"h_{tip}"] == pytest.approx(np.full(len(rows["step"]), h_cut), rel=2e-2)
-    r, z, _, _ = pb.interface_arrays()  # the tip is still meshed at h_tip
-    assert 2 * math.hypot(r[1] - r[0], z[1] - z[0]) == pytest.approx(6.25e-4, rel=1e-3)
+    remesh = [e for e in _read_events(tmp_path) if e["event"].startswith("remesh")]
+    assert tab["h_focus"][0] == pytest.approx(R / s.elements_per_scale)
+    if R > 2.5e-3:
+        assert not remesh and np.all(tab["remesh_count"] == 0)
+        for tip in ("cavity_tip", "bubble_top"):  # the longest element in each tip's region
+            assert rows[f"h_{tip}"] == pytest.approx(np.full(len(rows["step"]), h_cut), rel=2e-2)
+        r, z, _, _ = pb.interface_arrays()  # the tip is still meshed at h_tip
+        assert 2 * math.hypot(r[1] - r[0], z[1] - z[0]) == pytest.approx(6.25e-4, rel=1e-3)
+        return
+    assert [(e["event"], e["step"], e["asked_by"]) for e in remesh] == [
+        ("remesh", 1, ["cavity_tip"])]
+    g = _remesh_regions(remesh[0])
+    assert g["cavity_tip"]["target"] == pytest.approx(R / 8) == g["cavity_tip"]["new_size"]
+    assert g["cavity_tip"]["radius"] == pytest.approx(20 * R)
+    for name in ("cavity_tip_cut", "bubble_top"):
+        assert g[name]["new_size"] == pytest.approx(h_cut)
+        assert g[name]["radius"] == pytest.approx(0.2)
+    assert rows["h_cavity_tip"][-1] == pytest.approx(R / 8, rel=5e-2)
+    assert rows["h_bubble_top"][-1] == pytest.approx(h_cut, rel=2e-2)
 
 
 def test_after_a_cut_a_feature_coarsens_in_its_own_region(tmp_path):
@@ -2096,7 +2147,7 @@ def test_after_a_cut_a_feature_coarsens_in_its_own_region(tmp_path):
         for tip in ("cavity_tip", "bubble_top"):
             assert g[tip]["new_size"] == pytest.approx(6.25e-4)
     bottom = _remesh_regions(remesh[-1])["bubble_bottom"]
-    assert bottom["new_size"] == pytest.approx(6.25e-4 * 1.5**3)
+    assert bottom["new_size"] == pytest.approx(6.25e-4 * 1.5**3, rel=2e-3)  # from its shortest
     assert bottom["new_size"] >= s.coarsen_ratio * bottom["target"]
     assert rows["size_cavity_tip"][-1] == pytest.approx(6.25e-4)
     assert rows["h_bubble_bottom"][-1] == pytest.approx(bottom["new_size"], rel=5e-2)
@@ -2290,17 +2341,33 @@ def test_after_a_cut_the_jets_of_the_bubble_tips_are_measured(tmp_path, monkeypa
     assert not [e for e in _read_events(tmp_path / "b") if e["event"].startswith("tip-jet")]
 
 
-def test_after_a_cut_a_jet_into_the_bubble_sets_the_scale_but_not_the_mesh_of_its_tip(tmp_path):
+def test_after_a_cut_a_jet_into_the_bubble_sets_the_scale_and_the_mesh_of_its_tip(tmp_path):
     """While the open chain's trough asks for a focus of 0.01, a thin jet hanging into the bubble
-    from its top (base radius about 8e-4) sets the local scale, and with it the step, but the
-    bubble's top is a tip the cut made: its mesh keeps the cut's focus size, and no rebuild
-    refines it below that (the focus is floored at the cut's focus size)."""
-    _surface_cut(tmp_path, max_steps=1, problem={"dimple": (3e-4, 3e-4)})
+    from its top (base radius about 8.6e-4) sets the local scale, and with it the step and the
+    driver's focus (ell/8, floored at h_floor only), and the mesh of the bubble's top, a tip the cut
+    made, follows its scale: the first rebuild refines its region (to ell/8, by at most the bounded
+    factor) and the region of the jet's base (its apex radius over 8), while the rest of the cut's
+    region keeps the cut's focus size."""
+    s, _, _ = _surface_cut(tmp_path, max_steps=1, problem={"dimple": (3e-4, 3e-4)})
     tab, rows = _rows(tmp_path), _chains_rows(tmp_path)
     assert rows["jet_born_bubble_top"][0] == 1 and rows["r_j_bubble_top"][0] < 1e-3
     assert tab["ell"][0] == rows["ell_bubble"][0] == rows["r_j_bubble_top"][0]
-    assert tab["h_focus"][0] == pytest.approx(6.25e-4)  # ell/8 = 1e-4, floored
-    assert not [e for e in _read_events(tmp_path) if e["event"] == "remesh"]
+    assert rows["R_apex_bubble_top"][0] > rows["r_j_bubble_top"][0]  # a broad base: no scale
+    assert tab["h_focus"][0] == pytest.approx(tab["ell"][0] / 8)
+    remesh = [e for e in _read_events(tmp_path) if e["event"] == "remesh"]
+    assert [e["step"] for e in remesh] == [1]
+    assert remesh[0]["asked_by"] == ["bubble_top", "jet_base_bubble_top"]
+    g = _remesh_regions(remesh[0])
+    top = g["bubble_top"]
+    assert top["target"] == pytest.approx(rows["r_j_bubble_top"][0] / 8)
+    assert top["new_size"] == pytest.approx(max(top["target"], top["h_max"] / s.max_refine_factor))
+    base = g["jet_base_bubble_top"]
+    assert base["target"] == pytest.approx(rows["R_apex_bubble_top"][0] / 8) == base["new_size"]
+    assert (base["r"], base["z"]) == pytest.approx((rows["r_j_bubble_top"][0],
+                                                    rows["z_b_bubble_top"][0]))
+    assert base["radius"] == pytest.approx(8 * rows["R_apex_bubble_top"][0])
+    assert g["bubble_top_cut"]["new_size"] == pytest.approx(6.25e-4)
+    assert g["cavity_tip"]["new_size"] == pytest.approx(6.25e-4)
 
 
 def test_after_a_cut_a_jet_on_the_bubble_bottom_refines_its_own_region(tmp_path):

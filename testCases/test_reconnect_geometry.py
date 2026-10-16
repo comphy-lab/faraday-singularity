@@ -836,23 +836,45 @@ def _regions(segs, cut, s, cavity=None, **kw):
                                                      cut, s, **kw)}
 
 
-def test_the_tips_the_cut_made_are_meshed_at_the_cut_focus_size_whatever_their_scale():
-    """The cavity's tip and the bubble's top, which the cut made, are meshed at the cut's focus
-    size, focus_size cut radii: an apex radius of 1e-4 (a size of 6.25e-6 by the rule, the landing
-    run's h_floor or above) does not refine them, and their regions cover the cut's focus radius
-    and the jet hanging from the top (base radius about 3e-3, 0.01 deep)."""
+def test_the_tips_the_cut_made_are_meshed_at_their_own_scale_never_coarser_than_the_cut():
+    """The cavity's tip and the bubble's top, which the cut made, are meshed at their own scale,
+    clipped to between the landing run's h_floor and the cut's focus size (focus_size cut radii),
+    the coarsest size they may have: an apex radius of 1e-4 at the cavity's tip asks for
+    1e-4/16, the floor here, within 20 of its radii, and the jet hanging from the bubble's top
+    (base radius about 3e-3, 0.01 deep, its tip of radius about 2e-4) for its tip's radius over
+    16 within 20 of those; beside each, ``<tip>_cut`` keeps the cut's focus size over the cut's
+    focus radius and the jet. A broad tip (radius 0.05) is meshed at the cut's focus size over
+    that region alone, as the cut sized it."""
     s = rc.ReconnectSettings(delta=1e-3)
+    h_cut, r_cut = s.focus_size * 1e-3, s.focus_radius * 1e-3
     segs = _post_cut_segs()
-    g = _regions(segs, {"delta": 1e-3, "rmin": 1e-3}, s, h_floor=6.25e-6)
-    for name in rc.FRESH_TIPS:
-        assert g[name]["target"] == pytest.approx(s.focus_size * 1e-3) == g[name]["floor"]
-        assert g[name]["r"] == 0.0
-    assert g["cavity_tip"]["z"] == segs[1]["z"][0] and g["bubble_top"]["z"] == segs[0]["z"][-1]
-    assert g["cavity_tip"]["radius"] == pytest.approx(s.focus_radius * 1e-3)
+    cut = {"delta": 1e-3, "rmin": 1e-3}
+    g = _regions(segs, cut, s, h_floor=6.25e-6)
+    rec = rc.post_cut_record(segs)
     top = rc.tip_jet(rc.bubble_end(segs[0], "bubble_top"), **JET_KW)
-    assert g["bubble_top"]["radius"] == pytest.approx(2 * math.hypot(top["r_j"], top["rise"]))
-    assert g["bubble_top"]["radius"] > 0.02  # the jet, 0.01 long, reaches beyond 20 cut radii
+    reach = 2 * math.hypot(top["r_j"], top["rise"])
+    assert g["cavity_tip"]["target"] == pytest.approx(6.25e-6) and g["cavity_tip"]["ell"] == 1e-4
+    assert g["cavity_tip"]["radius"] == pytest.approx(20 * 1e-4)
+    R_top = rec["R_bubble_top"]
+    assert R_top < top["r_j"] and g["bubble_top"]["ell"] == pytest.approx(R_top)
+    assert g["bubble_top"]["target"] == pytest.approx(R_top / 16)
+    assert g["bubble_top"]["radius"] == pytest.approx(20 * R_top)
+    for name in rc.FRESH_TIPS:
+        assert g[name]["r"] == 0.0 and g[name]["floor"] == 6.25e-6
+        assert g[name + "_cut"]["target"] == pytest.approx(h_cut) == g[name + "_cut"]["floor"]
+        assert g[name + "_cut"]["z"] == g[name]["z"]
+    assert g["cavity_tip"]["z"] == segs[1]["z"][0] and g["bubble_top"]["z"] == segs[0]["z"][-1]
+    assert g["cavity_tip_cut"]["radius"] == pytest.approx(r_cut)
+    assert g["bubble_top_cut"]["radius"] == pytest.approx(reach) and reach > r_cut
     assert "bubble_bottom" not in g  # a sphere's bottom, no landing focus: no feature
+    # the floor is the landing run's h_floor
+    assert _regions(segs, cut, s, h_floor=2e-5)["cavity_tip"]["target"] == pytest.approx(2e-5)
+    # a broad tip: the cut's focus size over its focus radius, no second region
+    broad = _regions(segs, cut, s, h_floor=6.25e-6,
+                     cavity={"z_tip": float(segs[1]["z"][0]), "kappa": 1.0 / 0.05, "r_j": 0.0,
+                             "rise": 0.0, "bump": False, "flat_bump": False})
+    assert broad["cavity_tip"]["target"] == pytest.approx(h_cut)
+    assert broad["cavity_tip"]["radius"] == pytest.approx(r_cut) and "cavity_tip_cut" not in broad
 
 
 def test_the_bubble_bottom_keeps_its_landing_resolution_far_from_the_cut():
@@ -909,3 +931,378 @@ def test_region_spacing_reads_the_longest_and_the_free_shortest_element():
     assert h_max == pytest.approx(h.max()) and h_min == pytest.approx(h.min())
     assert rc.region_spacing(segs, {"r": 1.0, "z": 0.0, "radius": 1e-3}, [], None, 1e-4) == (
         pytest.approx(math.nan, nan_ok=True), pytest.approx(math.nan, nan_ok=True))
+
+
+# --- after the cut: the interface on its quadratic elements, the bases of the jets ---------------
+
+
+def _p2_line(n=41, L=1e-4, z=4.6):
+    """A straight chain of ``n`` quadratic elements of chord ``L``: vertices and midside nodes."""
+    r = np.linspace(0.0, n * L, 2 * n + 1)
+    return np.column_stack([r, np.full_like(r, z)])
+
+
+def _bent(P, k, turn_deg=None, f=None):
+    """The chain ``P`` with the midside node of element ``k`` moved off the chord so that its
+    tangent turns by ``turn_deg`` across it (``s/L = tan(turn/2)/4`` at mid-chord), or along the
+    chord to ``f`` of it."""
+    Q = np.array(P, dtype=float)
+    a, b = Q[2 * k], Q[2 * k + 2]
+    c = b - a
+    L = math.hypot(*c)
+    n = np.array([-c[1], c[0]]) / L
+    s = 0.0 if turn_deg is None else L * math.tan(math.radians(turn_deg) / 2) / 4
+    Q[2 * k + 1] = a + (0.5 if f is None else f) * c + s * n
+    return Q
+
+
+def test_p2_edges_on_a_circle_a_hairpin_and_a_sliding_midside_node():
+    """On a circle of radius R the bulge of an element is s/L = tan(phi/2)/2, about L/(8R), and its
+    tangent turns by the angle it subtends; a midside node pushed 0.55 chords off the chord turns
+    its element by 2 atan(2.2) = 131 degrees, the hairpin of the failed run; a midside node slid
+    along the chord to 0.28 of it is read as that, with no turn. A chain with an even number of
+    nodes is no chain of quadratic elements."""
+    R, phi = 1e-3, math.radians(3.0)  # each element subtends 2 phi
+    th = np.arange(41) * phi
+    e = rc.p2_edges(np.column_stack([R * np.sin(th), 4.6 - R * np.cos(th)]))
+    L = 2 * R * math.sin(phi)
+    assert e["L"] == pytest.approx(np.full(20, L), rel=1e-12)
+    assert e["bulge"] == pytest.approx(np.full(20, math.tan(phi / 2) / 2), rel=1e-9)
+    assert e["bulge"] == pytest.approx(np.full(20, L / (8 * R)), rel=2e-3)
+    exact = math.degrees(2 * math.atan(2 * math.tan(phi / 2)))
+    assert e["turn"] == pytest.approx(np.full(20, exact), rel=1e-9)
+    assert e["turn"] == pytest.approx(np.full(20, math.degrees(2 * phi)), rel=1e-3)
+    assert e["f"] == pytest.approx(np.full(20, 0.5), abs=1e-9)
+    P = _p2_line()
+    Q = P.copy()
+    Q[2 * 7 + 1] += [0.0, 0.55 * 1e-4]
+    e = rc.p2_edges(Q)
+    assert e["bulge"][7] == pytest.approx(0.55) and e["turn"][7] == pytest.approx(131.1, abs=0.05)
+    assert e["turn"][7] == pytest.approx(math.degrees(2 * math.atan(2.2)), rel=1e-9)
+    assert np.all(e["turn"][np.arange(41) != 7] == pytest.approx(0.0, abs=1e-9))
+    rd = rc.edge_reading(Q)
+    assert rd["turn"] == e["turn"][7] and rd["turn_index"] == 15
+    assert rd["turn_L"] == pytest.approx(1e-4)
+    assert (rd["turn_r"], rd["turn_z"]) == pytest.approx(tuple(Q[15]))
+    slid = rc.p2_edges(_bent(P, 12, f=0.28))
+    assert slid["f"][12] == pytest.approx(0.28) and slid["turn"][12] == pytest.approx(0.0, abs=1e-9)
+    assert rc.edge_reading(_bent(P, 12, f=0.28))["midside"] == pytest.approx(0.22)
+    with pytest.raises(ValueError):
+        rc.p2_edges(P[:-1])
+    assert math.isnan(rc.edge_reading(P[:-1])["turn"]) and rc.edge_reading(P[:-1])["edges"] is None
+
+
+def _guard(P, fresh, h_floor=1e-6, **kw):
+    s = rc.ReconnectSettings(delta=1e-3, **kw)
+    return rc.interface_guard({"bubble": rc.edge_reading(P)}, s, fresh=fresh, h_floor=h_floor,
+                              refine_ratio=1.5)
+
+
+@pytest.mark.parametrize("fresh", [True, False])
+def test_the_interface_guard_refines_beyond_30_degrees_and_stops_beyond_90_or_120(fresh):
+    """A rebuild refines where an element's tangent turns by more than 30 degrees across it or its
+    midside node lies more than a tenth of the chord from mid-chord; the run stops
+    (interface-unresolved) beyond 90 degrees on a freshly built mesh and 120 on any, and where the
+    midside node lies more than a fifth of the chord off mid-chord, and also where an element that
+    asks for a refinement is already at h_floor (feature-below-floor)."""
+    P = _p2_line()
+    for turn, refine in ((29.0, False), (31.0, True)):
+        out = _guard(_bent(P, 9, turn), fresh)
+        assert out["stop"] is None and bool(out["refine"]) == refine, turn
+    assert list(_guard(_bent(P, 9, 31.0), fresh)["refine"]["bubble"]) == [9]
+    for turn in (89.0, 91.0, 119.0, 121.0):
+        out = _guard(_bent(P, 9, turn), fresh)
+        stops = turn > (90.0 if fresh else 120.0)
+        assert (out["stop"] is not None) == stops, turn
+        if stops:
+            stop = out["stop"]
+            assert stop["reason"] == "interface-unresolved" and stop["trigger"] == "edge-turn"
+            assert stop["chain"] == "bubble" and stop["turn"] == pytest.approx(turn)
+            assert stop["limit"] == (90.0 if fresh else 120.0) and stop["fresh"] is fresh
+            assert stop["index"] == 19 and stop["L"] == pytest.approx(1e-4)
+        else:
+            assert list(out["refine"]["bubble"]) == [9]
+    out = _guard(_bent(P, 9, f=0.31), fresh)  # 0.19 off mid-chord: a refinement
+    assert out["stop"] is None and list(out["refine"]["bubble"]) == [9]
+    stop = _guard(_bent(P, 9, f=0.29), fresh)["stop"]  # 0.21 off: a stop
+    assert stop["trigger"] == "edge-midside" and stop["midside"] == pytest.approx(0.21)
+    # an element at the floor that asks for a refinement: no rebuild can resolve it
+    stop = _guard(_bent(P, 9, 40.0), fresh, h_floor=1e-4)["stop"]
+    assert stop["trigger"] == "feature-below-floor" and stop["h_floor"] == 1e-4
+    assert _guard(_bent(P, 9, 40.0), fresh, h_floor=6e-5)["stop"] is None  # 1e-4 > 1.5 x 6e-5
+    # the thresholds are settings of the cut
+    assert _guard(_bent(P, 9, 31.0), fresh, edge_turn_refine=35.0)["refine"] == {}
+
+
+def _as_mesh_nodes(points, samples=2):
+    """A chain as a rebuild would mesh it: its points as vertices and the midside node of each
+    element on the uniform Catmull-Rom spline through them (pyoomph's and gmsh's), half way in
+    its parameter."""
+    from faraday_singularity.selfcontact import catmull_rom
+
+    return catmull_rom(points[:, 0], points[:, 1], samples=samples)
+
+
+def test_the_guard_does_not_fire_on_freshly_cut_chains(thread_scan):
+    """The chains a cut makes on a slender thread, meshed as a rebuild would (their nodes as
+    vertices, midside nodes on the spline through them), bend by a few degrees per element and
+    keep their midside nodes at mid-chord within the cut's region (focus_radius cut radii of the
+    neck: the caps, the splices, the thread behind them): the guard neither refines nor stops
+    there. (Farther out the synthetic thread's bubble bottom is sampled at 0.02 on a radius of
+    0.03, which the guard rightly reads as too coarse.)"""
+    for r, z, rn in thread_scan.values():
+        delta = 1.05 * rn
+        s, _, _, _, chains, cg = _cut_on(r, z, delta)
+        z_n = 0.5 * (cg.z_bubble_top + cg.z_cavity_tip)
+        readings = {}
+        for c in chains:
+            P = _as_mesh_nodes(c.points)
+            near = np.flatnonzero(np.hypot(P[:, 0], P[:, 1] - z_n) <= s.focus_radius * delta)
+            lo, hi = near.min() // 2 * 2, -(-near.max() // 2) * 2  # whole elements
+            readings["open" if c.is_open else "bubble"] = rc.edge_reading(P[lo:hi + 1])
+        for rd in readings.values():
+            assert rd["turn"] < 15.0 and rd["midside"] < 0.05, rd
+        out = rc.interface_guard(readings, s, fresh=True, h_floor=6.25e-6, refine_ratio=1.5)
+        assert out == {"stop": None, "refine": {}}
+
+
+def _groove(w=1e-3, r_jet=1e-3, h=2.5e-5, depth=5.0, z_c=4.70, z_tip=4.71):
+    """An open chain from the axis whose jet (a cylinder of radius ``r_jet`` with a rounded top at
+    ``z_tip``) stands in a groove of width ``w`` with a semicircular bottom (radius ``w/2``,
+    centre at ``z_c``) and walls ``depth`` widths high, then runs out to the wall: the nodes of
+    quadratic elements ``h`` long, coarser beyond the groove. Returns the chain and the index of
+    the groove's apex."""
+    R0 = 0.5 * w
+
+    def seg(a, b, spacing=0.5 * h):
+        n = max(1, math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / spacing))
+        return [np.array(a) + (np.array(b) - np.array(a)) * k / n for k in range(n)]
+
+    def arc(c, R, a0, a1):
+        n = max(2, math.ceil(abs(a1 - a0) * R / (0.5 * h)))
+        return [np.array([c[0] + R * math.cos(a), c[1] + R * math.sin(a)])
+                for a in np.linspace(a0, a1, n + 1)[:-1]]
+
+    top = z_tip - r_jet
+    out = (r_jet + w + 14.0 * w, z_c + depth * w + 14.0 * w)
+    pts = (arc((0.0, top), r_jet, 0.5 * math.pi, 0.0)  # the jet's rounded top
+           + seg((r_jet, top), (r_jet, z_c))  # down its side
+           + arc((r_jet + R0, z_c), R0, math.pi, 2 * math.pi)  # the groove's bottom
+           + seg((r_jet + w, z_c), (r_jet + w, z_c + depth * w))  # up the cavity wall
+           + seg((r_jet + w, z_c + depth * w), out)  # fine for 20 widths beyond the groove,
+           + seg(out, (0.5, 5.0), 2e-3) + [np.array([R_C, 5.2])])  # then coarse to the wall
+    P = np.array(pts)
+    if len(P) % 2 == 0:
+        P = np.vstack([P[:-1], [[0.5 * (P[-2, 0] + R_C), 5.1]], P[-1:]])
+    P[0, 0] = 0.0
+    apex = int(np.argmin(np.where(P[:, 0] < 0.1, P[:, 1], np.inf)))
+    return P, apex
+
+
+def test_the_apex_and_the_gap_of_an_analytic_groove():
+    """At the base of a jet standing in a groove of width w with a semicircular bottom, the apex
+    radius read on the vertices (the smaller of the fits over 2 and 4 of them on either side) is
+    the bottom's radius w/2, and the groove's fold pair (straddling the apex, closer than a
+    quarter of the arc between them) lies across its width: both within 5 percent; the walls
+    being parallel, its opening angle is small."""
+    from faraday_singularity.collapse import Profile, jet_base
+
+    for w in (1e-3, 4e-4):
+        P, apex = _groove(w=w, h=w / 40)
+        jb = jet_base(Profile(P[:, 0], P[:, 1]), 1.5, 1e-6)
+        assert abs(jb.index - apex) <= 1 and jb.jet_born
+        a = rc.jet_base_apex(P[:, 0], P[:, 1], jb.index)
+        assert a["apex"] % 2 == 0 and a["R_apex"] == pytest.approx(w / 2, rel=0.05)
+        assert a["apex_z"] == pytest.approx(4.70 - w / 2, abs=w / 20)
+        # the chords to the vertices 6 away: 6 elements of w/40 along the bottom of radius w/2
+        assert a["groove_angle"] == pytest.approx(180.0 - math.degrees(0.3), abs=0.5)
+        g = rc.groove_gap(P[:, 0], P[:, 1], a["apex"], ratio=4.0, stop=1e-4, stop_elements=3.0)
+        assert g["gap"] == pytest.approx(w, rel=0.05)
+        i, j = g["pair"]
+        assert i < a["apex"] < j and 4.0 * g["gap"] < g["arc"]
+    # met by few elements (w/4), the chords reach up its walls: its opening angle is small
+    P, apex = _groove(w=1e-3, h=2.5e-4)
+    assert rc.jet_base_apex(P[:, 0], P[:, 1], apex)["groove_angle"] < 50.0
+    # an open groove (a wedge of 120 degrees) has no fold pair
+    s = np.linspace(0.0, 4e-3, 161)
+    V = np.column_stack([1e-3 + np.r_[-s[::-1], s[1:]] * math.sin(math.radians(60)),
+                         4.7 + np.abs(np.r_[-s[::-1], s[1:]]) * math.cos(math.radians(60))])
+    g = rc.groove_gap(V[:, 0], V[:, 1], 160, ratio=4.0, stop=1e-4, stop_elements=3.0)
+    assert math.isinf(g["gap"])
+    a = rc.jet_base_apex(V[:, 0], V[:, 1], 160)
+    # a corner: its radius is that of the fit, about its window (two vertices, 1e-4, each side)
+    assert a["groove_angle"] == pytest.approx(120.0, abs=0.5) and a["R_apex"] < 2e-4
+
+
+def test_the_annular_stop_fires_only_on_a_closing_groove_across_a_jet_base():
+    """A fold pair across the groove at the base of a jet whose gap falls below the fold limit
+    max(fold_stop, 3 h) is the annular-contact-approach, with the jet, its apex and R_apex; the
+    same fold away from a tracked apex is a self-contact-approach, a groove wider than the limit no
+    stop at all, and a fresh cut has none."""
+    s = rc.ReconnectSettings(delta=1e-3)
+    bubble = _bubble()
+    for w, stops in ((4e-4, True), (2e-3, False)):
+        P, apex = _groove(w=w, h=w / 40)
+        cavity = rc.Chain(P, ("axis", "fixed"))
+        cut = rc.cut_geometry([bubble, cavity], 3.0, gas_before=1.0)
+        a = rc.jet_base_apex(P[:, 0], P[:, 1], apex)
+        apexes = {"open": [{"tip": "cavity_tip", "index": a["apex"], "r": 1e-3 + w / 2,
+                            "z": a["apex_z"], "R_apex": a["R_apex"],
+                            "groove_angle": a["groove_angle"]}]}
+        stop = rc.post_cut_stops([bubble, cavity], cut, s, 1e-5, fold_stop=1e-3, apexes=apexes)
+        if not stops:
+            assert stop is None
+            continue
+        assert stop["reason"] == "annular-contact-approach" and stop["trigger"] == "fold-gap"
+        assert stop["chain"] == "open" and stop["jet"] == "cavity_tip"
+        assert stop["fold_gap"] == pytest.approx(w, rel=0.05) and stop["fold_limit"] == 1e-3
+        assert stop["apex_index"] == a["apex"] and stop["R_apex"] == pytest.approx(w / 2, rel=0.05)
+        i, j = stop["fold_pair"]
+        assert i < a["apex"] < j and stop["contact"] == "fold"
+        # not straddling a tracked apex: an ordinary self-contact
+        elsewhere = {"open": [dict(apexes["open"][0], index=len(P) - 3)]}
+        other = rc.post_cut_stops([bubble, cavity], cut, s, 1e-5, fold_stop=1e-3, apexes=elsewhere)
+        assert other["reason"] == "self-contact-approach" and other["trigger"] == "fold-gap"
+        assert rc.post_cut_stops([bubble, cavity], cut, s, 1e-5,
+                                 fold_stop=1e-3)["reason"] == "self-contact-approach"
+
+
+def test_the_annular_stop_does_not_fire_on_a_fresh_cut(thread_scan):
+    for r, z, rn in thread_scan.values():
+        s, _, _, _, chains, cg = _cut_on(r, z, 1.05 * rn)
+        apexes = {"open": [{"tip": "cavity_tip", "index": 5}],
+                  "bubble": [{"tip": "bubble_top", "index": len(chains[0].points) - 6}]}
+        assert rc.post_cut_stops(chains, cg, s, rc.tip_size(1.05 * rn, s), fold_stop=3e-4,
+                                 apexes=apexes) is None
+
+
+def test_the_bases_of_the_jets_are_meshed_in_their_own_regions():
+    """The base of each jet, the apex of the groove around it, is meshed at its radius predicted
+    ahead over 16, clipped to between h_floor and the cut's focus size, within max(8 R_apex, 4
+    target) of the base: none where that would be the cut's focus size (the tip's region covers
+    it); at the bubble's bottom, far from the cut, the cap is the size its own region asks for."""
+    s = rc.ReconnectSettings(delta=1e-3)
+    segs = _post_cut_segs()
+    cut = {"delta": 1e-3, "rmin": 1e-3}
+    base = {"r": 3e-3, "z": 4.67, "R_apex": 4e-4, "R_pred": 3e-4}
+    g = _regions(segs, cut, s, h_floor=6.25e-6, apexes={"bubble_top": base})["jet_base_bubble_top"]
+    assert g["target"] == pytest.approx(3e-4 / 16) and g["ell"] == 4e-4
+    assert (g["r"], g["z"]) == (3e-3, 4.67) and g["radius"] == pytest.approx(8 * 4e-4)
+    assert g["floor"] == 6.25e-6
+    floored = _regions(segs, cut, s, h_floor=6.25e-6,
+                       apexes={"bubble_top": dict(base, R_apex=5e-5, R_pred=2.5e-5)})
+    assert floored["jet_base_bubble_top"]["target"] == 6.25e-6
+    assert floored["jet_base_bubble_top"]["radius"] == pytest.approx(8 * 5e-5)
+    broad = _regions(segs, cut, s, apexes={"bubble_top": dict(base, R_apex=2e-3, R_pred=2e-3)})
+    assert "jet_base_bubble_top" not in broad  # 2e-3/16 is above the cut's focus size
+    # the bubble's bottom: capped at its own region's target
+    segs = _post_cut_segs(bottom=(2e-3, 5e-3))
+    kept = rc.kept_region({"size": 4e-5, "radius": 0.02, "grading": 0.2}, 6.25e-5,
+                          float(segs[0]["z"][0]), float(segs[0]["z"][-1]))
+    cut = {"delta": 1e-3, "rmin": 1e-3, "focus": {"kept": kept}}
+    for R, present in ((1.6e-3, False), (3.2e-4, True)):
+        g = _regions(segs, cut, s, h_floor=6.25e-6,
+                     apexes={"bubble_bottom": {"r": 5e-3, "z": 4.49, "R_apex": R, "R_pred": R}})
+        assert g["bubble_bottom"]["target"] == 4e-5
+        assert ("jet_base_bubble_bottom" in g) == present
+        if present:
+            assert g["jet_base_bubble_bottom"]["target"] == pytest.approx(R / 16)
+
+
+def test_kink_regions_follow_the_guard_and_are_released_after_their_hold():
+    """Where the guard asks for a refinement, a region about the worst element of the chain at a
+    quarter of its chord (never below h_floor) within four chords; asked again elsewhere, it grows
+    to hold both; once the chain reads no such element for its hold it is released, its target the
+    chord it met."""
+    P = _bent(_p2_line(), 9, 40.0)
+    readings = {"bubble": rc.edge_reading(P)}
+    s = rc.ReconnectSettings(delta=1e-3)
+    refine = rc.interface_guard(readings, s, fresh=False, h_floor=1e-6, refine_ratio=1.5)["refine"]
+    k = rc.kink_regions({}, readings, refine, t=1.0, hold=lambda L: 0.5, h_floor=1e-6)["bubble"]
+    assert k["name"] == "kink_bubble" and (k["r"], k["z"]) == pytest.approx(tuple(P[19]))
+    assert k["target"] == pytest.approx(2.5e-5) and k["radius"] == pytest.approx(4e-4)
+    assert k["h_before"] == pytest.approx(1e-4) and not k["released"] and k["t_set"] == 1.0
+    assert rc.kink_regions({}, readings, refine, t=1.0, hold=lambda L: 0.5,
+                           h_floor=5e-5)["bubble"]["target"] == 5e-5
+    Q = _bent(_p2_line(), 30, 40.0)
+    rq = {"bubble": rc.edge_reading(Q)}
+    grown = rc.kink_regions({"bubble": k}, rq, {"bubble": np.array([30])}, t=1.2,
+                            hold=lambda L: 0.5, h_floor=1e-6)["bubble"]
+    assert grown["radius"] == pytest.approx(math.hypot(*(Q[61] - P[19])) + 4e-4)
+    assert (grown["r"], grown["z"]) == (k["r"], k["z"]) and grown["t_set"] == 1.2
+    calm = {"bubble": rc.edge_reading(_p2_line())}
+    held = rc.kink_regions({"bubble": grown}, calm, {}, t=1.5, hold=lambda L: 0.5, h_floor=1e-6)
+    assert not held["bubble"]["released"]
+    gone = rc.kink_regions({"bubble": grown}, calm, {}, t=1.8, hold=lambda L: 0.5, h_floor=1e-6)
+    assert gone["bubble"]["released"] and gone["bubble"]["target"] == pytest.approx(1e-4)
+
+
+def _jacobian_sampled(X, n=60):
+    """``det(dx/ds)`` of a quadratic triangle (nodes in oomph-lib's order) on a grid of its
+    reference triangle, from the derivatives of its Lagrange shape functions."""
+    out = []
+    for i in range(n + 1):
+        for j in range(n + 1 - i):
+            s1, s2 = i / n, j / n
+            s3 = 1.0 - s1 - s2
+            # N0 = s1(2s1-1), N1 = s2(2s2-1), N2 = s3(2s3-1), N3 = 4s1s2, N4 = 4s2s3, N5 = 4s3s1
+            d1 = np.array([4 * s1 - 1, 0.0, -(4 * s3 - 1), 4 * s2, -4 * s2, 4 * (s3 - s1)])
+            d2 = np.array([0.0, 4 * s2 - 1, -(4 * s3 - 1), 4 * s1, 4 * (s3 - s2), -4 * s1])
+            a, b = d1 @ X, d2 @ X
+            out.append(a[0] * b[1] - a[1] * b[0])
+    return np.array(out)
+
+
+def test_the_bezier_bound_of_the_jacobian_of_a_quadratic_triangle():
+    """The bound is 1 on a straight-sided triangle, exact at the vertices, never above the
+    Jacobian sampled densely over the element (and close to its minimum for mildly curved ones),
+    zero for a midside node at the quarter point of its edge and negative past it (or for an
+    element inside out)."""
+    tri = np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
+    mid = np.array([0.5 * (tri[0] + tri[1]), 0.5 * (tri[1] + tri[2]), 0.5 * (tri[2] + tri[0])])
+    straight = np.vstack([tri, mid])
+    assert rc.p2_jacobian_bounds(straight, [range(6)]) == pytest.approx([1.0])
+    for f, expected in ((0.5, 1.0), (0.3, 0.2), (0.25, 0.0), (0.2, -0.2)):
+        X = straight.copy()
+        X[3] = tri[0] + f * (tri[1] - tri[0])
+        b = rc.p2_jacobian_bounds(X, [range(6)])[0]
+        assert b == pytest.approx(expected, abs=1e-12), f
+        assert b <= _jacobian_sampled(X).min() + 1e-12
+    rng = np.random.default_rng(3)
+    for scale in (0.05, 0.2, 0.35):
+        for _ in range(40):
+            X = straight.copy()
+            X[3:] += scale * rng.uniform(-1.0, 1.0, (3, 2))
+            b = rc.p2_jacobian_bounds(X, [range(6)])[0]
+            J = _jacobian_sampled(X)
+            assert b <= J.min() + 1e-12
+            corners = _jacobian_sampled(X, n=1)  # at s = (0, 0), (0, 1), (1, 0): the vertices
+            assert b <= corners.min() + 1e-12
+            if scale == 0.05:
+                assert J.min() - b < 0.15
+    inside_out = straight[[1, 0, 2, 3, 5, 4]]
+    assert rc.p2_jacobian_bounds(inside_out, [range(6)])[0] < 0.0
+
+
+def test_the_settings_of_the_interface_after_the_cut_are_checked_and_are_cut_keys():
+    s = rc.ReconnectSettings(delta=1e-3)
+    assert (s.edge_turn_refine, s.edge_turn_stop_fresh, s.edge_turn_stop) == (30.0, 90.0, 120.0)
+    assert (s.midside_refine, s.midside_stop, s.jacobian_min) == (0.1, 0.2, 0.2)
+    assert (s.high_order_threshold, s.quality_floor, s.inverted_element_remesh) == (0.3, 0.15, True)
+    assert (s.apex_extent, s.apex_lookahead, s.rebuild_spline) == (8.0, 20, "nodes")
+    for bad in ({"edge_turn_refine": 95.0}, {"edge_turn_stop": 80.0}, {"edge_turn_stop": 180.0},
+                {"midside_stop": 0.3}, {"midside_refine": 0.25}, {"jacobian_min": 1.0},
+                {"quality_floor": 0.0}, {"apex_lookahead": -1}, {"apex_lookahead": 2.5},
+                {"rebuild_spline": "smooth"}, {"inverted_element_remesh": 1},
+                {"high_order_threshold": 1.5}):
+        with pytest.raises(ValueError):
+            rc.ReconnectSettings.from_dict({"delta": 1e-3, **bad})
+    assert rc.ReconnectSettings.from_dict({"delta": 1e-3, "rebuild_spline": "vertices"}
+                                          ).rebuild_spline == "vertices"
+    recorded = json.loads(json.dumps(s.to_dict()))
+    for key, value in (("edge_turn_refine", 25.0), ("apex_lookahead", 10),
+                       ("rebuild_spline", "vertices"), ("inverted_element_remesh", False)):
+        assert not rc.ReconnectSettings(delta=1e-3, **{key: value}).continues_cut(recorded), key
+    # a cut recorded before these settings existed is not continued: the run is cut again
+    old = {k: v for k, v in recorded.items() if k not in ("edge_turn_refine", "jacobian_min")}
+    assert not s.continues_cut(old)

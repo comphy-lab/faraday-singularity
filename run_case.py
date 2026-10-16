@@ -151,6 +151,10 @@ def case_has_field(case: dict, field: str) -> bool:
 # cut ends (reconnect.CONTINUATION_KEYS): adding, dropping or changing the block otherwise compiles
 # or removes the projection and the handler, whose trajectory then departs from the ordinary one at
 # round-off, from the third step in the tests (a cut, which changes it outright, is another matter).
+# Every other reconnect key is a cut key, the guard of the interface after the cut and the checks
+# of its curved elements included (edge_turn_*, midside_*, jacobian_min, high_order_threshold,
+# quality_floor, inverted_element_remesh, apex_extent, apex_lookahead, rebuild_spline): a case that
+# changes one cuts again from a landing state (CUT_DERIVED_KEYS), and no continuation takes it.
 DERIVED_KEYS = ("case_id", "completion.value", "collapse.keep_stop_state", "collapse.landing",
                 "collapse.neck_stop", "collapse.state_dt", "collapse.state_keep") + tuple(
                     "collapse.reconnect." + k for k in CONTINUATION_KEYS)

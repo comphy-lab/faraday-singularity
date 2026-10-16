@@ -657,6 +657,9 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
         record["sizing_in_cut_radii"] = {"h_tip": s.tip_size, "h_bridge": s.bridge_size,
                                          "focus_size": s.focus_size, "focus_radius": s.focus_radius}
         template.cut_sizing = sizing
+        # the curved elements of every mesh after the cut, from this one on (mesh.py)
+        template.high_order_threshold = s.high_order_threshold
+        template.rebuild_spline = s.rebuild_spline
         template.focus = cut_focus
         # 4. the remesh, at once
         stage("remesh")
@@ -667,6 +670,7 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
     except BaseException as e:
         clear_plan(pb)
         template.cut_sizing = None
+        template.high_order_threshold, template.rebuild_spline = None, "nodes"
         if not remeshing and "focus" in record:  # put back the landing state's focus
             template.focus = landing_focus
         if not isinstance(e, Exception):  # an interruption is no outcome of the cut
@@ -773,8 +777,10 @@ def _keep(problem, driver, outdir: Path, name: str, extra: dict) -> dict:
 
 
 def restore_cut(problem, record: dict) -> None:
-    """After loading a state written after a cut: the record, the mesh sizing of the cut, and the
-    chart orientation.
+    """After loading a state written after a cut: the record, the mesh sizing of the cut (with the
+    threshold of gmsh's optimiser of curved elements and the nodes the spline of a rebuild runs
+    through, ``high_order_threshold`` and ``rebuild_spline`` of its settings), and the chart
+    orientation.
 
     Every remesh after a cut sizes the fresh tips and the bridge by the cut's ``CutSizing``, which
     lives on the mesh template. pyoomph builds a reloaded mesh from a sibling of the problem's
@@ -786,6 +792,11 @@ def restore_cut(problem, record: dict) -> None:
         raise RuntimeError("a state written after a cut needs a problem made with reconnect settings")
     if "sizing" not in record:
         raise RuntimeError("the cut record of the state has no mesh sizing")
-    problem.active_mesh_template().cut_sizing = CutSizing(**record["sizing"])
+    template = problem.active_mesh_template()
+    template.cut_sizing = CutSizing(**record["sizing"])
+    # cuts recorded before these settings existed keep gmsh's defaults and every node
+    settings = record.get("settings") or {}
+    template.high_order_threshold = settings.get("high_order_threshold")
+    template.rebuild_spline = settings.get("rebuild_spline", "nodes")
     problem.cut = record
     orient_interface_chart(problem)

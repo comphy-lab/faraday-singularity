@@ -37,6 +37,12 @@ where the node spacing jumps, refines there without grading, and so widens the j
 rebuild, rebuild after rebuild, until the spline through the nodes crosses itself
 (``testCases/test_reconnect_fem.py`` reproduces the feedback). Without it the ratio of adjacent
 element lengths stays near the grading's, about 1.2.
+
+After a cut gmsh's optimiser of curved elements is asked for the cut's ``high_order_threshold``
+(``Mesh.HighOrderThresholdMin``, 0.1 by default), since the driver accepts a rebuilt mesh only if
+the lower bound of the scaled Jacobian of every curved element reaches the cut's ``jacobian_min``;
+and with ``rebuild_spline`` ``vertices`` (for a sensitivity test only) a rebuild splines each chain
+through its vertices, every other node, rather than through every node.
 """
 
 from __future__ import annotations
@@ -147,6 +153,10 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
         self.focus: Focus | None = None  # set by the problem before a resolution-driven remesh
         self.reconnect = reconnect  # several interface chains are allowed (after a cut)
         self.cut_sizing: CutSizing | None = None  # set by a cut, kept for the remeshes after it
+        # set by a cut too (reconnect.ReconnectSettings): gmsh's Mesh.HighOrderThresholdMin for the
+        # meshes after it (None: gmsh's default, 0.1), and the nodes their splines run through
+        self.high_order_threshold: float | None = None
+        self.rebuild_spline = "nodes"
         self.point_snap_tolerance = 0.0  # no merging of nearby points unless a cut needs it
 
     @property
@@ -233,9 +243,17 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
                 for ch in rb.interface_chains]
 
     def _current_chains(self, segs) -> list[Chain]:
+        """The chains of the current interface nodes; with ``rebuild_spline`` ``vertices`` (after a
+        cut, for a sensitivity test only) their vertices, every other node of a chain of quadratic
+        elements, so that the spline of the rebuild ignores where the midside nodes have gone."""
         tol = self._end_tolerance()
         chains = [orient_chain([(float(x), float(y)) for x, y in seg], self.radius, tol)
                   for seg in segs]
+        if self.rebuild_spline == "vertices":
+            if any(len(c.points) % 2 != 1 for c in chains):
+                raise RuntimeError("an interface chain with an even number of nodes is no chain of "
+                                   "quadratic elements: its vertices are unknown")
+            chains = [Chain(c.points[::2].copy(), c.end_types) for c in chains]
         return sorted(chains, key=lambda c: float(c.points[:, 1].min()))
 
     def _define_chain_geometry(self, chains: list[Chain], focus: Focus | None, h_focus: float):
@@ -300,4 +318,6 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
             if cut.curvature > 0:
                 self.set_gmsh_parameter("Mesh.MeshSizeFromCurvature", int(cut.curvature))
         self.set_gmsh_parameter("Mesh.MeshSizeMin", h_min)
+        if self.high_order_threshold is not None:  # after a cut: curved elements of this quality
+            self.set_gmsh_parameter("Mesh.HighOrderThresholdMin", float(self.high_order_threshold))
         self.set_mesh_size_background_field(self.add_mesh_size_field("Min", FieldsList=fields))

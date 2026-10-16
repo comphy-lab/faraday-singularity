@@ -379,8 +379,9 @@ def test_a_refined_phase_distortion_flag_is_rebuilt_once_by_the_driver(tmp_path)
 def test_after_a_cut_every_distortion_flag_is_the_drivers_rebuild(tmp_path):
     """After a cut the focus is the cut's: with thresholds that flag every checked step, each is
     rebuilt once by the driver, with the post-cut times in its event, the cut's sizing kept and the
-    focus refreshed, one region per feature: the tips the cut made at the cut's focus size, which
-    a rebuild for distortion keeps; pyoomph rebuilds nothing of its own. pyoomph does not check the
+    focus refreshed, one region per feature: the tips the cut made at their own scale, never
+    coarser than the cut's focus size, which a rebuild for distortion keeps once the mesh has the
+    region; pyoomph rebuilds nothing of its own. pyoomph does not check the
     first solve on a new mesh (its count of solves since the rebuild is still 0 then), so the steps
     right after a rebuild are not flagged: the cut's projection counts as that solve, the step after
     the driver's first rebuild does not."""
@@ -429,7 +430,11 @@ def test_after_a_cut_every_distortion_flag_is_the_drivers_rebuild(tmp_path):
     for e in distortion:
         assert e["tau"] == pytest.approx(e["time"] - t_cut, abs=1e-15) and "tau_p" in e
         sizes = {g["name"]: g["new_size"] for g in e["regions"]}
-        assert sizes["cavity_tip"] == sizes["bubble_top"] == pytest.approx(h_cut)
+        for g in e["regions"]:
+            if g["name"] in ("cavity_tip", "bubble_top"):
+                assert g["new_size"] <= h_cut * (1 + 1e-12)  # the coarsest a fresh tip may have
+                assert g["new_size"] == pytest.approx(g["size"] if math.isfinite(g["size"])
+                                                      else g["target"])
         assert e["focus_size"] == min(sizes.values())
     assert distortion[0]["focus_size_before"] == rec["focus"]["cut"]["size"] == h_cut
     last = remesh[-1]

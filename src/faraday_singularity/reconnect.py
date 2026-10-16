@@ -42,9 +42,15 @@ This module holds what needs no finite-element problem:
   cut (:func:`gas_volume_in_box`), which separates the volume the cut adds to the liquid from the
   drift of rebuilding the whole free surface;
 * the stops of a run after the cut (:func:`post_cut_stops`), on both chains, the self-contact a
-  rebuild would meet among them (:func:`spline_contact_stop`), the features of both chains that the
-  mesh after the cut follows, each in its own region (:func:`feature_regions`, :func:`kept_region`,
-  :func:`region_spacing`), and what the run
+  rebuild would meet among them (:func:`spline_contact_stop`), the fold across the groove at the
+  base of a jet (``annular-contact-approach``), the reading of the interface on its quadratic
+  elements (:func:`p2_edges`, :func:`edge_reading`, :func:`interface_guard`: the turn of an
+  element's tangent and the place of its midside node; ``interface-unresolved``) and the
+  ``kink_<chain>`` regions it asks for (:func:`kink_regions`), the base of each jet, the apex of the
+  groove around it (:func:`jet_base_apex`, :func:`circle_radius`, :func:`groove_gap`), the lower
+  bound of the scaled Jacobian of a quadratic triangle (:func:`p2_jacobian_bounds`), the features
+  of both chains that the mesh after the cut follows, each in its own region at its own scale
+  (:func:`feature_regions`, :func:`kept_region`, :func:`region_spacing`), and what the run
   records of both chains after it and steps by (:func:`post_cut_record`: the three tips on the axis
   with their radii of curvature, the bridge, the bubble and the necks of both chains;
   :func:`bubble_end` and :func:`tip_jet`: the jet bases of the bubble's two tips, measured as the
@@ -92,6 +98,7 @@ FILLS = ("blend", "zero")
 RESTARTS = ("bdf1", "impulsive")
 BUBBLE_MODELS = ("constant-pressure",)
 CAPS = ("arc",)
+REBUILD_SPLINES = ("nodes", "vertices")
 LANDING_RATIO = 1.05  # a landing state for cut radius delta: the first with delta / r_n >= this
 MAX_LANDING_RATIO = 1.1  # and a cut is refused above this delta / r_n (the default of the settings)
 # Keys of the settings that decide only where a run after the cut ends: a continuation of a state
@@ -113,6 +120,8 @@ class ReconnectSettings:
 
     Only a constant-pressure bubble exists (the passive gas of the free surface); the planner's own
     volume correction is off; the planner's caps are always replaced by tangent arcs (``cap``).
+    Every key but those of ``CONTINUATION_KEYS`` is a key of the cut, which a continuation keeps:
+    the guard of the interface after the cut and the checks of its curved elements included.
     """
     delta: float  # cut radius
     reservoir_depth: float = 3.0  # closes the cavity chain through the gas above the free surface
@@ -151,6 +160,37 @@ class ReconnectSettings:
     max_events: int = 1
     bridge_stop: float = 0.1  # stop once the bridge is shorter than this * its length at the cut
     bubble_stop: float = 0.01  # or the bubble has shrunk below this fraction of its volume at the cut
+    # The interface after the cut, read on its quadratic elements (p2_edges, interface_guard) after
+    # every accepted step and on the input of every rebuild: a rebuild refines where the tangent of
+    # an element turns by more than edge_turn_refine degrees across it, or its midside node lies
+    # more than midside_refine chords from mid-chord; the run stops (interface-unresolved) where the
+    # turn exceeds edge_turn_stop_fresh on a freshly built mesh or edge_turn_stop on any, or the
+    # midside node lies more than midside_stop chords from mid-chord (at a quarter the Jacobian of
+    # the element vanishes at its vertex)
+    edge_turn_refine: float = 30.0
+    edge_turn_stop_fresh: float = 90.0
+    edge_turn_stop: float = 120.0
+    midside_refine: float = 0.1
+    midside_stop: float = 0.2
+    # a rebuilt mesh is accepted only if the lower bound of the scaled Jacobian of every curved
+    # element (p2_jacobian_bounds) is at least jacobian_min, and gmsh's high-order optimiser is
+    # asked for high_order_threshold after the cut (Mesh.HighOrderThresholdMin; 0.1 by default)
+    jacobian_min: float = 0.2
+    high_order_threshold: float = 0.3
+    # an element whose quality (pyoomph's: smallest over mean Jacobian) falls below quality_floor
+    # asks for a rebuild, besides pyoomph's relative criterion (a fifth of its quality at the build)
+    quality_floor: float = 0.15
+    # pyoomph's net for an element that turns inside out within a step (RemeshWhen's
+    # on_inverted_element: restore the step's start, rebuild, retry), armed after the cut
+    inverted_element_remesh: bool = True
+    # the base of each jet (the apex of the groove around it) is meshed in a region of its own,
+    # apex_extent apex radii wide, sized from the radius predicted apex_lookahead steps ahead
+    apex_extent: float = 8.0
+    apex_lookahead: int = 20
+    # the spline of a rebuild after the cut runs through every node of the interface ("nodes") or,
+    # for a sensitivity test only, through its vertices ("vertices"), which smooths away the very
+    # midside nodes the interface guard reads
+    rebuild_spline: str = "nodes"
 
     def __post_init__(self):
         def positive(name):
@@ -161,8 +201,26 @@ class ReconnectSettings:
         for name in ("delta", "reservoir_depth", "cap_window_factor", "retry_factor",
                      "cap_tangent_fit", "min_cap_angle", "tip_size", "bridge_size", "focus_size",
                      "focus_radius", "projection_tolerance", "energy_tolerance",
-                     "dt0", "dt_growth", "courant", "bridge_stop", "bubble_stop"):
+                     "dt0", "dt_growth", "courant", "bridge_stop", "bubble_stop",
+                     "edge_turn_refine", "edge_turn_stop_fresh", "edge_turn_stop",
+                     "midside_refine", "midside_stop", "jacobian_min", "high_order_threshold",
+                     "quality_floor", "apex_extent"):
             positive(name)
+        if not self.edge_turn_refine < self.edge_turn_stop_fresh <= self.edge_turn_stop < 180.0:
+            raise ValueError("reconnect: edge_turn_refine < edge_turn_stop_fresh <= edge_turn_stop "
+                             "< 180 degrees")
+        if not self.midside_refine < self.midside_stop < 0.25:
+            raise ValueError("reconnect: midside_refine < midside_stop < 1/4 (the quarter point)")
+        for name in ("jacobian_min", "quality_floor"):
+            if not getattr(self, name) < 1.0:
+                raise ValueError(f"reconnect.{name} must be below one")
+        if not self.high_order_threshold <= 1.0:
+            raise ValueError("reconnect.high_order_threshold must be at most one")
+        if isinstance(self.apex_lookahead, bool) or not isinstance(self.apex_lookahead, int) \
+                or self.apex_lookahead < 0:
+            raise ValueError("reconnect.apex_lookahead must be a non-negative integer")
+        if self.rebuild_spline not in REBUILD_SPLINES:
+            raise ValueError(f"reconnect.rebuild_spline must be one of {REBUILD_SPLINES}")
         if not self.min_landing_ratio > 1.0:
             raise ValueError("reconnect.min_landing_ratio must exceed one")
         if isinstance(self.max_landing_ratio, bool) or not isinstance(
@@ -193,7 +251,7 @@ class ReconnectSettings:
                               ("bubble_model", BUBBLE_MODELS)):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"reconnect.{name} must be one of {allowed}")
-        for name in ("projection", "restore_pressure"):
+        for name in ("projection", "restore_pressure", "inverted_element_remesh"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"reconnect.{name} must be true or false")
         if not (self.tau_end > 0):
@@ -767,35 +825,46 @@ def spline_contact_stop(named_chains) -> dict | None:
 def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: ReconnectSettings,
                    h_min: float, *, neck_elements: float = 3.0, fold_ratio: float = 4.0,
                    fold_stop: float = 1e-3, fold_stop_elements: float = 3.0,
-                   fold_search: float = 4.0) -> dict | None:
+                   fold_search: float = 4.0, apexes: dict | None = None,
+                   guard: dict | None = None) -> dict | None:
     """The stop a state after the cut calls for, if any.
 
     The mesh cannot follow a second change of topology: the bridge closing again (the bubble and
     cavity tips, on different chains, meeting across it), the chains touching elsewhere, the
     bubble's two tips meeting (it would become a ring), a new neck on either chain narrower than
     ``max(delta, neck_elements h_min)`` (``secondary-pinch-approach``: the thread behind a fresh cap
-    can pinch again), a closing fold on the bubble (``self-contact-approach``, trigger ``fold-gap``,
-    with the driver's fold limits: ``fold_gap`` with ``fold_ratio``, and a gap below
-    ``max(fold_stop, fold_stop_elements h_elem)``), a chain whose spline through its nodes, the
-    curve every remesh is built on, contacts itself while its nodes do not (``self-contact-approach``,
-    trigger ``spline-contact``, on either chain), or the bubble draining away under its constant
-    pressure. Both self-contact stops say what met (``contact``, :func:`~faraday_singularity.selfcontact.
-    classify_contact`): ``fold`` when the two sides are at least ``FOLD_RESOLVED_ELEMENTS`` elements
-    apart along the surface, a fold of the resolved surface, ``kink`` when they are closer, a
-    contact at the scale of the mesh. A chain whose nodes have crossed (its control polygon) raises
+    can pinch again), a closing fold on either chain (with the driver's fold limits: ``fold_gap``
+    with ``fold_ratio``, and a gap below ``max(fold_stop, fold_stop_elements h_elem)``): the
+    ``annular-contact-approach`` (trigger ``fold-gap``) when the fold pair straddles the base of a
+    jet, the apex of the groove around it (``apexes``: per chain, ``{"tip", "index", ...}`` with
+    ``index`` the node of the apex along the chain), with that jet, its apex and ``R_apex``, and
+    otherwise a ``self-contact-approach`` (trigger ``fold-gap``); a chain whose spline through its
+    nodes, the curve every remesh is built on, contacts itself while its nodes do not
+    (``self-contact-approach``, trigger ``spline-contact``, on either chain), or the bubble draining
+    away under its constant pressure. The fold stops and the spline stop say what met (``contact``,
+    :func:`~faraday_singularity.selfcontact.classify_contact`): ``fold`` when the two sides are at
+    least ``FOLD_RESOLVED_ELEMENTS`` elements apart along the surface, a fold of the resolved
+    surface, ``kink`` when they are closer, a contact at the scale of the mesh. A chain whose nodes
+    have crossed (its control polygon) raises
     :class:`~faraday_singularity.selfcontact.InterfaceSelfIntersection`: that state is not valid.
 
-    The spline test is the remesh's own (:func:`check_chains`, through
-    :func:`~faraday_singularity.selfcontact.first_contact`), so a state that passes these stops
-    passes the check of a rebuild from its nodes: the driver makes them before every rebuild after
-    the cut, and a rebuild never meets a self-intersecting spline.
+    With ``guard`` (``fresh``: whether the mesh was built since its last step; ``h_floor`` and
+    ``refine_ratio``, the driver's), the quadratic elements of both chains are read last
+    (:func:`interface_guard`): ``interface-unresolved`` when the mesh does not represent the
+    interface, an element bent or skewed beyond what a rebuild can be built on, where none of the
+    stops above, of the geometry of the interface, applies; a spline that loops stays a
+    ``spline-contact``.
 
-    The collapse driver's own neck and fold stops cover only the open chain
-    (``FaradayProblem.interface_arrays``), the fold stop within the region of its local scale; it
-    measures the jets of the bubble's tips and sizes the mesh by the bubble's features too, but
-    stops on neither, so these stops are the only ones on the bubble, which before the cut was part
-    of the open chain. Each chain is examined on its own, so the bridge between the two is never a
-    fold."""
+    The spline test is the remesh's own (:func:`check_chains`, through
+    :func:`~faraday_singularity.selfcontact.first_contact`, on the nodes the rebuild's spline runs
+    through: every node, or the vertices with ``rebuild_spline`` ``vertices``), so a state that
+    passes these stops passes the check of a rebuild from its nodes: the driver makes them before
+    every rebuild after the cut, and a rebuild never meets a self-intersecting spline.
+
+    The collapse driver's own neck stop covers only the open chain
+    (``FaradayProblem.interface_arrays``); after a cut its fold stop is this one, on both chains,
+    and the only one on the bubble, which before the cut was part of the open chain. Each chain is
+    examined on its own, so the bridge between the two is never a fold."""
     if len(chains) != 2:
         return {"reason": "topology-changed", "chains": len(chains)}
     bubble = next(c for c in chains if not c.is_open)
@@ -813,27 +882,49 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     if length < max(settings.delta, 3.0 * h_min):
         return {"reason": "bubble-jets-approach", "bubble_length": length}
     neck_limit = max(settings.delta, neck_elements * h_min)
-    for name, c in (("bubble", bubble), ("open", cavity)):
+    named = (("bubble", bubble), ("open", cavity))
+    for name, c in named:
         r_n, z_n, _ = chain_neck(c.points, c.end_types)
         if math.isfinite(r_n) and r_n < neck_limit:
             return {"reason": "secondary-pinch-approach", "trigger": "neck-radius", "chain": name,
                     "r_neck": r_n, "z_neck": z_n, "neck_limit": neck_limit}
-    fold = fold_gap(bubble.points[:, 0], bubble.points[:, 1], ratio=fold_ratio, stop=fold_stop,
-                    stop_elements=fold_stop_elements, search_factor=fold_search)
-    if fold.crossed:
-        raise InterfaceSelfIntersection("the bubble's free surface crosses itself after the cut")
-    fold_limit = max(fold_stop, fold_stop_elements * fold.h_elem)
-    if math.isfinite(fold.gap) and fold.gap < fold_limit:
-        return {"reason": "self-contact-approach", "trigger": "fold-gap", "chain": "bubble",
-                "contact": fold_contact(fold.arc, fold.h_elem),
-                "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
-                "fold_h_elem": fold.h_elem, "fold_limit": fold_limit}
-    stop = spline_contact_stop([("bubble", bubble), ("open", cavity)])
+    folds = []
+    for name, c in named:
+        fold = fold_gap(c.points[:, 0], c.points[:, 1], ratio=fold_ratio, stop=fold_stop,
+                        stop_elements=fold_stop_elements, search_factor=fold_search)
+        if fold.crossed:
+            what = "bubble" if name == "bubble" else "open chain"
+            raise InterfaceSelfIntersection(
+                f"the {what}'s free surface crosses itself after the cut")
+        fold_limit = max(fold_stop, fold_stop_elements * fold.h_elem)
+        if math.isfinite(fold.gap) and fold.gap < fold_limit:
+            folds.append((fold.gap / fold_limit, name, fold, fold_limit))
+    if folds:  # the fold closest to its limit, on either chain
+        _, name, fold, fold_limit = min(folds, key=lambda x: x[0])
+        rec = {"trigger": "fold-gap", "chain": name, "contact": fold_contact(fold.arc, fold.h_elem),
+               "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
+               "fold_h_elem": fold.h_elem, "fold_limit": fold_limit, "fold_pair": list(fold.pair)}
+        a, b = fold.pair
+        jet = next((x for x in (apexes or {}).get(name, []) if a < int(x["index"]) < b), None)
+        if jet is None:
+            return {"reason": "self-contact-approach", **rec}
+        return {"reason": "annular-contact-approach", **rec, "jet": jet["tip"],
+                "apex_index": int(jet["index"]), "apex_r": jet.get("r", math.nan),
+                "apex_z": jet.get("z", math.nan), "R_apex": jet.get("R_apex", math.nan),
+                "groove_angle": jet.get("groove_angle", math.nan)}
+    stride = 2 if settings.rebuild_spline == "vertices" else 1
+    stop = spline_contact_stop([(name, Chain(c.points[::stride], c.end_types))
+                                if stride > 1 and len(c.points) % 2 == 1 else (name, c)
+                                for name, c in named])
     if stop is not None:
         return stop
     vb = revolved_volume(bubble.points)
     if vb < settings.bubble_stop * cut.bubble_volume:
         return {"reason": "bubble-vanishing", "bubble_volume": vb}
+    if guard is not None:
+        return interface_guard({name: edge_reading(c.points) for name, c in named}, settings,
+                               fresh=bool(guard["fresh"]), h_floor=float(guard["h_floor"]),
+                               refine_ratio=float(guard["refine_ratio"]))["stop"]
     return None
 
 
@@ -879,16 +970,31 @@ def kept_region(landing_focus: dict | None, cut_focus_size: float, z_bubble_bott
 
 def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
                     settings: ReconnectSettings, *, h_floor: float, h_axis: float,
-                    elements_per_scale: float, focus_extent: float) -> list[dict]:
+                    elements_per_scale: float, focus_extent: float,
+                    apexes: dict | None = None) -> list[dict]:
     """The features of both chains after a cut, each to be meshed at its own size (the regions of
     the focus, ``mesh.FocusRegion``): ``name``, ``target`` (element size), centre ``r``, ``z``,
-    ``radius``, its scale ``ell`` (``inf`` without one) and ``floor``.
+    ``radius``, its scale ``ell`` (``inf`` without one) and ``floor``, the smallest size it may ask
+    for.
 
-    * The two tips the cut made, the cavity's and the bubble's top (``FRESH_TIPS``): at the cut's
-      focus size (``focus_size`` cut radii, the sizing in cut radii the cut gave them), neither finer,
-      as the landing run's ``h_floor`` would make a scale at the tip below it, nor coarser, within
-      ``focus_radius`` cut radii of the tip and over the jet that stands on it (twice the distance
-      from the tip to the edge of its base).
+    * The two tips the cut made, the cavity's and the bubble's top (``FRESH_TIPS``), at their own
+      scale ``ell_tip``, the smaller of the tip's radius of curvature (the cavity's apex curvature,
+      ``R_bubble_top``) and the radius of the jet that stands on it (its base, where a resolved bump
+      stands): ``clip(ell_tip/elements_per_scale, h_floor, h_cut)``, with ``h_cut`` the cut's focus
+      size (``focus_size`` cut radii) the coarsest size allowed, not a fixed one. At ``h_cut`` the
+      region spans ``focus_radius`` cut radii of the tip and the jet on it (twice the distance from
+      the tip to the edge of its base), as the cut sized it; finer, it spans ``focus_extent
+      ell_tip`` (at most that), and ``<tip>_cut`` keeps the rest of the cut's region at ``h_cut``,
+      so that no rebuild coarsens what the cut resolved.
+    * The base of each jet, the apex of the gas groove around it (``jet_base_<tip>``, for each tip
+      in ``apexes``: ``r``, ``z`` the base, ``R_apex`` its radius of curvature,
+      :func:`jet_base_apex`, ``R_pred`` the radius predicted some steps ahead, the driver's), at
+      ``clip(R_pred/elements_per_scale, h_floor, cap)`` within ``max(apex_extent R_apex, 4
+      target)`` of the base, ``cap`` the cut's focus size at the tips the cut made and the size
+      the bubble's bottom asks for at its bottom, far from the cut; none where that is the cap,
+      since the tip's region, which covers the base, then resolves it. Nothing else sizes it: the
+      tips' regions end at the tip's scale, and at the cut's focus size the apex of a groove whose
+      radius is a fraction of the jet's is met by one or two elements.
     * The bubble's bottom, which the landing state held as the cavity's bottom: at the size its jet
       asks for (``r_j/elements_per_scale``, floored at the landing run's ``h_floor``, as before the
       cut) but never coarser than it had at the landing (``kept``, :func:`kept_region`), over the
@@ -898,8 +1004,9 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
 
     ``cavity`` describes the open chain's tip (``z_tip``, ``kappa`` the apex curvature, ``r_j``,
     ``rise``, ``bump`` and ``flat_bump`` as the driver measures it), ``tips`` the bubble's two
-    (:func:`tip_jet`), ``necks`` the record's ``r_neck_open``, ``z_neck_open``, ``r_neck_bubble``
-    and ``z_neck_bubble``; ``cut`` is the cut record (``rmin``, ``focus.kept``)."""
+    (:func:`tip_jet`), ``necks`` the record (:func:`post_cut_record`: ``r_neck_open``,
+    ``z_neck_open``, ``r_neck_bubble``, ``z_neck_bubble``, ``R_bubble_top``); ``cut`` is the cut
+    record (``rmin``, ``focus.kept``)."""
     rmin = float(cut.get("rmin") or cut["delta"])
     h_cut = settings.focus_size * rmin
     r_cut = settings.focus_radius * rmin
@@ -917,17 +1024,27 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
     def finite(xs):
         return [float(x) for x in xs if math.isfinite(x) and x > 0.0]
 
+    def fresh_tip(name: str, z: float, scales: list[float], reach: float) -> list[dict]:
+        ell = min(scales) if scales else math.inf
+        target = float(np.clip(ell / elements_per_scale, h_floor, h_cut)) if scales else h_cut
+        whole = max(r_cut, reach)
+        if target >= h_cut:
+            return [{"name": name, "target": h_cut, "r": 0.0, "z": z, "radius": whole, "ell": ell,
+                     "floor": h_floor}]
+        return [{"name": name, "target": target, "r": 0.0, "z": z,
+                 "radius": max(min(whole, focus_extent * ell), 4.0 * target), "ell": ell,
+                 "floor": h_floor},
+                {"name": name + "_cut", "target": h_cut, "r": 0.0, "z": z, "radius": whole,
+                 "ell": math.inf, "floor": h_cut}]
+
     out = []
     k = cavity.get("kappa", math.nan)
     scales, reach = jet(cavity)
     scales = finite(scales + ([1.0 / abs(k)] if math.isfinite(k) and k != 0.0 else []))
-    out.append({"name": "cavity_tip", "target": h_cut, "r": 0.0, "z": float(cavity["z_tip"]),
-                "radius": max(r_cut, reach), "ell": min(scales) if scales else math.inf,
-                "floor": h_cut})
+    out += fresh_tip("cavity_tip", float(cavity["z_tip"]), scales, reach)
     scales, reach = jet(tips.get("bubble_top", {}))
-    out.append({"name": "bubble_top", "target": h_cut, "r": 0.0, "z": z_bt,
-                "radius": max(r_cut, reach), "ell": min(scales) if scales else math.inf,
-                "floor": h_cut})
+    out += fresh_tip("bubble_top", z_bt, finite(scales + [necks.get("R_bubble_top", math.nan)]),
+                     reach)
     scales, reach = jet(tips.get("bubble_bottom", {}))
     kept = (cut.get("focus") or {}).get("kept")
     if scales or kept:
@@ -940,6 +1057,25 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
                     "radius": min(radius, 0.5 * (z_bt - z_bb)),
                     "ell": ell if scales else math.inf, "floor": h_floor,
                     "kept": None if not kept else float(kept["size"])})
+    # the coarsest size of a jet's base: the cut's focus size near the cut, and at the bubble's
+    # bottom, far from it, the size its own region asks for
+    bottom = next((g for g in out if g["name"] == "bubble_bottom"), None)
+    caps = {"cavity_tip": h_cut, "bubble_top": h_cut,
+            "bubble_bottom": bottom["target"] if bottom is not None else h_cut}
+    for tip in JET_TIPS:
+        a = (apexes or {}).get(tip)
+        R = float(a.get("R_apex", math.nan)) if a else math.nan
+        if not (math.isfinite(R) and R > 0.0):
+            continue
+        R_pred = float(a.get("R_pred", R))
+        cap = caps[tip]
+        target = float(np.clip((R_pred if math.isfinite(R_pred) else R) / elements_per_scale,
+                               h_floor, cap))
+        if target >= cap:  # resolved by its tip's region, which covers it
+            continue
+        out.append({"name": f"jet_base_{tip}", "target": target, "r": float(a["r"]),
+                    "z": float(a["z"]), "radius": max(settings.apex_extent * R, 4.0 * target),
+                    "ell": R, "floor": h_floor})
     for name, chain in (("neck_open", "open"), ("neck_bubble", "bubble")):
         r_n, z_n = necks.get(f"r_neck_{chain}", math.nan), necks.get(f"z_neck_{chain}", math.nan)
         if math.isfinite(r_n) and r_n > 0.0:
@@ -950,12 +1086,15 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
 
 
 def region_spacing(segs, region: dict, axis_tips: Sequence[float], sizing: dict | None,
-                   size: float) -> tuple[float, float]:
+                   size: float, finer: Sequence[tuple[float, float, float]] = ()
+                   ) -> tuple[float, float]:
     """``(h_max, h_min)``: the longest and the shortest element (twice the node spacing; the elements
     are quadratic) of the chains within ``region`` (a ball of ``radius`` about ``(r, z)``), the
     shortest only where the cut's sizing (:func:`cut_size_field`) asks for at least
-    ``CUT_SIZING_MARGIN`` times ``size``, since no focus can coarsen what it refines; NaN where the
-    region holds no such element."""
+    ``CUT_SIZING_MARGIN`` times ``size``, since no focus can coarsen what it refines, and outside
+    the balls ``finer`` (``(r, z, reach)``: the regions of a finer size within this one, with the
+    reach of their grading), whose elements are theirs to coarsen; NaN where the region holds no
+    such element."""
     longest, shortest = [], []
     for c in segs:
         r, z = np.asarray(c["r"], dtype=float), np.asarray(c["z"], dtype=float)
@@ -970,6 +1109,9 @@ def region_spacing(segs, region: dict, axis_tips: Sequence[float], sizing: dict 
         if sizing and all(k in sizing for k in ("h_tip", "h_bridge", "grading")):
             free = cut_size_field(r, z, axis_tips, sizing) >= CUT_SIZING_MARGIN * size
             edges = edges & free[:-1] & free[1:]
+        for fr, fz, reach in finer:
+            other = np.hypot(r - fr, z - fz) <= reach
+            edges = edges & ~(other[:-1] | other[1:])
         if edges.any():
             shortest.append(float(h[edges].min()))
     return (max(longest) if longest else math.nan, min(shortest) if shortest else math.nan)
@@ -1080,3 +1222,275 @@ def courant_limit(segs) -> dict:
             best = {"h_over_u": float(ratio[i]), "h": float(h[i]), "U": float(u[i]),
                     "chain": 0 if c["open"] else 1, "r": float(r[i]), "z": float(z[i])}
     return best
+
+
+# --- the interface after the cut, on its quadratic elements ---------------------------------------
+
+
+def p2_edges(points) -> dict:
+    """The quadratic elements of a chain of interface nodes ``(M, 2)``, ``M = 2N + 1`` (vertex,
+    midside node, vertex, ...), as the mesh holds them: for each element its chord ``L`` (vertex to
+    vertex), the offset of its midside node from the chord in chords (``bulge``, ``s/L``), where
+    that node lies along the chord (``f``, 0.5 at mid-chord: at ``f = 1/4`` or ``3/4`` the
+    Jacobian of the element vanishes at a vertex), the turn of its tangent across it (``turn``,
+    degrees: the angle between ``dx/dxi`` of the quadratic at its two vertices, ``2 atan(4 s/L)``
+    at ``f = 1/2``; on a circle of radius ``R`` the angle the element subtends, ``s/L`` about
+    ``L/(8R)``), its midside node (``mid``) and that node's index along the chain (``index``).
+    Raises ``ValueError`` for a chain that is no chain of quadratic elements (an even count)."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    if len(P) < 3 or len(P) % 2 != 1:
+        raise ValueError(f"a chain of quadratic elements has 2N + 1 >= 3 nodes, not {len(P)}")
+    a, m, b = P[0:-2:2], P[1:-1:2], P[2::2]
+    c = b - a
+    L = np.hypot(c[:, 0], c[:, 1])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = c / L[:, None]
+        d = m - 0.5 * (a + b)
+        s = np.abs(d[:, 0] * t[:, 1] - d[:, 1] * t[:, 0])
+        f = 0.5 + np.einsum("ij,ij->i", d, t) / L
+        t0 = -3.0 * a + 4.0 * m - b  # dx/dxi at the first vertex (xi = 0) and at the second
+        t1 = a - 4.0 * m + 3.0 * b
+        turn = np.degrees(np.arctan2(np.abs(t0[:, 0] * t1[:, 1] - t0[:, 1] * t1[:, 0]),
+                                     np.einsum("ij,ij->i", t0, t1)))
+    return {"L": L, "bulge": s / L, "f": f, "turn": turn, "mid": m,
+            "index": 2 * np.arange(len(L)) + 1}
+
+
+def edge_reading(points) -> dict:
+    """The worst quadratic elements of a chain (:func:`p2_edges`): the largest turn of the tangent
+    across an element (``turn``, degrees) and the largest offset of a midside node from mid-chord
+    along the chord (``midside``, ``|f - 1/2|``), each with that element's midside node
+    (``*_r``, ``*_z``, ``*_index``) and chord (``*_L``), and the elements themselves (``edges``);
+    NaN (``edges`` None) for a chain that is no chain of quadratic elements."""
+    out = {"turn": math.nan, "turn_r": math.nan, "turn_z": math.nan, "turn_L": math.nan,
+           "turn_index": -1, "midside": math.nan, "midside_r": math.nan, "midside_z": math.nan,
+           "midside_L": math.nan, "midside_index": -1, "edges": None}
+    try:
+        e = p2_edges(points)
+    except ValueError:
+        return out
+    if not len(e["L"]):
+        return out
+    out["edges"] = e
+    dev = np.abs(e["f"] - 0.5)
+    for key, values in (("turn", e["turn"]), ("midside", dev)):
+        v = np.where(np.isfinite(values), values, -np.inf)
+        k = int(np.argmax(v))
+        out.update({key: float(values[k]), f"{key}_r": float(e["mid"][k, 0]),
+                    f"{key}_z": float(e["mid"][k, 1]), f"{key}_L": float(e["L"][k]),
+                    f"{key}_index": int(e["index"][k])})
+    return out
+
+
+def interface_guard(readings: dict, settings: ReconnectSettings, *, fresh: bool, h_floor: float,
+                    refine_ratio: float) -> dict:
+    """What the quadratic elements of the chains after a cut call for (``readings``: per chain name,
+    :func:`edge_reading`).
+
+    ``stop``: the ``interface-unresolved`` stop, or None: trigger ``edge-turn`` where the tangent of
+    an element turns by more than ``edge_turn_stop_fresh`` degrees on a freshly built mesh
+    (``fresh``) or ``edge_turn_stop`` on any, ``edge-midside`` where a midside node lies more than
+    ``midside_stop`` chords from mid-chord, and ``feature-below-floor`` where an element that asks
+    for a refinement is already within ``refine_ratio`` of the run's smallest size ``h_floor``, so
+    that no rebuild can resolve it. ``refine``: per chain, the elements (indices into its
+    :func:`p2_edges`) whose turn exceeds ``edge_turn_refine`` or whose midside node lies more than
+    ``midside_refine`` chords off mid-chord: a rebuild refines there (the driver's ``kink_<chain>``
+    region). The worst element over the chains is reported (its chain, turn or offset, the limit,
+    the place of its midside node and its chord)."""
+    s = settings
+    turn_limit = s.edge_turn_stop_fresh if fresh else s.edge_turn_stop
+    worst = None
+    for name, rd in readings.items():
+        for trigger, key, limit in (("edge-turn", "turn", turn_limit),
+                                    ("edge-midside", "midside", s.midside_stop)):
+            value = rd.get(key, math.nan)
+            if math.isfinite(value) and value > limit and (worst is None
+                                                            or value / limit > worst[0]):
+                worst = (value / limit, name, trigger, key, limit)
+    if worst is not None:
+        _, name, trigger, key, limit = worst
+        rd = readings[name]
+        return {"stop": {"reason": "interface-unresolved", "trigger": trigger, "chain": name,
+                         key: rd[key], "limit": limit, "fresh": bool(fresh), "r": rd[f"{key}_r"],
+                         "z": rd[f"{key}_z"], "L": rd[f"{key}_L"], "index": rd[f"{key}_index"]},
+                "refine": {}}
+    refine = {}
+    for name, rd in readings.items():
+        e = rd.get("edges")
+        if e is None:
+            continue
+        with np.errstate(invalid="ignore"):
+            bad = (e["turn"] > s.edge_turn_refine) | (np.abs(e["f"] - 0.5) > s.midside_refine)
+        idx = np.flatnonzero(bad)
+        if not len(idx):
+            continue
+        floored = idx[e["L"][idx] <= refine_ratio * h_floor]
+        if len(floored):
+            k = int(floored[np.argmax(e["turn"][floored])])
+            return {"stop": {"reason": "interface-unresolved", "trigger": "feature-below-floor",
+                             "chain": name, "turn": float(e["turn"][k]),
+                             "midside": float(abs(e["f"][k] - 0.5)), "fresh": bool(fresh),
+                             "r": float(e["mid"][k, 0]), "z": float(e["mid"][k, 1]),
+                             "L": float(e["L"][k]), "index": int(e["index"][k]),
+                             "h_floor": h_floor},
+                    "refine": {}}
+        refine[name] = idx
+    return {"stop": None, "refine": refine}
+
+
+def kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, hold,
+                 h_floor: float) -> dict:
+    """The ``kink_<chain>`` regions of the chains after a reading (:func:`interface_guard`'s
+    ``refine``), from those of the last accepted step (``previous``, by chain): where the guard asks
+    for a refinement, a region about the worst element of the chain, at a quarter of its chord (at
+    least ``h_floor``) within four chords of it, grown to hold it when the chain has one already;
+    a region whose chain reads no such element for ``hold(h_before)`` of time (``hold``, a function
+    of the chord it met, ``h_before``) is released: its size returns to that chord by the bounded
+    coarsening of the rebuilds, and the driver drops it once its size is back there. Each entry:
+    ``name``, ``chain``, ``r``, ``z``, ``radius``, ``target``, ``h_before``, ``t_set`` (the last
+    time it was asked for) and
+    ``released``."""
+    out = {name: dict(v) for name, v in previous.items()}
+    for chain, idx in refine.items():
+        e = readings[chain]["edges"]
+        k = int(idx[np.argmax(e["turn"][idx])])
+        L, (r, z) = float(e["L"][k]), (float(e["mid"][k, 0]), float(e["mid"][k, 1]))
+        target = max(0.25 * L, h_floor)
+        g = out.get(chain)
+        if g is None:
+            out[chain] = {"name": f"kink_{chain}", "chain": chain, "r": r, "z": z,
+                          "radius": 4.0 * L, "target": target, "h_before": L, "t_set": t,
+                          "released": False}
+            continue
+        d = math.hypot(r - g["r"], z - g["z"])
+        g.update(radius=max(g["radius"], d + 4.0 * L), target=min(
+            target, g["target"] if not g["released"] else math.inf),
+            h_before=max(g["h_before"], L), t_set=t, released=False)
+    for chain, g in out.items():
+        if chain in refine or g["released"]:
+            continue
+        if t >= g["t_set"] + hold(g["h_before"]):
+            g.update(released=True, target=g["h_before"])
+    return out
+
+
+APEX_WINDOWS = (2, 4)  # vertices on either side of a jet's base in the circle fits of its radius
+GROOVE_ANGLE_VERTICES = 6  # the chords of the groove's opening angle reach this many vertices away
+GROOVE_WINDOW = 200  # nodes on either side of a jet's base searched for the groove's fold pairs
+
+
+def circle_radius(points) -> float:
+    """Radius of the circle fitted algebraically through ``points`` (least squares in
+    ``x^2 + y^2 + D x + E y + F = 0``, about their mean and in units of their extent); ``inf`` for
+    points on a line, NaN for fewer than three distinct points."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    if len(P) < 3:
+        return math.nan
+    Q = P - P.mean(axis=0)
+    scale = float(np.max(np.abs(Q)))
+    if not scale > 0.0:
+        return math.nan
+    Q = Q / scale
+    A = np.column_stack([Q[:, 0], Q[:, 1], np.ones(len(Q))])
+    sol, _, rank, sv = np.linalg.lstsq(A, -(Q**2).sum(axis=1), rcond=None)
+    if rank < 3 or sv[-1] < 1e-12 * sv[0]:
+        return math.inf
+    D, E, F = sol
+    R2 = 0.25 * (D * D + E * E) - F
+    return scale * math.sqrt(R2) if R2 > 0.0 else math.nan
+
+
+def jet_base_apex(r, z, index: int) -> dict:
+    """The base of a jet on an end of a chain ordered from its tip on the axis (the open chain, or
+    an end of the bubble in the frame of its jet, :func:`bubble_end`: the liquid below), at node
+    ``index`` (:func:`~faraday_singularity.collapse.jet_base`): the vertex there (``apex``; the
+    vertices are the even nodes; for a midside node, the lower of its two vertices), the radius of
+    curvature of the surface there (``R_apex``: the smaller of the radii of the circles fitted
+    through the vertices within ``APEX_WINDOWS`` of it, on vertices only, so that a midside node
+    that has left its place cannot bend the fit; where they differ, a wedge is forming) and the
+    opening angle of the groove around the jet (``groove_angle``, degrees: between the chords from
+    the apex to the vertices ``GROOVE_ANGLE_VERTICES`` away on either side, as far as the end
+    reaches; 180 for a flat surface). NaN where fewer than two vertices lie on either side."""
+    r, z = np.asarray(r, dtype=float), np.asarray(z, dtype=float)
+    out = {"apex": -1, "apex_r": math.nan, "apex_z": math.nan, "R_apex": math.nan,
+           "groove_angle": math.nan}
+    n = len(r)
+    i = int(index)
+    if not 0 < i < n - 1:
+        return out
+    if i % 2:  # a midside node: the lower of its two vertices
+        i = i - 1 if z[i - 1] <= z[i + 1] else i + 1
+    V = np.column_stack([r[0::2], z[0::2]])
+    v = i // 2
+    side = min(v, len(V) - 1 - v)
+    if side < 2:
+        return out
+    radii = [circle_radius(V[v - w:v + w + 1]) for w in APEX_WINDOWS if w <= side]
+    radii = [x for x in radii if math.isfinite(x) or x == math.inf]
+    w = min(GROOVE_ANGLE_VERTICES, side)
+    a, b = V[v - w] - V[v], V[v + w] - V[v]
+    cosang = float(np.dot(a, b) / max(np.hypot(*a) * np.hypot(*b), 1e-300))
+    out.update(apex=i, apex_r=float(V[v, 0]), apex_z=float(V[v, 1]),
+               R_apex=float(min(radii)) if radii else math.nan,
+               groove_angle=math.degrees(math.acos(max(-1.0, min(1.0, cosang)))))
+    return out
+
+
+def groove_gap(r, z, apex: int, *, ratio: float, stop: float, stop_elements: float,
+               window: int = GROOVE_WINDOW) -> dict:
+    """The fold of the groove around a jet: of the pairs of nodes ``i < apex < j`` (the two sides of
+    the groove, ``apex`` the node of its apex along the chain) within ``window`` nodes of the apex
+    that are closer than ``1/ratio`` of the arc between them (the fold pairs of
+    :func:`~faraday_singularity.selfcontact.fold_gap`), the one with the smallest distance
+    relative to its limit ``max(stop, stop_elements (spacing_i + spacing_j))``: ``gap`` (``inf``
+    without one), ``limit``, ``arc``, ``pair``."""
+    P = np.column_stack([np.asarray(r, dtype=float), np.asarray(z, dtype=float)])
+    out = {"gap": math.inf, "limit": math.nan, "arc": math.nan, "pair": (-1, -1)}
+    n = len(P)
+    if not 0 < apex < n - 1:
+        return out
+    ds = np.hypot(*np.diff(P, axis=0).T)
+    s = np.concatenate([[0.0], np.cumsum(ds)])
+    spacing = np.empty(n)
+    spacing[0], spacing[-1] = ds[0], ds[-1]
+    spacing[1:-1] = 0.5 * (ds[:-1] + ds[1:])
+    I = np.arange(max(apex - window, 0), apex)
+    J = np.arange(apex + 1, min(apex + window, n - 1) + 1)
+    D = np.hypot(P[I, None, 0] - P[None, J, 0], P[I, None, 1] - P[None, J, 1])
+    A = s[J][None, :] - s[I][:, None]
+    limit = np.maximum(stop, stop_elements * (spacing[I][:, None] + spacing[J][None, :]))
+    score = np.where(ratio * D < A, D / limit, np.inf)
+    if not np.isfinite(score).any():
+        return out
+    a, b = np.unravel_index(int(np.argmin(score)), score.shape)
+    return {"gap": float(D[a, b]), "limit": float(limit[a, b]), "arc": float(A[a, b]),
+            "pair": (int(I[a]), int(J[b]))}
+
+
+def p2_jacobian_bounds(xy, elements) -> np.ndarray:
+    """A lower bound of the scaled Jacobian of each quadratic triangle: the smallest Bezier
+    coefficient of ``det(dx/ds)``, a polynomial of degree two, over that of the straight-sided
+    triangle through the vertices, ``det(x0 - x2, x1 - x2)``.
+
+    ``xy`` holds the node positions and ``elements`` the six nodes of each triangle in oomph-lib's
+    order (``TElement<2,3>``, gmsh's too): the vertices 0, 1, 2 (counterclockwise, as pyoomph
+    orients every element), then the nodes on the edges 0-1, 1-2 and 2-0. The bound is the exact
+    value at the vertices (the three corner coefficients), at most the smallest value in between,
+    1 for a straight-sided element with its edge nodes at mid-edge, zero for a midside node at the
+    quarter point of its edge and negative beyond (or for an element inside out)."""
+    X = np.asarray(xy, dtype=float)[np.asarray(elements, dtype=int)]
+    x0, x1, x2, x3, x4, x5 = (X[:, k] for k in range(6))
+    b01 = 2.0 * x3 - 0.5 * (x0 + x1)  # the Bezier control points of the edges
+    b12 = 2.0 * x4 - 0.5 * (x1 + x2)
+    b20 = 2.0 * x5 - 0.5 * (x2 + x0)
+    D1 = (x0 - b20, b01 - b12, b20 - x2)  # dx/ds1 = 2 sum_k D1_k lambda_k
+    D2 = (b01 - b20, x1 - b12, b12 - x2)  # dx/ds2 = 2 sum_k D2_k lambda_k
+
+    def det(u, v):
+        return u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]
+
+    c = [4.0 * det(D1[k], D2[k]) for k in range(3)]
+    c += [2.0 * (det(D1[k], D2[l]) + det(D1[l], D2[k])) for k, l in ((0, 1), (1, 2), (0, 2))]
+    lin = np.abs(det(x0 - x2, x1 - x2))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.min(np.vstack(c), axis=0) / lin

@@ -171,7 +171,8 @@ this driver from a landing state, or restored from a state written after one): t
 After the cut (:meth:`CollapseDriver.reset_after_cut`) the measured surface is the open chain, whose
 tip on the axis is a fresh cavity bottom: the scale, step, neck and singular-time bookkeeping
 restart, a new cycle begins, and the first step is the cut's ``dt0``. The jet measurement, the
-neck and fold stops and the step rule above apply to the open chain as to any surface. In addition:
+neck stop and the step rule above apply to the open chain as to any surface; the fold stop is the
+post-cut one, on both chains (below). In addition:
 
 * the jets of the bubble's two tips are measured as the open chain's (``reconnect.bubble_end`` and
   ``reconnect.tip_jet``; the bubble's top is mirrored, so that the jet the bridge drives down into
@@ -181,39 +182,72 @@ neck and fold stops and the step rule above apply to the open chain as to any su
   the three tips (the cavity's as in ``collapse.txt``; ``Q_j`` and ``V_j`` positive along each jet,
   downwards from the bubble's top), and the events ``tip-jet-born`` and ``tip-jet-gone`` record the
   bubble's;
-* the local scale is the smallest of the open chain's scales and the bubble's (``ell_bubble`` in
+* the local scale is the smallest of the open chain's scales, the bubble's (``ell_bubble`` in
   ``chains.txt``: the jet-base radius of a resolved bump at either tip, the bubble's narrowest neck
   and its length; not the radii of curvature of its tips, which depend on the mesh at a chain's end
-  and bound the step instead), so that a jet on either chain sets the step; the open chain's fold
-  stop and the speed ``U`` (which then includes the bubble's nodes and jets) are taken over the
-  region of the open chain's own scale, which a smaller scale of the bubble does not narrow;
-* the focus size of the rule is floored at the cut's focus size (``focus_size`` cut radii), not at
-  the landing run's ``h_floor`` (:meth:`CollapseDriver._focus_floor`), and the mesh follows each
-  feature of both chains in its own region (``reconnect.feature_regions``, ``mesh.FocusRegion``):
-  the tips the cut made (the cavity's and the bubble's top) at the cut's focus size, within
-  ``focus_radius`` cut radii and over the jet on them; the bubble's bottom, which the landing state
-  held as the cavity's bottom, at the size its jet asks for but never coarser than at the landing
-  (the cut record's ``focus.kept``); each neck at its own scale. The rule
-  (:meth:`CollapseDriver._maybe_remesh_features`) rebuilds when some region's longest element
+  and bound the step instead) and the radius of curvature at the base of each jet, the apex of the
+  gas groove around it (``R_apex``: :meth:`CollapseDriver._apexes`, ``reconnect.jet_base_apex``),
+  so that a jet on either chain sets the step; the open chain's speed ``U`` (which then includes
+  the bubble's nodes and jets) is taken over the region of the open chain's own scale, which a
+  smaller scale of the bubble does not narrow;
+* the focus size of the rule is floored at ``h_floor`` (:meth:`CollapseDriver._focus_floor`), and
+  the mesh follows each feature of both chains in its own region, sized by its own scale
+  (``reconnect.feature_regions``, ``mesh.FocusRegion``): the tips the cut made (the cavity's and
+  the bubble's top) at ``clip(ell_tip/elements_per_scale, h_floor, h_cut)``, ``ell_tip`` the
+  smaller of the tip's radius of curvature and the radius of the jet on it, ``h_cut`` the cut's
+  focus size (``focus_size`` cut radii), the coarsest size they may have, within ``focus_extent
+  ell_tip`` of the tip, the rest of the cut's region (``focus_radius`` cut radii and the jet on the
+  tip) kept at ``h_cut`` (``<tip>_cut``); the base of each jet (``jet_base_<tip>``) at
+  ``clip(R_pred/elements_per_scale, h_floor, h_cut)`` within ``max(apex_extent R_apex, 4 target)``,
+  ``R_pred`` the apex radius predicted ``apex_lookahead`` steps ahead from its rate of change
+  (:meth:`CollapseDriver._apex_prediction`, never below half the radius read); the bubble's
+  bottom, which the landing state held as the cavity's bottom, at the size its jet asks for but
+  never coarser than at the landing (the cut record's ``focus.kept``); each neck at its own scale;
+  and, where the guard of the interface (next item) asks for it, a ``kink_<chain>`` region at a
+  quarter of the bent element's chord (``reconnect.kink_regions``), released once the chain has read
+  no such element for ``coarsen_hold`` local times and coarsened back by the bounded factor. The
+  rule (:meth:`CollapseDriver._maybe_remesh_features`) rebuilds when some region's longest element
   exceeds ``refine_ratio`` times its target, or, once the hold has passed, when some region's
-  shortest element lies below ``coarsen_ratio`` times it, refining or coarsening each region by at
-  most the bounded factors; a rebuild that changed none of the regions that asked waits
-  ``remesh_backoff`` steps (event ``remesh-ineffective``, ``direction`` ``coarsen`` for a
-  coarsening). ``chains.txt`` gives, at each tip, the longest element of its region and the size
-  the current mesh has there (``h_<tip>``, ``size_<tip>``), the ``remesh`` events every region;
+  shortest element (outside the finer regions within it) lies below ``coarsen_ratio`` times it,
+  refining or coarsening each region by at most the bounded factors; a rebuild that changed none of
+  the regions that asked waits ``remesh_backoff`` steps (event ``remesh-ineffective``,
+  ``direction`` ``coarsen`` for a coarsening). ``chains.txt`` gives, at each tip, the longest
+  element of its region and the size the current mesh has there (``h_<tip>``, ``size_<tip>``), the
+  apex radius, the gap of the groove's closest fold pair and its opening angle at the base of its
+  jet (``R_apex_<tip>``, ``groove_gap_<tip>``, ``groove_angle_<tip>``), and, per chain, the largest
+  turn of an element and offset of a midside node (``edge_turn_<chain>``,
+  ``edge_midside_<chain>``); the ``remesh`` events every region;
+* the interface is read on its quadratic elements after every accepted step and on the input of
+  every rebuild (``reconnect.interface_guard``): an element whose tangent turns by more than
+  ``edge_turn_refine`` degrees across it, or whose midside node lies more than ``midside_refine``
+  chords off mid-chord, asks for a refinement (above); the run stops (``interface-unresolved``,
+  trigger ``edge-turn``, ``edge-midside`` or ``feature-below-floor``) beyond
+  ``edge_turn_stop_fresh`` on a freshly built mesh, ``edge_turn_stop`` on any, ``midside_stop``
+  chords, or where the element
+  that asks is already at ``h_floor``. A rebuilt mesh is accepted only if the Bezier lower bound of
+  the scaled Jacobian of every curved element is at least ``jacobian_min``
+  (``FaradayProblem.curved_jacobian_bound``; trigger ``curved-jacobian``), gmsh's optimiser of
+  curved elements is asked for ``high_order_threshold``, an element whose quality falls below
+  ``quality_floor`` asks for a rebuild (trigger ``absolute-quality``), and pyoomph's net for an
+  element turned inside out within a step is armed (``inverted_element_remesh``; its rebuilds are
+  counted, event ``remesh`` with ``reason`` ``inverted-element``);
 * the stops before a second change of topology, on both chains (``reconnect.post_cut_stops``: the
-  bridge, the chains, the bubble's tips, a new neck, a closing fold, a spline through the nodes of
-  either chain that contacts itself, the bubble draining), and ``tau-end`` once ``tau = t - t_cut``
-  reaches the cut's ``tau_end``. They are checked before every rebuild, the rebuilds for distortion
-  included, since a state that calls for one is not rebuilt (``distortion_rebuild_skipped`` in its
-  stop record): the spline test is the rebuild's own, so no rebuild meets a self-intersecting
-  spline; a contact is reported as a ``fold`` of the resolved surface or a ``kink`` at the scale of
-  the mesh (``contact``);
+  bridge, the chains, the bubble's tips, a new neck, a closing fold, which across the groove at the
+  base of a jet is the ``annular-contact-approach``, a spline through the nodes of either chain
+  that contacts itself, the bubble draining, then the guard of the interface), and ``tau-end`` once
+  ``tau = t - t_cut`` reaches the cut's ``tau_end``. They are checked before every rebuild, the
+  rebuilds for distortion included, since a state that calls for one is not rebuilt
+  (``distortion_rebuild_skipped`` in its stop record): the spline test is the rebuild's own, so no
+  rebuild meets a self-intersecting spline; a contact is reported as a ``fold`` of the resolved
+  surface or a ``kink`` at the scale of the mesh (``contact``);
 * the step is also at most ``courant h/|u|`` over every node of both chains
   (``reconnect.courant_limit``: the tips and jets of either chain wherever they go), at most
-  ``capillary R^(3/2)`` with ``R`` the smallest radius of curvature of the three tips on the axis,
-  and grows by at most the cut's ``dt_growth``;
-* no Newton failure ends the run cleanly: after a cut it is a failed run, whatever the state;
+  ``capillary R^(3/2)`` with ``R`` the smallest radius of curvature of the three tips on the axis
+  and of the bases of their jets, and grows by at most the cut's ``dt_growth``;
+* no Newton failure ends the run cleanly: after a cut it is a failed run, whatever the state, and
+  the profiles of the state the failing step started from are written first
+  (``profile_<step>_lastgood.txt`` and its ``_bubble`` beside it); while an element of either
+  chain turns by more than ``edge_turn_refine`` degrees a profile is written at every step;
 * ``collapse.txt`` gets the columns ``tau`` and ``tau_p = t - t_p`` (``t_p`` the pinch time the cut
   recorded, NaN without one), ``chains.txt`` a row per step with both chains
   (``reconnect.post_cut_record``: the three tips, bridge, bubble, necks, budgets) and the step
@@ -228,7 +262,8 @@ neck and fold stops and the step rule above apply to the open chain as to any su
   ``state_dt`` (:meth:`CollapseDriver._state_interval`), and the state the run ends on is dumped
   as well (``end_state`` in the stop record), whatever the stop: the latest dump, which the rotation
   keeps (``state_keep`` is at least one); the dumps also keep which of the bubble's tips carry a
-  jet (``tip_born``);
+  jet (``tip_born``), the apex radii of the last step (``apex_history``) and the kink regions
+  (``kinks``);
 * landing states and the stop state are not kept (one cut per run).
 
 Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore` restores
@@ -253,8 +288,9 @@ from .episodes import ETA_HYS, EpisodeTracker
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
-                        bubble_end, courant_limit, cut_size_field, feature_regions,
-                        post_cut_record, post_cut_stops, region_spacing, tau_end_reached, tip_jet)
+                        bubble_end, courant_limit, cut_size_field, edge_reading, feature_regions,
+                        groove_gap, interface_guard, jet_base_apex, kink_regions, post_cut_record,
+                        post_cut_stops, region_spacing, tau_end_reached, tip_jet)
 from .selfcontact import InterfaceSelfIntersection, fold_gap
 from .singular import singular_time
 
@@ -468,7 +504,16 @@ CHAIN_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "z_bubble_bottom", "w_bub
                      for c in ("r_j", "z_b", "Q_j", "V_j", "We_j", "jet_born")) + tuple(
                      # the mesh at each tip: the longest element within its focus region and the
                      # size the region asks for (CollapseDriver._feature_regions)
-                     f"{c}_{tip}" for tip in JET_TIPS for c in ("h", "size"))
+                     f"{c}_{tip}" for tip in JET_TIPS for c in ("h", "size")) + tuple(
+                     # the base of each tip's jet, the apex of the groove around it: its radius of
+                     # curvature, the gap of the groove's closest fold pair and its opening angle
+                     # (reconnect.jet_base_apex, reconnect.groove_gap)
+                     f"{c}_{tip}" for tip in JET_TIPS
+                     for c in ("R_apex", "groove_gap", "groove_angle")) + (
+                     # the worst quadratic element of each chain (reconnect.edge_reading): the turn
+                     # of its tangent (degrees) and the offset of a midside node from mid-chord
+                     "edge_turn_open", "edge_turn_bubble", "edge_midside_open",
+                     "edge_midside_bubble")
 # chains.txt columns written as integers (NaN where the state has no bubble)
 INT_CHAIN_COLUMNS = ("step", "courant_chain", "remesh_count") + tuple(
     f"jet_born_{tip}" for tip in JET_TIPS)
@@ -508,6 +553,11 @@ class _State:
     neck_samples: list = field(default_factory=list)  # [t, r_n] of the closing neck, the latest
     # after a cut: whether a jet stands on each of the bubble's tips (reconnect.BUBBLE_TIP_SIGNS)
     tip_born: dict = field(default_factory=dict)
+    # after a cut: the radius of the base of each tip's jet at the end of the last accepted step,
+    # [t, R_apex] by tip, from which its rate of change is read, and the kink regions by chain
+    # (reconnect.kink_regions)
+    apex_history: dict = field(default_factory=dict)
+    kinks: dict = field(default_factory=dict)
 
 
 class CollapseDriver:
@@ -532,6 +582,13 @@ class CollapseDriver:
         self._pyoomph_remeshes = 0
         # after a cut: the sub-steps flagged for a rebuild that a stop of the step's state cancelled
         self._distortion_skipped = 0
+        # after a cut: the rebuilds pyoomph made inside a step for an element turned inside out
+        # (RemeshWhen's on_inverted_element, armed by run())
+        self._inversion_remeshes = 0
+        # the remesh count at the end of the last accepted step: a mesh built since is fresh (the
+        # guard of the interface and the check of its curved elements, after a cut)
+        self._stepped_rc: int | None = None
+        self._nets_armed = False  # after a cut: pyoomph's inverted-element net (run())
         self.outdir = Path(outdir)
         (self.outdir / "profiles").mkdir(parents=True, exist_ok=True)
         self.state = _State()
@@ -554,6 +611,11 @@ class CollapseDriver:
         self._events.close()
         if self._chains is not None:
             self._chains.close()
+        if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
+            disarm = getattr(self.pb, "disarm_inverted_element_remesh", None)
+            if disarm is not None:
+                disarm()
+            self._nets_armed = False
 
     # --- after a cut --------------------------------------------------------------------------
 
@@ -574,27 +636,91 @@ class CollapseDriver:
         return {"tau": t - t_cut, "tau_p": t - t_p}
 
     def _post_cut_state(self) -> dict:
-        """Both chains of the current state, their record (``reconnect.post_cut_record``) and the
-        step limits they set, computed once per state."""
+        """Both chains of the current state, their record (``reconnect.post_cut_record``), the jets
+        of the bubble's tips (``reconnect.tip_jet``, without the flux), the base of each tip's jet
+        (``apexes``: :meth:`_apexes`), the quadratic elements of each chain (``edges``:
+        ``reconnect.edge_reading``) and the step limits they set, computed once per state."""
         key = (self._t(), self.pb.remesh_count, self.state.step)
         if self._post_cut_cache is not None and self._post_cut_cache[0] == key:
             return self._post_cut_cache[1]
+        s = self.s
         segs = self.pb.interface_segments()
         rec = post_cut_record(segs) if len(segs) == 2 else {}
         cl = courant_limit(segs)
-        R = rec.get("R_tip_min", math.nan)
-        state = {"segs": segs, "record": rec, "courant": cl,
+        tips, apexes = {}, {}
+        if len(segs) == 2:
+            bubble = next(c for c in segs if not c["open"])
+            tips = {name: tip_jet(bubble_end(bubble, name), r_search=s.r_search,
+                                  rise_tol=s.rise_tol, flat_aspect=s.flat_aspect,
+                                  jet_aspect=s.jet_aspect, jet_max_radius=s.jet_max_radius)
+                    for name in BUBBLE_TIP_SIGNS}
+            apexes = self._apexes(next(c for c in segs if c["open"]), bubble, tips)
+        edges = {("open" if c["open"] else "bubble"):
+                 edge_reading(np.column_stack([c["r"], c["z"]])) for c in segs}
+        R_apex = [a["R_apex"] for a in apexes.values()
+                  if math.isfinite(a["R_apex"]) and a["R_apex"] > 0.0]
+        R_apex_min = min(R_apex) if R_apex else math.inf
+        # the capillary time of the sharpest tip on the axis and of the sharpest jet base
+        R = min([x for x in (rec.get("R_tip_min", math.nan), R_apex_min) if math.isfinite(x)],
+                default=math.nan)
+        state = {"segs": segs, "record": rec, "courant": cl, "tips": tips, "apexes": apexes,
+                 "edges": edges, "R_apex_min": R_apex_min,
                  "dt_courant": self.reconnect.courant * cl["h_over_u"],
                  "dt_capillary": self.s.capillary * R**1.5 if math.isfinite(R) else math.inf}
         self._post_cut_cache = (key, state)
         return state
 
+    def _apexes(self, cavity: dict, bubble: dict, tips: dict) -> dict:
+        """The base of the jet on each tip on the axis after a cut where a resolved bump stands (the
+        rule by which its radius is a scale): the base (``r``, ``z``, the jet-base radius and
+        height in the frame of the axis), its node along its chain (``chain``, ``index``), the
+        vertex of the apex there (``apex_r``, ``apex_z``), its radius of curvature ``R_apex`` and
+        the opening angle of the groove around the jet (``reconnect.jet_base_apex``), and the fold
+        of that groove (``groove_gap``, ``groove_limit``, ``groove_arc``: ``reconnect.groove_gap``,
+        with the driver's fold limits). By tip name."""
+        s = self.s
+        out = {}
+        r, z = np.asarray(cavity["r"], dtype=float), np.asarray(cavity["z"], dtype=float)
+        jb = jet_base(Profile(r, z), s.r_search, s.rise_tol)
+        rise = float(z[0]) - jb.z_b
+        if jb.jet_born and jb.r_j > 0.0 and not rise <= s.flat_aspect * jb.r_j:
+            a = jet_base_apex(r, z, jb.index)
+            if a["apex"] > 0:
+                out["cavity_tip"] = {**a, "chain": "open", "index": a["apex"], "r": jb.r_j,
+                                     "z": jb.z_b}
+        n = len(bubble["r"])
+        for name, tj in tips.items():
+            if not (tj["bump"] and tj["r_j"] > 0.0 and not tj["flat_bump"]):
+                continue
+            end = bubble_end(bubble, name)
+            a = jet_base_apex(end["r"], end["z"], tj["index"])
+            if a["apex"] <= 0:
+                continue
+            a["apex_z"] *= end["sign"]  # in the frame of the axis
+            out[name] = {**a, "chain": "bubble",
+                         "index": a["apex"] if end["sign"] > 0 else n - 1 - a["apex"],
+                         "r": tj["r_j"], "z": tj["z_b"]}
+        for a in out.values():
+            c = cavity if a["chain"] == "open" else bubble
+            g = groove_gap(c["r"], c["z"], a["index"], ratio=s.fold_ratio, stop=s.fold_stop,
+                           stop_elements=s.fold_stop_elements)
+            a.update(groove_gap=g["gap"], groove_limit=g["limit"], groove_arc=g["arc"])
+        return out
+
+    def _fresh_mesh(self) -> bool:
+        """Whether the mesh was built since the last accepted step (the cut's, or a rebuild's)."""
+        return self._stepped_rc is None or self.pb.remesh_count != self._stepped_rc
+
     def _post_cut_stop(self) -> dict | None:
-        """The stops before a second change of topology, on both chains (post-cut mode)."""
+        """The stops before a second change of topology, on both chains (post-cut mode), with the
+        guard of the interface on its quadratic elements; on a freshly built mesh also the check of
+        its curved elements (:meth:`_jacobian_stop`): a rebuild is accepted only if every element
+        is valid."""
         cut = self._cut_record()
         if cut is None:
             return None
-        segs = self._post_cut_state()["segs"]
+        pc = self._post_cut_state()
+        segs = pc["segs"]
         # the chains as a rebuild takes them (mesh.FaradayCylinderMesh._current_chains: the ends on
         # the axis put on r = 0, the wall node already on the wall), so that the spline test of
         # the stops is the rebuild's own
@@ -605,14 +731,37 @@ class CollapseDriver:
                 if c["end_types"][end] == AXIS:
                     P[k, 0] = 0.0
             chains.append(Chain(P, tuple(c["end_types"])))
+        apexes: dict[str, list] = {}
+        for tip, a in pc["apexes"].items():
+            apexes.setdefault(a["chain"], []).append({"tip": tip, **a})
         s = self.s
+        fresh = self._fresh_mesh()
         stop = post_cut_stops(chains, CutGeometry(**cut["geometry"]), self.reconnect,
                               cut["sizing"]["h_tip"], neck_elements=s.neck_stop_elements,
                               fold_ratio=s.fold_ratio, fold_stop=s.fold_stop,
-                              fold_stop_elements=s.fold_stop_elements, fold_search=FOLD_SEARCH)
+                              fold_stop_elements=s.fold_stop_elements, fold_search=FOLD_SEARCH,
+                              apexes=apexes, guard={"fresh": fresh, "h_floor": s.h_floor,
+                                                    "refine_ratio": s.refine_ratio})
+        if stop is None and fresh:
+            stop = self._jacobian_stop()
         if stop is not None:
             stop.update(self._taus(self._t()))
         return stop
+
+    def _jacobian_stop(self) -> dict | None:
+        """``interface-unresolved`` (trigger ``curved-jacobian``) for a mesh with an element whose
+        scaled Jacobian may fall below the cut's ``jacobian_min`` (``reconnect.p2_jacobian_bounds``,
+        through ``FaradayProblem.curved_jacobian_bound``); None from a problem without the bound."""
+        bound = getattr(self.pb, "curved_jacobian_bound", None)
+        if bound is None:
+            return None
+        j = bound(self.reconnect.jacobian_min)
+        if j is None or not j["min"] < self.reconnect.jacobian_min:
+            return None
+        return {"reason": "interface-unresolved", "trigger": "curved-jacobian",
+                "jacobian_bound": j["min"], "limit": self.reconnect.jacobian_min, "r": j["r"],
+                "z": j["z"], "on_interface": j["on_interface"], "elements_below": j["below"],
+                "fresh": True}
 
     def _h_near_after_cut(self, r, z, near_r: float, focus_r: float, h_near: float) -> float:
         """The spacing near the collapse after a cut, where the focus sets it, on both chains.
@@ -662,42 +811,98 @@ class CollapseDriver:
         return h
 
     def _focus_floor(self) -> float:
-        """The smallest focus size of the driver's rule: ``h_floor``, and after a cut the cut's
-        focus size (``focus_size`` cut radii), the sizing in cut radii the cut gave its tips, so
-        that the meshes of a study in ``delta`` stay alike in cut radii; the landing run's
-        ``h_floor`` is no length of the cut. The bubble's bottom, a feature of the landing state,
-        keeps ``h_floor`` (:func:`reconnect.feature_regions`)."""
-        cut = self._cut_record()
-        if cut is None:
-            return self.s.h_floor
-        return self.reconnect.focus_size * float(cut.get("rmin") or cut["delta"])
+        """The smallest focus size of the driver's rule: ``h_floor``, after a cut too. A cut sizes
+        its features by their own scales, between ``h_floor`` and the cut's focus size
+        (``reconnect.feature_regions``): the cut's focus size is the coarsest size it allows near
+        the cut, not a floor, which met a sharp tip or the apex of a groove at the base of a jet
+        with one or two elements."""
+        return self.s.h_floor
 
-    def _feature_regions(self, cavity: dict, tips: dict) -> list[dict]:
+    def _apex_prediction(self, apexes: dict) -> dict:
+        """The base of each jet (``_post_cut_state``'s ``apexes``) with the radius predicted
+        ``apex_lookahead`` steps of the last step ahead, ``R_pred = R_apex - lookahead dt
+        |dR_apex/dt|``, its rate read against the end of the last accepted step (``apex_history``),
+        but never below half the radius read, so that a jump of the reading between two meshes
+        does not refine by more than that; ``R_apex`` without a history."""
+        st, r = self.state, self.reconnect
+        t = self._t()
+        out = {}
+        for tip, a in apexes.items():
+            a = dict(a)
+            R, prev = a["R_apex"], st.apex_history.get(tip)
+            a["R_pred"] = R
+            if prev is not None and math.isfinite(R) and st.dt_prev and t > prev[0] \
+                    and math.isfinite(prev[1]):
+                rate = abs(R - prev[1]) / (t - prev[0])
+                a["R_pred"] = max(R - r.apex_lookahead * st.dt_prev * rate, 0.5 * R)
+            out[tip] = a
+        return out
+
+    def _feature_regions(self, cavity: dict, tips: dict, U: float = 0.0) -> tuple[list[dict], dict]:
         """After a cut: the features of both chains (``reconnect.feature_regions``: the tips the cut
-        made at the cut's focus size, the bubble's bottom never coarser than at the landing, the
-        necks), each with the size it has in the current mesh (``size``, NaN for a feature the
-        current focus has no region for) and the longest and shortest element within its region
-        (``h_max``, ``h_min``, ``reconnect.region_spacing``); empty in a state whose topology has
-        changed, which a stop records."""
+        made at their own scale, never coarser than the cut's focus size, the bases of the jets,
+        the bubble's bottom never coarser than at the landing, the necks) and the ``kink_<chain>``
+        regions where the guard of the interface asks for a refinement (``reconnect.kink_regions``,
+        held for ``coarsen_hold`` local times of their chord at the speed ``U``), each with the size
+        it has in the current mesh (``size``, NaN for a feature the current focus has no region
+        for) and the longest and shortest element within its region (``h_max``, ``h_min``,
+        ``reconnect.region_spacing``; the shortest outside the finer regions within it, with the
+        reach of their grading); empty in a state whose topology has changed, which a stop records.
+        Also returns the kink regions as entries, which the step commits at its end."""
         pc = self._post_cut_state()
         segs = pc["segs"]
         if len(segs) != 2 or not pc["record"]:
-            return []
-        s, cut = self.s, self._cut_record()
+            return [], {}
+        s, cut, st = self.s, self._cut_record(), self.state
         regions = feature_regions(segs, cavity, tips, pc["record"], cut, self.reconnect,
                                   h_floor=s.h_floor, h_axis=self.pb.mesh_settings.h_axis,
                                   elements_per_scale=s.elements_per_scale,
-                                  focus_extent=s.focus_extent)
+                                  focus_extent=s.focus_extent,
+                                  apexes=self._apex_prediction(pc["apexes"]))
+        refine = interface_guard(pc["edges"], self.reconnect, fresh=self._fresh_mesh(),
+                                 h_floor=s.h_floor, refine_ratio=s.refine_ratio)["refine"]
+        kinks = kink_regions(st.kinks, pc["edges"], refine, t=self._t(), h_floor=s.h_floor,
+                             hold=lambda L: s.coarsen_hold * local_time(L, U))
+        regions += [{"name": g["name"], "target": g["target"], "r": g["r"], "z": g["z"],
+                     "radius": g["radius"], "ell": math.inf, "floor": s.h_floor,
+                     "released": g["released"]} for g in kinks.values()]
         focus = self.pb.active_mesh_template().focus
         axis_tips = [float(c["z"][k]) for c in segs for k, end in ((0, 0), (-1, 1))
                      if c["end_types"][end] == AXIS]
         for g in regions:
             current = focus.region(g["name"]) if focus is not None else None
             g["size"] = current.size if current is not None else math.nan
-            g["h_max"], g["h_min"] = region_spacing(
-                segs, g, axis_tips, cut.get("sizing"),
-                current.size if current is not None else g["target"])
-        return regions
+        grading = s.focus_grading
+        for g in regions:
+            own = g["size"] if math.isfinite(g["size"]) else g["target"]
+            finer = []
+            for f in regions:
+                other = f["size"] if math.isfinite(f["size"]) else f["target"]
+                if f is not g and other < own:
+                    finer.append((f["r"], f["z"], f["radius"] + (own - other) / grading))
+            g["h_max"], g["h_min"] = region_spacing(segs, g, axis_tips, cut.get("sizing"), own,
+                                                    finer)
+        return regions, kinks
+
+    def _commit_post_cut(self, m: dict):
+        """After a cut, at the end of an accepted step (its last measurement ``m``): keep the radius
+        of each jet's base, from which the next step reads its rate, and the kink regions, dropping
+        each released one whose size in the current mesh is back at the chord it met."""
+        if self._cut_record() is None:
+            return
+        st = self.state
+        t = m["time"]
+        st.apex_history = {tip: [t, float(a["R_apex"])]
+                           for tip, a in self._post_cut_state()["apexes"].items()
+                           if math.isfinite(a["R_apex"])}
+        focus = self.pb.active_mesh_template().focus
+        kinks = {}
+        for chain, g in (m.get("kinks") or {}).items():
+            current = focus.region(g["name"]) if focus is not None else None
+            if g["released"] and (current is None or current.size >= g["h_before"] * (1 - 1e-9)):
+                continue
+            kinks[chain] = dict(g)
+        st.kinks = kinks
 
     def _regions_focus(self, regions: list[dict], *, keep: bool) -> Focus:
         """The focus of a rebuild after a cut: one region per feature (``mesh.FocusRegion``) at its
@@ -760,6 +965,12 @@ class CollapseDriver:
         for g in m.get("regions", []):
             if g["name"] in JET_TIPS:
                 values[f"h_{g['name']}"], values[f"size_{g['name']}"] = g["h_max"], g["size"]
+        for tip, a in pc["apexes"].items():  # the base of each jet: NaN without a jet
+            for k in ("R_apex", "groove_gap", "groove_angle"):
+                values[f"{k}_{tip}"] = a[k]
+        for chain, rd in pc["edges"].items():
+            values[f"edge_turn_{chain}"] = rd["turn"]
+            values[f"edge_midside_{chain}"] = rd["midside"]
 
         def cell(c):
             v = values.get(c, math.nan)
@@ -782,16 +993,13 @@ class CollapseDriver:
         radius shrinks with the element length, so each refinement reads it sharper and, as a
         scale, would refine it again (on that cavity the radius read at the bubble's bottom fell
         from 0.016 to 6.6e-4 in four rebuilds, the step with it). They bound the step instead
-        (``dt_capillary``, from ``R_tip_min``)."""
-        s = self.s
+        (``dt_capillary``, from ``R_tip_min``), and the fresh top's radius sizes the mesh at that
+        tip (``reconnect.feature_regions``), floored at ``h_floor``."""
         pc = self._post_cut_state()
         bubble = next((c for c in pc["segs"] if not c["open"]), None)
         if bubble is None or len(pc["segs"]) != 2:  # a changed topology, which a stop records
             return None, {}, math.inf
-        tips = {name: tip_jet(bubble_end(bubble, name), r_search=s.r_search, rise_tol=s.rise_tol,
-                              flat_aspect=s.flat_aspect, jet_aspect=s.jet_aspect,
-                              jet_max_radius=s.jet_max_radius)
-                for name in BUBBLE_TIP_SIGNS}
+        tips = {name: dict(tj) for name, tj in pc["tips"].items()}  # completed by measure()
         rec = pc["record"]
         scales = [rec["r_neck_bubble"], rec["z_bubble_top"] - rec["z_bubble_bottom"]]
         scales += [tj["r_j"] for tj in tips.values()
@@ -871,7 +1079,9 @@ class CollapseDriver:
         # after a cut the bubble's features count too (inf before a cut or without a bubble)
         after_cut = self._cut_record() is not None
         bubble, tips, ell_bubble = self._bubble_features() if after_cut else (None, {}, math.inf)
-        ell_measured = min(ell_open, ell_bubble)
+        # and the radius of curvature at the base of each jet, the apex of the groove around it
+        R_apex = self._post_cut_state()["R_apex_min"] if after_cut else math.inf
+        ell_measured = min(ell_open, ell_bubble, R_apex)
         ell = limit_scale(ell_measured, self.state.ell_prev, s.scale_growth)
         h_focus = float(np.clip(ell / s.elements_per_scale, self._focus_floor(), h_axis))
 
@@ -930,9 +1140,10 @@ class CollapseDriver:
 
         flat = jb.index > 0 and rise <= s.flat_aspect * max(jb.r_j, h_focus)
         # after a cut: the features of both chains, each meshed at its own size
-        regions = self._feature_regions(
+        regions, kinks = self._feature_regions(
             {"z_tip": float(z[0]), "kappa": kappa, "r_j": jb.r_j, "rise": rise,
-             "bump": jb.jet_born and cavity, "flat_bump": flat_bump}, tips) if after_cut else []
+             "bump": jb.jet_born and cavity, "flat_bump": flat_bump}, tips,
+            U) if after_cut else ([], {})
         return {"time": self._t(), "axis_lowest": jb.index == 0 or flat, "flat_bump": flat_bump,
                 "z_axis": float(z[0]), "w_axis": float(uz[0]), "axis_curvature": kappa,
                 "cavity": cavity, "jet_born": born, "r_j": r_j,
@@ -943,7 +1154,8 @@ class CollapseDriver:
                 "angles": angles, "focus_radius": focus_r, "profile": (r, z, ur, uz),
                 "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
                 "fold_h_elem": fold.h_elem, "fold_limit": fold_limit,
-                "tips": tips, "ell_bubble": ell_bubble, "regions": regions}
+                "tips": tips, "ell_bubble": ell_bubble, "R_apex": R_apex, "regions": regions,
+                "kinks": kinks}
 
     # --- bookkeeping --------------------------------------------------------------------------
 
@@ -1271,7 +1483,9 @@ class CollapseDriver:
             if self.reconnect is not None:
                 meta.update(self._taus(meta["time"]),
                             coarsen_blocked_until=st.coarsen_blocked_until,
-                            tip_born=dict(st.tip_born))
+                            tip_born=dict(st.tip_born),
+                            apex_history={k: list(v) for k, v in st.apex_history.items()},
+                            kinks={k: dict(v) for k, v in st.kinks.items()})
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -1339,6 +1553,7 @@ class CollapseDriver:
         self._checks_pending = meta.get("resume_at") == RESUME_REMESH_CHECK
         st.last_state_t = meta["time"]
         self.pb.remesh_count = meta["remesh_count"]
+        self._stepped_rc = self.pb.remesh_count  # the mesh of the dump has been stepped on
         if meta.get("focus"):
             self.pb.active_mesh_template().focus = Focus(**meta["focus"])
         if "episodes" in meta:
@@ -1360,6 +1575,9 @@ class CollapseDriver:
             st.coarsen_blocked_until = int(meta.get("coarsen_blocked_until", -10**9))
             # dumps written before the jets of the bubble's tips were tracked: none stands yet
             st.tip_born = {str(k): bool(v) for k, v in (meta.get("tip_born") or {}).items()}
+            st.apex_history = {str(k): [float(x) for x in v]
+                               for k, v in (meta.get("apex_history") or {}).items()}
+            st.kinks = {str(k): dict(v) for k, v in (meta.get("kinks") or {}).items()}
         ep = self.episodes
         resume = {"resume_at": RESUME_REMESH_CHECK} if self._checks_pending else {}
         self._event("restart", self.measure(), from_time=meta["time"],
@@ -1392,6 +1610,7 @@ class CollapseDriver:
         st.coarsen_held_until = -math.inf
         st.refine_blocked_until = st.coarsen_blocked_until = -10**9
         st.tip_born = {}
+        st.apex_history, st.kinks = {}, {}
         self._checks_pending = False  # the cut rebuilt the mesh; the next step follows at once
         m = self.measure()
         geometry = record.get("geometry", {})
@@ -1493,7 +1712,10 @@ class CollapseDriver:
         if math.isfinite(m["r_neck"]) and m["r_neck"] < neck_limit:
             return {"reason": "pinch-off-approach", "trigger": "neck-radius",
                     "r_neck": m["r_neck"], "z_neck": m["z_neck"], "neck_limit": neck_limit}
-        if m.get("fold_gap", math.inf) < m.get("fold_limit", math.nan):
+        # after a cut the fold stop is the post-cut one, on both chains, which names a fold across
+        # the groove at the base of a jet (annular-contact-approach; reconnect.post_cut_stops)
+        if self._cut_record() is None and m.get("fold_gap", math.inf) < m.get("fold_limit",
+                                                                               math.nan):
             return {"reason": "self-contact-approach", "trigger": "fold-gap",
                     "fold_gap": m["fold_gap"], "fold_r": m["fold_r"], "fold_z": m["fold_z"],
                     "fold_arc": m["fold_arc"], "fold_h_elem": m["fold_h_elem"],
@@ -1548,6 +1770,8 @@ class CollapseDriver:
             # remesh check its run made after keeping it, so that the restart steps from the mesh
             # that run stepped from; the loop checks the stops of the new mesh
             m, _ = self._remesh_checks(m)
+        if r is not None:
+            self._arm_post_cut_nets()
         while True:
             found = self._stop(m)
             if found is not None:
@@ -1601,6 +1825,8 @@ class CollapseDriver:
                     if MIN_DT_FAILURE in error:
                         stop = classify_failure(m, s, error)
                 if stop is None:
+                    if r is not None:  # the state the failing step started from, for forensics
+                        self._write_lastgood(m, exc)
                     raise
                 stop["dt_attempted"] = dt
                 if defer and flagged:
@@ -1611,11 +1837,19 @@ class CollapseDriver:
             st.step += 1
             dt = self._t() - t
             st.dt_prev = dt
+            inside = pb.remesh_count - rebuilds  # rebuilds pyoomph made inside the step
+            self._stepped_rc = pb.remesh_count
             flags = self._distortion_flags()
             if not defer:  # pyoomph rebuilt inside the solve wherever distortion asked
-                self._pyoomph_remeshes += pb.remesh_count - rebuilds
+                self._pyoomph_remeshes += inside
+            elif inside:  # after a cut: for an element turned inside out (_arm_post_cut_nets)
+                self._inversion_remeshes += inside
+            if r is not None:  # an element below the cut's absolute quality floor
+                flags += self._quality_floor_flags()
             # with a focus, the driver's rebuild, before the step is measured, as pyoomph's was
             m = self._distortion_remesh(flags) if defer and flags else self.measure()
+            if defer and inside and r is not None:
+                self._event("remesh", m, reason="inverted-element", rebuilds=inside)
             self._checks_pending = True  # until the remesh check of this step
             self._track(m)
             self._write_row(m, dt, time.time() - wall0, self._singular(m))
@@ -1658,14 +1892,19 @@ class CollapseDriver:
                     found["distortion_rebuild_skipped"] = self._distortion_skipped
                 stop = found
                 break
-            self._maybe_snapshot(m)
+            if r is not None and self._edge_turn_max() > r.edge_turn_refine:
+                self._snapshot(m, "edge-turn")  # every step while an element bends this much
+            else:
+                self._maybe_snapshot(m)
             m, found = self._remesh_checks(m)
             if found is not None:
                 stop = found
                 break
+            self._commit_post_cut(m)
             if self._t() - st.last_state_t >= self._state_interval():
                 self.save_state()
         if r is not None:  # after a cut the state the run ends on is a dump too
+            self._commit_post_cut(m)
             stop["end_state"] = str(self._save_end_state())
         if self.keep_stop_state and stop.get("trigger") == "neck-radius":
             # the measured state of an accepted step: a landing state for a reconnection
@@ -1683,5 +1922,59 @@ class CollapseDriver:
             out["landing"] = self._landing_summary()
         if r is not None:
             t_cut, t_p = self._cut_times()
-            out["cut"] = {"t_cut": t_cut, "t_p": t_p, "tau_end": r.tau_end, **self._taus(self._t())}
+            out["cut"] = {"t_cut": t_cut, "t_p": t_p, "tau_end": r.tau_end, **self._taus(self._t()),
+                          "inverted_element_remesh": self._nets_armed,
+                          "inverted_element_remeshes": self._inversion_remeshes}
         return out
+
+    # --- after a cut: the nets and the forensics ----------------------------------------------
+
+    def _arm_post_cut_nets(self):
+        """After a cut, before the first step: arm pyoomph's net for an element that turns inside
+        out within a step (``reconnect.inverted_element_remesh``;
+        ``FaradayProblem.arm_inverted_element_remesh``), which restores the start of the step,
+        rebuilds and retries it (counted as ``inverted_element_remeshes``, event ``remesh`` with
+        ``reason`` ``inverted-element``). The rebuilds of the driver are checked as every rebuild
+        after the cut is; this one is pyoomph's, a last resort."""
+        if self._nets_armed or not self.reconnect.inverted_element_remesh:
+            return
+        arm = getattr(self.pb, "arm_inverted_element_remesh", None)
+        self._nets_armed = bool(arm()) if arm is not None else False
+
+    def _quality_floor_flags(self) -> list[dict]:
+        """After a step after a cut: a distortion reading with trigger ``absolute-quality`` when an
+        element's quality has fallen below the cut's ``quality_floor``
+        (``FaradayProblem.quality_floor_reading``), so that the driver rebuilds; nothing from a
+        problem that cannot read it."""
+        read = getattr(self.pb, "quality_floor_reading", None)
+        if read is None:
+            return []
+        reading = read(self.reconnect.quality_floor)
+        return [] if reading is None else [reading]
+
+    def _edge_turn_max(self) -> float:
+        """The largest turn of the tangent across a quadratic element of either chain (degrees)."""
+        turns = [rd["turn"] for rd in self._post_cut_state()["edges"].values()
+                 if math.isfinite(rd["turn"])]
+        return max(turns, default=0.0)
+
+    def _write_lastgood(self, m: dict, exc: BaseException):
+        """After a failed step after a cut: the profiles of the last state the driver measured (the
+        start of the failing step), from what it kept of them, as ``profile_<step>_lastgood.txt``
+        and ``profile_<step>_lastgood_bubble.txt``: the problem itself holds the rejected
+        iterate."""
+        st = self.state
+        r, z, ur, uz = m["profile"]
+        header = {"time": m["time"], "step": st.step, "reason": "lastgood",
+                  "remesh_count": self.pb.remesh_count, "error": f"{type(exc).__name__}: {exc}",
+                  **self._taus(m["time"]), "chain": "open"}
+        path = self.outdir / "profiles" / f"profile_{st.step:06d}_lastgood.txt"
+        np.savetxt(path, np.column_stack([r, z, ur, uz]), header=json.dumps(header) +
+                   "\nr z u_r u_z", comments="# ")
+        cached = self._post_cut_cache[1] if self._post_cut_cache is not None else None
+        bubble = next((c for c in cached["segs"] if not c["open"]), None) if cached else None
+        if bubble is not None:
+            np.savetxt(path.with_name(path.stem + "_bubble.txt"),
+                       np.column_stack([bubble[k] for k in ("r", "z", "u_r", "u_z")]),
+                       header=json.dumps(dict(header, chain="bubble")) + "\nr z u_r u_z",
+                       comments="# ")

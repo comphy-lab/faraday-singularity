@@ -308,6 +308,83 @@ class FaradayProblem(Problem):
         return {"trigger": trigger, "ratio": float(ratio), "size_ratio_min": float(size_min),
                 "size_ratio_max": float(size_max), "quality_ratio_min": float(quality_min)}
 
+    def quality_floor_reading(self, floor: float) -> dict | None:
+        """A :meth:`distortion_reading` with trigger ``absolute-quality`` (``ratio``: the smallest
+        such quality) when an element of the liquid mesh has fallen below the quality ``floor``
+        (pyoomph's ``get_quality_factor``: the smallest Jacobian at its integration points over its
+        mean) since its build, at which it had at least that; None otherwise. ``RemeshWhen`` asks
+        only for a fifth of the quality at the build, which an element built at a mediocre quality
+        loses late. An element built below the floor is not flagged here: rebuilding would make it
+        again at every step, and a rebuilt mesh is checked on its own (``curved_jacobian_bound``).
+        It only reads the mesh."""
+        q_min = math.inf
+        for e in self.get_mesh("liquid").elements():
+            q = e.get_quality_factor()
+            if q < floor and q < q_min and e.get_initial_quality_factor() >= floor:
+                q_min = q
+        if not q_min < floor:
+            return None
+        reading = self.distortion_reading()
+        reading.update(trigger="absolute-quality", ratio=float(q_min), quality_floor=float(floor))
+        return reading
+
+    def curved_jacobian_bound(self, limit: float | None = None) -> dict | None:
+        """The smallest lower bound of the scaled Jacobian over the elements of the liquid mesh
+        (``reconnect.p2_jacobian_bounds``: the Bezier bound of ``det(dx/ds)`` over that of the
+        straight-sided triangle; exact at the vertices), with the centroid of that element
+        (``r``, ``z``), whether one of its nodes lies on the free surface (``on_interface``), the
+        number of elements below ``limit`` (``below``) and of elements; None for a mesh of other
+        than six-node triangles. Cached for the mesh and time it was read on."""
+        key = (self.remesh_count, self.get_current_time(dimensional=False, as_float=True), limit)
+        cached = getattr(self, "_jacobian_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        from scipy.spatial import cKDTree
+
+        from .reconnect import p2_jacobian_bounds
+
+        values, elements, types, fields = self.get_mesh("liquid").to_numpy(False, True, 0,
+                                                                           False)[:4]
+        elements = np.asarray(elements)
+        if elements.ndim != 2 or elements.shape[1] != 6 or len(np.unique(types)) != 1:
+            return None
+        xy = np.asarray(values)[:, [fields["coordinate_x"], fields["coordinate_y"]]]
+        bounds = p2_jacobian_bounds(xy, elements)
+        k = int(np.nanargmin(bounds)) if np.isfinite(bounds).any() else int(np.argmin(bounds))
+        centre = xy[elements[k, :3]].mean(axis=0)
+        cache = self.get_cached_mesh_data("liquid/interface", nondimensional=True,
+                                          tesselate_tri=False)
+        surface = np.asarray(cache.get_coordinates())[:2].T
+        d, _ = cKDTree(surface).query(xy[elements[k]])
+        out = {"min": float(bounds[k]), "r": float(centre[0]), "z": float(centre[1]),
+               "on_interface": bool(np.min(d) <= 1e-12 * max(1.0, self.nd.radius)),
+               "below": int(np.sum(bounds < limit)) if limit is not None else -1,
+               "elements": len(bounds)}
+        self._jacobian_cache = (key, out)
+        return out
+
+    def arm_inverted_element_remesh(self) -> bool:
+        """After a cut: pyoomph's net for an element that turns inside out within a step (as
+        ``RemeshWhen(on_inverted_element=True)`` arms it): the process-wide detection of inverted
+        elements on, and the liquid's template among those pyoomph rebuilds when a step stalls on
+        one, restoring the state the step started from and retrying it. Returns whether it was
+        armed (not on a problem that does not remesh)."""
+        template = self.active_mesh_template()
+        if not self.remesh or template is None or getattr(template, "remesher", None) is None:
+            return False
+        from pyoomph import _pyoomph_core
+
+        _pyoomph_core.set_detect_inverted_elements(True)
+        self._domains_remesh_on_inversion.add(template)
+        return True
+
+    def disarm_inverted_element_remesh(self):
+        """Undo :meth:`arm_inverted_element_remesh` (the detection is process-wide)."""
+        from pyoomph import _pyoomph_core
+
+        _pyoomph_core.set_detect_inverted_elements(False)
+        self._domains_remesh_on_inversion.clear()
+
     def take_distortion_flags(self) -> list[dict]:
         """The distortion ``RemeshWhen`` flagged on the accepted steps since the last call, one
         :meth:`distortion_reading` per flagged step (empty without), and clear the request.
