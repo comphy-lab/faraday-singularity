@@ -41,7 +41,11 @@ This module holds what needs no finite-element problem:
   the cut removes from the gas (:func:`chain_volumes`), and the gas volume within a box around the
   cut (:func:`gas_volume_in_box`), which separates the volume the cut adds to the liquid from the
   drift of rebuilding the whole free surface;
-* the stops of a run after the cut (:func:`post_cut_stops`), on both chains.
+* the stops of a run after the cut (:func:`post_cut_stops`), on both chains, and what the run
+  records of both chains after it and steps by (:func:`post_cut_record`: the three tips on the axis
+  with their radii of curvature, the bridge, the bubble and the necks of both chains;
+  :func:`courant_limit`: the time in which the fastest node of either chain, relative to its element
+  length, crosses an element).
 
 Units are those of the solver: length ``1/k``. The neck radius ``r_n`` is the narrowest interior
 local minimum of ``r`` along the free surface, as the collapse driver measures it
@@ -64,7 +68,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .collapse import Profile, necks
+from .collapse import Profile, axis_curvature, necks
 from .selfcontact import InterfaceSelfIntersection, check_simple_interface, fold_gap
 
 AXIS, FIXED = "axis", "fixed"
@@ -738,3 +742,68 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     if vb < settings.bubble_stop * cut.bubble_volume:
         return {"reason": "bubble-vanishing", "bubble_volume": vb}
     return None
+
+
+def tip_radius(r, z, nodes: int = 6) -> float:
+    """Radius of curvature ``1/|z''(0)|`` of a free surface at its end on the axis, the arrays
+    ordered from that end (:func:`~faraday_singularity.collapse.axis_curvature`); NaN when the fit
+    fails or the tip is flat."""
+    k = axis_curvature(Profile(np.asarray(r, dtype=float), np.asarray(z, dtype=float)), nodes)
+    return 1.0 / abs(k) if math.isfinite(k) and k != 0.0 else math.nan
+
+
+def post_cut_record(segs) -> dict:
+    """What a run records of both chains after a cut, from ``FaradayProblem.interface_segments``.
+
+    The three tips on the axis (the bubble's bottom and top, the cavity's tip) with their heights,
+    axial speeds and radii of curvature, the smallest of those radii (``R_tip_min``), the bridge
+    of liquid between the bubble and the cavity, the bubble's volume and widest point, and the
+    narrowest interior neck of each chain (NaN without one)."""
+    bubble = next(c for c in segs if not c["open"])
+    cavity = next(c for c in segs if c["open"])
+    br, bz, bw = (np.asarray(bubble[k], dtype=float) for k in ("r", "z", "u_z"))
+    cr, cz, cw = (np.asarray(cavity[k], dtype=float) for k in ("r", "z", "u_z"))
+    k = int(np.argmax(br))
+    nb = chain_neck(np.column_stack([br, bz]), tuple(bubble["end_types"]))
+    no = chain_neck(np.column_stack([cr, cz]), tuple(cavity["end_types"]))
+    out = {"z_bubble_bottom": float(bz[0]), "w_bubble_bottom": float(bw[0]),
+           "R_bubble_bottom": tip_radius(br, bz),
+           "z_bubble_top": float(bz[-1]), "w_bubble_top": float(bw[-1]),
+           "R_bubble_top": tip_radius(br[::-1], bz[::-1]),
+           "z_cavity_tip": float(cz[0]), "w_cavity_tip": float(cw[0]),
+           "R_cavity_tip": tip_radius(cr, cz),
+           "bridge": float(cz[0] - bz[-1]),
+           "bubble_volume": revolved_volume(np.column_stack([br, bz])),
+           "bubble_r_max": float(br[k]), "bubble_z_r_max": float(bz[k]),
+           "r_neck_bubble": nb[0], "z_neck_bubble": nb[1], "r_neck_open": no[0], "z_neck_open": no[1]}
+    radii = [out[f"R_{x}"] for x in ("bubble_bottom", "bubble_top", "cavity_tip")]
+    finite = [x for x in radii if math.isfinite(x)]
+    out["R_tip_min"] = min(finite) if finite else math.nan
+    return out
+
+
+def courant_limit(segs) -> dict:
+    """The smallest ``h/|u|`` over the nodes of every chain, and where it is.
+
+    ``h`` is a node's element length, twice the shorter of its two segments along the chain (the
+    elements are quadratic, so consecutive nodes are half an element apart), and ``|u|`` its speed.
+    A step at most ``courant`` times this moves no node by more than that fraction of its element,
+    wherever the tips and the jets of either chain have gone: unlike a window about the cut, it
+    follows them. ``chain`` is 0 for the open chain and 1 for the bubble; ``inf`` with every node at
+    rest."""
+    best = {"h_over_u": math.inf, "h": math.nan, "U": 0.0, "chain": -1, "r": math.nan,
+            "z": math.nan}
+    for c in segs:
+        r, z = np.asarray(c["r"], dtype=float), np.asarray(c["z"], dtype=float)
+        if len(r) < 2:
+            continue
+        ds = np.hypot(np.diff(r), np.diff(z))
+        h = 2.0 * np.minimum(np.r_[ds[0], ds], np.r_[ds, ds[-1]])
+        u = np.hypot(np.asarray(c["u_r"], dtype=float), np.asarray(c["u_z"], dtype=float))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(u > 0.0, h / u, math.inf)
+        i = int(np.argmin(ratio))
+        if ratio[i] < best["h_over_u"]:
+            best = {"h_over_u": float(ratio[i]), "h": float(h[i]), "U": float(u[i]),
+                    "chain": 0 if c["open"] else 1, "r": float(r[i]), "z": float(z[i])}
+    return best

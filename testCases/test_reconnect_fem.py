@@ -721,11 +721,13 @@ PINCH = (1e-4, 2e-2, 0.56)  # t_p, A, alpha of the neck samples given to the lan
 @pytest.fixture(scope="module")
 def landing_run(tmp_path_factory):
     """A landing state of the synthetic cavity, with the records of the run that wrote it (a
-    stand-in commit) and the neck samples of a power-law neck ``A (t_p - t)^alpha`` before it."""
+    stand-in commit) and the neck samples of a power-law neck ``A (t_p - t)^alpha`` before it; the
+    case of that run, one derived from it for the prototype, and one for the production runner's
+    cut (the landing run's case with a ``collapse.reconnect`` block at ``delta = 1.05 r_n``)."""
     root = tmp_path_factory.mktemp("prototype")
     landing = root / "landing"
     landing.mkdir()
-    s = ReconnectSettings(delta=1.05 * R_N)
+    s = ReconnectSettings(**FAST_CUT)
     with neck_problem(landing, s) as pb:
         pb.initialise()
         impose_closing_flow(pb)
@@ -733,13 +735,19 @@ def landing_run(tmp_path_factory):
         t_p, A, alpha = PINCH
         ts = -1e-6 * np.arange(60)[::-1]  # up to the state, at t = 0
         driver.state.neck_samples = [[float(t), float(A * (t_p - t) ** alpha)] for t in ts]
-        state = driver.keep_state(landing / "states" / "stop_00000000.dump", stop={})
+        seg = pb.interface_segments()[0]
+        r_n, z_n, _ = neck_radius(seg["r"], seg["z"])
+        delta = 1.05 * r_n
+        info = {"delta": delta, "r_neck": r_n, "z_neck": z_n, "delta_over_r_neck": 1.05}
+        state = driver.keep_state(landing / "states" / f"landing_{delta:.6g}.dump", landing=info,
+                                  pinch=driver.pinch_time())
         driver.close()
+    # every step after the cut is dumped (state_dt), so that a restart can start from any of them
     parent_case = {"schema": "pyoomph-case-v1", "case_id": "neck-landing",
                    "geometry": {"kind": "axisymmetric"}, "physics": PHYSICS, "mesh": MESH,
                    "tolerances": {"newton": 1e-8},
                    "time_stepping": {"scheme": "BDF2", "steps_per_forcing_period": 100},
-                   "collapse": {"keep_stop_state": True},
+                   "collapse": {"keep_stop_state": True, "state_dt": 1e-6, "state_keep": 10},
                    "output": {"cadence": 0.25, "cadence_unit": "forcing periods",
                               "write_states": False},
                    "completion": {"kind": "event", "t_max": 10, "unit": "forcing periods"}}
@@ -754,13 +762,27 @@ def landing_run(tmp_path_factory):
         {"case": parent_case, "provenance": {"case_sha256": digest}}))
     case = json.loads(json.dumps(parent_case))
     case["case_id"] = "neck-prototype"
-    case["collapse"] = {"reconnect": dict(FAST_CUT, delta=1.0)}
+    case["collapse"]["reconnect"] = dict(FAST_CUT, delta=1.0)
     case_path = root / "case.json"
     case_path.write_text(json.dumps(case))
-    return {"state": state, "case": case_path, "digest": digest}
+    cut = json.loads(json.dumps(parent_case))
+    cut["case_id"] = "neck-cut"
+    cut["collapse"]["reconnect"] = dict(FAST_CUT, delta=delta, tau_end=3e-5)
+    cut_path = root / "cut-case.json"
+    cut_path.write_text(json.dumps(cut))
+    return {"state": state, "case": case_path, "digest": digest, "cut_case": cut_path,
+            "delta": delta, "r_neck": r_n}
+
+
+def _columns(path: Path) -> dict[str, np.ndarray]:
+    cols = path.read_text().splitlines()[0][2:].split("\t")
+    data = np.loadtxt(path, ndmin=2)
+    return {c: data[:, k] for k, c in enumerate(cols)}
 
 
 def test_prototype_cuts_a_landing_state_and_steps(landing_run, tmp_path):
+    """The prototype cuts at a ratio to the state's neck and steps under the collapse driver in its
+    post-cut mode, as the production runner does."""
     state = landing_run["state"]
     out = tmp_path / "out"
     proc = subprocess.run([sys.executable, str(ROOT / "simulationCases" / "reconnect_prototype.py"),
@@ -770,6 +792,7 @@ def test_prototype_cuts_a_landing_state_and_steps(landing_run, tmp_path):
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
     status = json.loads((out / "run_status.json").read_text())
     assert status["state"] == "completed" and status["steps"] == 2
+    assert status["stop"]["reason"] == "max-steps"
     cut = json.loads((out / "cut_diagnostics.json").read_text())
     assert cut["delta"] == pytest.approx(1.05 * cut["r_neck"])
     # the pinch time, fitted to the neck samples the landing state carries
@@ -779,24 +802,21 @@ def test_prototype_cuts_a_landing_state_and_steps(landing_run, tmp_path):
     assert pinch["t_p"] == pytest.approx(t_p, rel=1e-3)
     assert pinch["alpha"] == pytest.approx(alpha, rel=1e-2)
     assert pinch["t_cut_minus_t_p"] == pytest.approx(cut["t_cut"] - pinch["t_p"], abs=1e-15)
-    rows = np.loadtxt(out / "steps.txt")
-    assert rows.shape[0] == 3
-    cols = (out / "steps.txt").read_text().splitlines()[0][2:].split("\t")
-    tau, dt = rows[:, cols.index("tau")], rows[:, cols.index("dt")]
+    rows = _columns(out / "chains.txt")
+    assert len(rows["step"]) == 3
+    tau, dt = rows["tau"], rows["dt"]
     assert tau[0] == 0.0 and dt[1] == pytest.approx(1e-5) and dt[2] == pytest.approx(1.25e-5)
-    assert np.allclose(rows[:, cols.index("tau_p")], rows[:, cols.index("time")] - pinch["t_p"],
-                       rtol=0, atol=1e-15)
-    # the Courant limit uses the smallest element near the cut, at most the cut's tip size
-    h_cut, U_cut = rows[1:, cols.index("h_cut")], rows[1:, cols.index("U_cut")]
-    assert np.all(h_cut <= cut["sizing"]["h_tip"]) and np.all(h_cut > 0)
-    assert np.all(dt[1:] <= 0.2 * h_cut / U_cut * (1 + 1e-12))
-    assert np.all(np.isfinite(rows[:, cols.index("momentum_z")]))
-    for k in range(3):
-        for kind in ("open", "bubble"):
-            path = out / "profiles" / f"postcut_{k:04d}_{kind}.txt"
-            header = json.loads(path.read_text().splitlines()[0][2:])
-            assert header["t_p"] == pinch["t_p"] and header["tau_p"] == pytest.approx(
-                header["time"] - pinch["t_p"], abs=1e-15)
+    assert np.allclose(rows["tau_p"], rows["time"] - pinch["t_p"], rtol=0, atol=1e-15)
+    # each step within the limits both chains set at its start
+    assert np.all(dt[1:] <= np.minimum(rows["dt_courant"], rows["dt_capillary"])[:-1] * (1 + 1e-12))
+    assert np.all(np.isfinite(rows["momentum_z"])) and np.all(rows["bridge"] > 0)
+    table = _columns(out / "collapse.txt")
+    assert np.allclose(table["tau_p"], table["time"] - pinch["t_p"], rtol=0, atol=1e-15)
+    for path in sorted((out / "profiles").glob("profile_*_bubble.txt")):
+        header = json.loads(path.read_text().splitlines()[0][2:])
+        assert header["chain"] == "bubble" and header["tau_p"] == pytest.approx(
+            header["time"] - pinch["t_p"], abs=1e-15)
+        assert path.with_name(path.name.replace("_bubble", "")).is_file()
     for name in (f"precut_{cut['delta']:.6g}", f"postcut_{cut['delta']:.6g}"):
         assert (out / "states" / f"{name}.dump").is_file()
         assert (out / "states" / f"{name}.json").is_file()
@@ -805,18 +825,20 @@ def test_prototype_cuts_a_landing_state_and_steps(landing_run, tmp_path):
     events = [json.loads(x) for x in (out / "events.jsonl").read_text().splitlines()]
     assert [e["event"] for e in events[:2]] == ["restart", "cut"]
     assert events[1]["t_pinch"] == pinch["t_p"] and events[1]["in_cut_radii"] == cut["in_cut_radii"]
+    assert events[1]["tau"] == 0.0 and events[-1]["event"] == "stop"
     manifest = json.loads((out / "run-manifest.json").read_text())
+    assert manifest["schema"] == "faraday-reconnect-prototype-v1"
     assert manifest["state"]["path"] == str(state.resolve())
     parent = manifest["state"]["parent_record"]
     assert parent["case_sha256"] == landing_run["digest"] and parent["component_commit"] == "b" * 40
-    assert parent["derived_keys"] == ["case_id", "collapse.keep_stop_state", "collapse.reconnect"]
-    # the postcut state cannot be continued by either runner
+    assert parent["derived_keys"] == ["case_id", "collapse.reconnect"]
+    # the prototype makes one cut per run: it does not continue its postcut state
     post = out / "states" / f"postcut_{cut['delta']:.6g}.dump"
     proc = subprocess.run([sys.executable, str(ROOT / "simulationCases" / "reconnect_prototype.py"),
                            str(landing_run["case"]), "--state", str(post), "--outdir",
                            str(tmp_path / "again"), "--delta-ratio", "1.05", "--check"],
                           capture_output=True, text=True, timeout=300, check=False)
-    assert proc.returncode != 0 and "post-cut state is not supported" in proc.stderr
+    assert proc.returncode != 0 and "one cut per run" in proc.stderr
 
 
 FAILING_PROTOTYPE = """

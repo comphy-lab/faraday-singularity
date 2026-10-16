@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""Reconnection prototype: load a landing state, cut the neck, project, and take a few steps.
+"""Reconnection prototype: load a landing state, cut the neck, and take a few steps after it.
 
 Example::
 
     .venv-pyoomph-f912ac10-py313/bin/python simulationCases/reconnect_prototype.py CASE.json \\
-        --state RUN/states/stop_00001379.dump --outdir OUT --delta-ratio 1.05 --steps 20
+        --state RUN/states/landing_0.001.dump --outdir OUT --delta-ratio 1.05 --steps 20
+
+A development tool beside the production runner, whose cut is a restart of
+``simulationCases/run_faraday.py`` (``README.md``). The prototype cuts at ``--delta`` or at
+``--delta-ratio`` times the neck radius of the state, with options that override the case's
+``collapse.reconnect`` block, and then takes ``--steps`` steps under the same collapse driver in the
+same post-cut mode as the production runner (``driver.CollapseDriver`` made with the reconnect
+settings: the stops on both chains, the step rule that follows the tips of both chains and the
+capillary time of the smallest tip, ``tau`` and ``tau_p`` in every output). It has no stepping loop
+of its own. Its manifest has its own schema (``faraday-reconnect-prototype-v1``), so its outputs
+feed no figure and no runner continues its states.
 
 ``CASE.json`` is the ``pyoomph-case-v1`` file of the run that wrote the state, or one derived from
 it in the keys a restart may change and in its ``reconnect`` block
@@ -13,37 +23,20 @@ collapse keys ``keep_stop_state``, ``landing``, ``neck_stop`` and ``reconnect``)
 and every other collapse setting must be the ones the state was computed with. The run that wrote
 the state is the directory above ``states/``: its ``run-manifest.json`` must be a normalised one
 with a clean source commit, and its case is compared with ``CASE.json``
-(``run_case.restart_record``); the manifest of the prototype records that lineage. Its
-``collapse.reconnect`` block, if any, gives the defaults of the cut, which the options below
-override. The state is a driver dump with its JSON beside it, normally a landing state: one a run
-with ``collapse.landing`` keeps for a cut radius, or the state a run with
-``collapse.keep_stop_state`` keeps at its neck-radius stop. The cut radius is ``--delta`` or
-``--delta-ratio`` times the neck radius of the state; it must lie between ``min_landing_ratio`` and
-``max_landing_ratio`` times that radius, so a study in ``delta`` needs a landing state for each
-``delta``. A state written after a cut is refused: one cut per run, and continuing a post-cut state
-is not supported yet.
+(``run_case.restart_record``); the manifest of the prototype records that lineage. The state is a
+driver dump with its JSON beside it, normally a landing state. The cut radius must lie between
+``min_landing_ratio`` and ``max_landing_ratio`` times the neck radius of the state, so a study in
+``delta`` needs a landing state for each ``delta``. A state written after a cut is refused: one cut
+per run.
 
 The cut (``faraday_singularity.surgery.cut``) writes ``cut_diagnostics.json`` and keeps the
 ``precut``/``postcut`` states under ``states/``; a refused or failed cut writes the partial record
 there instead, with the stage reached (``failed_at``), and ``run_status.json`` names it. The run
 then ends: the problem is not restored, since ``states/precut_<delta>.dump`` holds the state before
-the cut. Then ``--steps`` steps follow, the first ``dt0``
-long and each at most ``growth`` times the last, and at most ``courant`` times the smallest element
-of the free surface near the cut (``h_cut``: the cut's tip size, or the elements of both chains
-there if smaller, as where the focus of the run is finer) over the largest free-surface speed
-there. After every step ``steps.txt`` gets the time after the cut ``tau = t - t_cut`` and after the
-pinch ``tau_p = t - t_p`` (``t_p`` fitted to the neck samples of the landing state, ``pinch`` in
-``cut_diagnostics.json``; NaN when the state carries none; a study in ``delta`` compares at one
-common ``t_p``, since fits over different windows differ), the budgets (volume, kinetic energy,
-axial momentum ``P_z``), the three tips on the axis (bubble bottom and top, cavity tip) with their
-axial speeds, the bridge length, the bubble volume and the open chain's jet measurements;
-``profiles/postcut_<step>_open.txt`` and ``..._bubble.txt`` hold both chains (``r z u_r u_z``).
-The run ends after ``--steps``, at ``tau_end`` after the cut, or at a stop the mesh cannot follow,
-checked right after the cut and after every step (``reconnect.post_cut_stops``: the bridge
-closing, the chains touching, the bubble's tips meeting, the bubble draining, a new neck narrower
-than ``delta`` on either chain, a fold on the bubble; and the collapse driver's neck and fold stops
-on the open chain). ``run_status.json`` records how it ended. This is a development tool, not a
-production runner: it does not admit restarts through ``run_case.py``.
+the cut. Otherwise the driver writes ``collapse.txt`` (with ``tau`` and ``tau_p``), ``chains.txt``
+(both chains, the budgets and the step limits), ``events.jsonl``, the profiles of both chains and its
+dumps. The run ends after ``--steps`` steps, at ``tau_end`` after the cut, or at a stop the mesh
+cannot follow; ``run_status.json`` records how (``steps``: the steps after the cut).
 """
 
 from __future__ import annotations
@@ -62,20 +55,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 import run_case  # noqa: E402  (sets the MPI transport before pyoomph is imported)
-from faraday_singularity.driver import FOLD_SEARCH, CollapseDriver, CollapseSettings  # noqa: E402
+from faraday_singularity.driver import CollapseDriver, CollapseSettings  # noqa: E402
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import (component_commit, create_run_manifest,  # noqa: E402
                                             pyoomph_revision)
-from faraday_singularity.reconnect import (Chain, CutGeometry, ReconnectSettings,  # noqa: E402
-                                           neck_radius, post_cut_stops, revolved_volume,
+from faraday_singularity.reconnect import (ReconnectSettings, neck_radius,  # noqa: E402
                                            split_collapse_block)
-
-COLUMNS = ("step", "time", "tau", "tau_p", "dt", "newton_tol", "volume", "kinetic_energy",
-           "momentum_z", "divergence_sq", "bubble_volume", "z_bubble_bottom", "w_bubble_bottom",
-           "z_bubble_top", "w_bubble_top", "z_cavity_tip", "w_cavity_tip", "bridge", "bubble_r_max",
-           "bubble_z_r_max", "axis_curvature", "r_j", "z_b", "Q_j", "V_j", "h_near", "U",
-           "h_cut", "U_cut", "remesh_count", "wall")
 
 
 def sha256(path: Path) -> str:
@@ -117,44 +103,6 @@ def settings_from(case: dict, args) -> tuple[CollapseSettings, dict, float]:
         if value is not None:
             recon[name] = value
     return collapse, recon, period
-
-
-def write_profile(path: Path, ch: dict, header: dict):
-    import numpy as np
-
-    np.savetxt(path, np.column_stack([ch["r"], ch["z"], ch["u_r"], ch["u_z"]]),
-               header=json.dumps(header) + "\nr z u_r u_z", comments="# ")
-
-
-def near_cut(segs, z_cut: float, reach: float) -> tuple[float, float]:
-    """``(U, h)``: the largest free-surface speed of both chains within ``reach`` of the cut, and
-    their smallest element length there (twice the node spacing: the elements are quadratic)."""
-    import numpy as np
-
-    U, h = 1e-3, math.inf
-    for c in segs:
-        near = np.hypot(c["r"], c["z"] - z_cut) < reach
-        if near.any():
-            U = max(U, float(np.hypot(c["u_r"], c["u_z"])[near].max()))
-        edges = near[:-1] | near[1:]
-        if edges.any():
-            h = min(h, 2.0 * float(np.hypot(np.diff(c["r"]), np.diff(c["z"]))[edges].min()))
-    return U, h
-
-
-def chain_record(segs) -> dict:
-    """The three tips on the axis, the bubble's widest point and volume."""
-    import numpy as np
-
-    bubble = next(c for c in segs if not c["open"])
-    cavity = next(c for c in segs if c["open"])
-    k = int(np.argmax(bubble["r"]))
-    return {"z_bubble_bottom": float(bubble["z"][0]), "w_bubble_bottom": float(bubble["u_z"][0]),
-            "z_bubble_top": float(bubble["z"][-1]), "w_bubble_top": float(bubble["u_z"][-1]),
-            "z_cavity_tip": float(cavity["z"][0]), "w_cavity_tip": float(cavity["u_z"][0]),
-            "bridge": float(cavity["z"][0] - bubble["z"][-1]),
-            "bubble_volume": revolved_volume(np.column_stack([bubble["r"], bubble["z"]])),
-            "bubble_r_max": float(bubble["r"][k]), "bubble_z_r_max": float(bubble["z"][k])}
 
 
 def main(argv=None) -> int:
@@ -203,7 +151,7 @@ def main(argv=None) -> int:
     from pyoomph.output.states import copy_state_file
 
     from faraday_singularity.problem import FaradayProblem
-    from faraday_singularity.surgery import CutFailed, CutRefused
+    from faraday_singularity.surgery import CutFailed, CutRefused, cut
 
     status = {"state": "running", "started": time.time()}
     run_case.write_json(out / "run_status.json", status)
@@ -217,10 +165,22 @@ def main(argv=None) -> int:
             copy_state_file(str(state), str(local))
             problem.load_state(str(local))
             meta = json.loads(meta_path.read_text())
-            driver = CollapseDriver(problem, collapse, out)
+            if args.delta_ratio is not None:
+                segs = problem.interface_segments()
+                r_n = neck_radius(segs[0]["r"], segs[0]["z"])[0] if len(segs) == 1 else math.nan
+                settings = dataclasses.replace(settings, delta=args.delta_ratio * r_n)
+            run_case.write_json(out / "reconnect_settings.json", settings.to_dict())
+            step0 = int(meta["step"])
+            steps = dataclasses.replace(collapse, max_steps=step0 + args.steps)
+            driver = CollapseDriver(problem, steps, out, reconnect=settings)
             try:
                 driver.restore(meta)
-                status.update(run(problem, driver, settings, args, out, tol, collapse))
+                cut(problem, settings, out, driver=driver)
+                problem.start_diagnostics(out / "diagnostics.txt")
+                result = driver.run(tol)
+                status.update(state="completed", steps=result["steps"] - step0,
+                              stop=result["stop"], cut="cut_diagnostics.json",
+                              tau=result["cut"]["tau"], tau_p=result["cut"]["tau_p"])
             except (CutRefused, CutFailed) as exc:
                 # the run ends here; the problem is not restored (a failed remesh can leave it
                 # half rebuilt, and a failing reload would hide this failure): the precut dump
@@ -234,7 +194,9 @@ def main(argv=None) -> int:
                 driver.close()
                 problem.close_diagnostics()
     except BaseException as exc:
-        status.update(state="failed", detail=f"{type(exc).__name__}: {exc}")
+        interrupted = isinstance(exc, run_case.Terminated) or not isinstance(exc, Exception)
+        status.update(state="interrupted" if interrupted else "failed",
+                      detail=f"{type(exc).__name__}: {exc}")
         status["ended"] = time.time()
         run_case.write_json(out / "run_status.json", status)
         raise
@@ -244,95 +206,6 @@ def main(argv=None) -> int:
     print(json.dumps({k: status[k] for k in ("state", "detail", "steps", "stop") if k in status},
                      default=str))
     return 0 if status["state"] == "completed" else 1
-
-
-def run(problem, driver, settings: ReconnectSettings, args, out: Path, tol: float,
-        collapse: CollapseSettings) -> dict:
-    import numpy as np
-
-    from faraday_singularity.surgery import cut
-
-    segs = problem.interface_segments()
-    r_n, _, _ = neck_radius(segs[0]["r"], segs[0]["z"]) if len(segs) == 1 else (math.nan,) * 3
-    if args.delta_ratio is not None:
-        settings = dataclasses.replace(settings, delta=args.delta_ratio * r_n)
-    run_case.write_json(out / "reconnect_settings.json", settings.to_dict())
-    record = cut(problem, settings, out, driver=driver)
-    geom = CutGeometry(**record["geometry"])
-    h_tip = record["sizing"]["h_tip"]
-    t_cut = record["t_cut"]
-    t_p = record["pinch"]["t_p"]
-    t_p = math.nan if t_p is None else float(t_p)  # None in JSON: no estimate
-    z_cut = record["z_neck"]
-    (out / "profiles").mkdir(exist_ok=True)
-    table = (out / "steps.txt").open("w", buffering=1)
-    table.write("# " + "\t".join(COLUMNS) + "\n")
-    problem.start_diagnostics(out / "diagnostics.txt")
-    stop = {"reason": "steps"}
-    step = 0
-
-    def row(dt, newton_tol, wall, **extra):
-        segs = problem.interface_segments()
-        obs = problem.cut_observables()
-        m = driver.measure()
-        ch = chain_record(segs) if len(segs) == 2 else {}
-        t = problem.get_current_time(dimensional=False, as_float=True)
-        values = {"step": step, "time": t, "tau": t - t_cut, "tau_p": t - t_p, "dt": dt,
-                  "newton_tol": newton_tol,
-                  **{k: obs[k] for k in ("volume", "kinetic_energy", "momentum_z",
-                                         "divergence_sq")},
-                  **ch, **{k: m[k] for k in ("axis_curvature", "r_j", "z_b", "Q_j", "V_j",
-                                              "h_near", "U")},
-                  "remesh_count": problem.remesh_count, "wall": wall, **extra}
-        table.write("\t".join(f"{float(values.get(c, math.nan)):.12e}"
-                              if c not in ("step", "remesh_count") else str(values[c])
-                              for c in COLUMNS) + "\n")
-        finite = math.isfinite(t_p)
-        header = {"time": t, "tau": t - t_cut, "tau_p": t - t_p if finite else None,
-                  "t_p": t_p if finite else None, "step": step}
-        for c in segs:
-            write_profile(out / "profiles" / f"postcut_{step:04d}_{'open' if c['open'] else 'bubble'}.txt",
-                          c, header)
-        return segs, m
-
-    def stops(segs, m):
-        chains = [Chain(np.column_stack([c["r"], c["z"]]), tuple(c["end_types"])) for c in segs]
-        return post_cut_stops(chains, geom, settings, h_tip,
-                              neck_elements=collapse.neck_stop_elements,
-                              fold_ratio=collapse.fold_ratio, fold_stop=collapse.fold_stop,
-                              fold_stop_elements=collapse.fold_stop_elements,
-                              fold_search=FOLD_SEARCH) or driver._geometry_stop(m)
-
-    reach = 100 * settings.delta
-    segs, m = row(0.0, 0.0, 0.0)
-    dt_prev = settings.dt0 / settings.dt_growth
-    try:
-        found = stops(segs, m)  # the state right after the cut, before any step
-        if found is not None:
-            return {"state": "completed", "steps": 0, "stop": found, "cut": "cut_diagnostics.json"}
-        for step in range(1, args.steps + 1):
-            t = problem.get_current_time(dimensional=False, as_float=True)
-            if t - t_cut >= settings.tau_end:
-                stop = {"reason": "tau-end"}
-                step -= 1
-                break
-            U, h_near = near_cut(segs, z_cut, reach)
-            h_cut = min(h_tip, h_near)
-            dt = min(settings.dt_growth * dt_prev, settings.courant * h_cut / U)
-            newton_tol = max(tol, collapse.newton_floor / dt)
-            wall0 = time.time()
-            problem.run(t + dt, timestep=dt, maxstep=dt, outstep=False, temporal_error=1.0,
-                        newton_solver_tolerance=newton_tol)
-            dt = problem.get_current_time(dimensional=False, as_float=True) - t
-            dt_prev = dt
-            segs, m = row(dt, newton_tol, time.time() - wall0, h_cut=h_cut, U_cut=U)
-            found = stops(segs, m)
-            if found is not None:
-                stop = found
-                break
-    finally:
-        table.close()
-    return {"state": "completed", "steps": step, "stop": stop, "cut": "cut_diagnostics.json"}
 
 
 if __name__ == "__main__":

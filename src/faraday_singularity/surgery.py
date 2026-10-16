@@ -67,8 +67,11 @@ radii, bridge and removed gas, the number of survivors each cap dropped, and for
 the planner's window or the floor at the cut radius set its splice; see ``reconnect.py``).
 
 A state written after the cut carries its record; :func:`restore_cut` puts the cut's mesh sizing
-back when such a state is loaded. No runner continues from a post-cut state yet: ``run_case.py``
-has no stops for the bubble chain, and the prototype makes one cut per run, so both refuse it.
+back when such a state is loaded. The production runner (``simulationCases/run_faraday.py``)
+makes the cut at the start of a restart from a landing state under a case that adds the
+``collapse.reconnect`` block, continues under the collapse driver in its post-cut mode (the stops
+on both chains, the step rule of both chains), and continues a run from any state written after
+the cut; the prototype (``simulationCases/reconnect_prototype.py``) refuses such a state.
 
 The volume the liquid gains (``volumes``) is recorded twice: over the whole mesh, which includes the
 drift of rebuilding the whole free surface (a remesh changes the volume by more than the cut at
@@ -504,6 +507,9 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
         raise CutRefused("the problem was not made with reconnect settings")
     if pb.cut is not None:
         raise CutRefused("only one cut per run")
+    if driver is not None and getattr(driver, "reconnect", None) != s:
+        # the driver continues the run after the cut, with the stops and steps of these settings
+        raise CutRefused("the driver was not made with the reconnect settings of this cut")
     wall0 = time.time()
     t_cut = pb.get_current_time(dimensional=False, as_float=True)
     tag = tag or f"{s.delta:.6g}"

@@ -148,11 +148,31 @@ closing neck, from which :meth:`CollapseDriver.pinch_time` fits the pinch time `
 window and exponent, is recorded in the landing and stop dumps (``pinch``) and in the ``landing``
 event, and the cut records it again in its ``precut`` dump and its record.
 
-After a cut (:meth:`CollapseDriver.reset_after_cut`) the measured surface is the open chain, whose
+A driver made with ``reconnect`` settings continues a run after a cut (``surgery.cut``, made with
+this driver from a landing state, or restored from a state written after one): the post-cut mode.
+After the cut (:meth:`CollapseDriver.reset_after_cut`) the measured surface is the open chain, whose
 tip on the axis is a fresh cavity bottom: the scale, step, neck and singular-time bookkeeping
-restart, a new cycle begins, and the first step is the cut's ``dt0``. Dumps written after a cut
-carry its record, which :meth:`CollapseDriver.restore` restores (``surgery.restore_cut``); no runner
-continues from such a state yet (``run_case.py`` and the prototype refuse it).
+restart, a new cycle begins, and the first step is the cut's ``dt0``. The jet measurement, the
+neck and fold stops and the step rule above apply to the open chain as to any surface. In addition:
+
+* the stops before a second change of topology, on both chains (``reconnect.post_cut_stops``), and
+  ``tau-end`` once ``tau = t - t_cut`` reaches the cut's ``tau_end``;
+* the step is also at most ``courant h/|u|`` over every node of both chains
+  (``reconnect.courant_limit``: the tips and jets of either chain wherever they go), at most
+  ``capillary R^(3/2)`` with ``R`` the smallest radius of curvature of the three tips on the axis,
+  and grows by at most the cut's ``dt_growth``;
+* no Newton failure ends the run cleanly: after a cut it is a failed run, whatever the state;
+* ``collapse.txt`` gets the columns ``tau`` and ``tau_p = t - t_p`` (``t_p`` the pinch time the cut
+  recorded, NaN without one), ``chains.txt`` a row per step with both chains
+  (``reconnect.post_cut_record``: the three tips, bridge, bubble, necks, budgets) and the step
+  limits of the state (``dt_courant``, ``dt_capillary``), the profiles a ``_bubble`` file beside
+  each one of the open chain, and every event, profile header and dump after the cut ``tau`` and
+  ``tau_p``;
+* landing states and the stop state are not kept (one cut per run).
+
+Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore` restores
+(``surgery.restore_cut``), only into a driver made with the same reconnect settings; the run then
+continues in the post-cut mode.
 """
 
 from __future__ import annotations
@@ -169,7 +189,8 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
 from .mesh import Focus
-from .reconnect import LANDING_RATIO, MAX_LANDING_RATIO
+from .reconnect import (LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
+                        courant_limit, post_cut_record, post_cut_stops)
 from .selfcontact import InterfaceSelfIntersection, fold_gap
 from .singular import singular_time
 
@@ -365,6 +386,14 @@ COLUMNS = ("step", "cycle", "episode", "time", "dt", "z_axis", "w_axis", "axis_c
            "U", "beta_fit", "beta_fit_points", "beta_window_lo", "beta_window_hi",
            "volume", "area", "kinetic_energy", "dissipation", "remesh_count", "wall",
            "t0_est", "alpha_est", "t0_source", "fold_gap", "fold_r", "fold_z")
+POST_CUT_COLUMNS = ("tau", "tau_p")  # appended to collapse.txt after a cut
+CHAIN_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "z_bubble_bottom", "w_bubble_bottom",
+                 "R_bubble_bottom", "z_bubble_top", "w_bubble_top", "R_bubble_top", "z_cavity_tip",
+                 "w_cavity_tip", "R_cavity_tip", "bridge", "bubble_volume", "bubble_r_max",
+                 "bubble_z_r_max", "r_neck_bubble", "z_neck_bubble", "r_neck_open", "z_neck_open",
+                 "R_tip_min", "volume", "kinetic_energy", "momentum_z", "divergence_sq",
+                 "h_courant", "U_courant", "courant_chain", "dt_courant", "dt_capillary",
+                 "remesh_count")
 
 
 @dataclass
@@ -401,12 +430,18 @@ class _State:
 
 class CollapseDriver:
     def __init__(self, problem, settings: CollapseSettings, outdir: Path, *,
-                 keep_stop_state: bool = False, landing=()):
+                 keep_stop_state: bool = False, landing=(),
+                 reconnect: ReconnectSettings | None = None):
         self.pb = problem
         self.s = settings
         self.keep_stop_state = keep_stop_state
         self.landing = tuple(sorted((float(x) for x in landing), reverse=True))
         check_landing(self.landing, settings)
+        # the post-cut mode: the run continues after a cut made with these settings
+        self.reconnect = reconnect
+        if reconnect is not None and (self.landing or keep_stop_state):
+            raise ValueError("a run after a cut keeps no landing or stop states (one cut per run)")
+        self._post_cut_cache: tuple | None = None
         # the measured state has had its stop checks but not yet its snapshot and remesh checks
         self._checks_pending = False
         self.outdir = Path(outdir)
@@ -415,7 +450,13 @@ class CollapseDriver:
         self.episodes = EpisodeTracker(hys=settings.eta_hys)
         self._table = open(self.outdir / "collapse.txt", "w", buffering=1)
         cols = list(COLUMNS) + [f"beta_r{r:g}" for r in settings.cone_radii]
+        if reconnect is not None:
+            cols += list(POST_CUT_COLUMNS)
         self._table.write("# " + "\t".join(cols) + "\n")
+        self._chains = None
+        if reconnect is not None:
+            self._chains = open(self.outdir / "chains.txt", "w", buffering=1)
+            self._chains.write("# " + "\t".join(CHAIN_COLUMNS) + "\n")
         self._events = open(self.outdir / "events.jsonl", "w", buffering=1)
         (self.outdir / "collapse_settings.json").write_text(
             json.dumps(asdict(settings), indent=2) + "\n")
@@ -423,6 +464,73 @@ class CollapseDriver:
     def close(self):
         self._table.close()
         self._events.close()
+        if self._chains is not None:
+            self._chains.close()
+
+    # --- after a cut --------------------------------------------------------------------------
+
+    def _cut_record(self) -> dict | None:
+        """The record of the cut this run continues after, in the post-cut mode only."""
+        return None if self.reconnect is None else getattr(self.pb, "cut", None)
+
+    def _cut_times(self) -> tuple[float, float]:
+        """``(t_cut, t_p)``: the time of the cut and the pinch time it recorded (NaN without)."""
+        cut = self._cut_record()
+        if cut is None:
+            return math.nan, math.nan
+        t_p = (cut.get("pinch") or {}).get("t_p")
+        return float(cut["t_cut"]), math.nan if t_p is None else float(t_p)
+
+    def _taus(self, t: float) -> dict:
+        t_cut, t_p = self._cut_times()
+        return {"tau": t - t_cut, "tau_p": t - t_p}
+
+    def _post_cut_state(self) -> dict:
+        """Both chains of the current state, their record (``reconnect.post_cut_record``) and the
+        step limits they set, computed once per state."""
+        key = (self._t(), self.pb.remesh_count, self.state.step)
+        if self._post_cut_cache is not None and self._post_cut_cache[0] == key:
+            return self._post_cut_cache[1]
+        segs = self.pb.interface_segments()
+        rec = post_cut_record(segs) if len(segs) == 2 else {}
+        cl = courant_limit(segs)
+        R = rec.get("R_tip_min", math.nan)
+        state = {"segs": segs, "record": rec, "courant": cl,
+                 "dt_courant": self.reconnect.courant * cl["h_over_u"],
+                 "dt_capillary": self.s.capillary * R**1.5 if math.isfinite(R) else math.inf}
+        self._post_cut_cache = (key, state)
+        return state
+
+    def _post_cut_stop(self) -> dict | None:
+        """The stops before a second change of topology, on both chains (post-cut mode)."""
+        cut = self._cut_record()
+        if cut is None:
+            return None
+        segs = self._post_cut_state()["segs"]
+        chains = [Chain(np.column_stack([c["r"], c["z"]]), tuple(c["end_types"])) for c in segs]
+        s = self.s
+        stop = post_cut_stops(chains, CutGeometry(**cut["geometry"]), self.reconnect,
+                              cut["sizing"]["h_tip"], neck_elements=s.neck_stop_elements,
+                              fold_ratio=s.fold_ratio, fold_stop=s.fold_stop,
+                              fold_stop_elements=s.fold_stop_elements, fold_search=FOLD_SEARCH)
+        if stop is not None:
+            stop.update(self._taus(self._t()))
+        return stop
+
+    def _write_chain_row(self, dt: float):
+        pc = self._post_cut_state()
+        obs = self.pb.cut_observables()
+        cl = pc["courant"]
+        t = self._t()
+        values = {"step": self.state.step, "time": t, **self._taus(t), "dt": dt, **pc["record"],
+                  **{k: obs[k] for k in ("volume", "kinetic_energy", "momentum_z",
+                                         "divergence_sq")},
+                  "h_courant": cl["h"], "U_courant": cl["U"], "courant_chain": cl["chain"],
+                  "dt_courant": pc["dt_courant"], "dt_capillary": pc["dt_capillary"],
+                  "remesh_count": self.pb.remesh_count}
+        self._chains.write("\t".join(
+            str(values[c]) if c in ("step", "courant_chain", "remesh_count")
+            else f"{float(values.get(c, math.nan)):.12e}" for c in CHAIN_COLUMNS) + "\n")
 
     # --- measurement --------------------------------------------------------------------------
 
@@ -511,7 +619,8 @@ class CollapseDriver:
     def _event(self, kind: str, m: dict, **extra):
         rec = {"event": kind, "time": m["time"], "step": self.state.step,
                "r_j": m["r_j"], "z_axis": m["z_axis"], "ell": m["ell"],
-               "axis_curvature": m["axis_curvature"], **extra}
+               "axis_curvature": m["axis_curvature"],
+               **(self._taus(m["time"]) if self._cut_record() is not None else {}), **extra}
         self.state.events.append(rec)
         self._events.write(json.dumps(rec) + "\n")
 
@@ -529,8 +638,12 @@ class CollapseDriver:
                obs["dissipation"], self.pb.remesh_count, wall, *est,
                m.get("fold_gap", math.inf), m.get("fold_r", math.nan),
                m.get("fold_z", math.nan)] + list(m["angles"])
+        if self.reconnect is not None:
+            row += [self._taus(m["time"])[k] for k in POST_CUT_COLUMNS]
         self._table.write("\t".join(f"{v:.12e}" if isinstance(v, float) else str(v)
                                     for v in row) + "\n")
+        if self._cut_record() is not None:
+            self._write_chain_row(dt)
 
     def _snapshot(self, m: dict, reason: str):
         st = self.state
@@ -539,8 +652,17 @@ class CollapseDriver:
                   "z_b": m["z_b"], "z_axis": m["z_axis"], "ell": m["ell"],
                   "remesh_count": self.pb.remesh_count}
         path = self.outdir / "profiles" / f"profile_{st.snapshots:06d}.txt"
+        bubble = None
+        if self._cut_record() is not None:  # the open chain here, the bubble beside it
+            header.update(self._taus(m["time"]), chain="open")
+            bubble = next(c for c in self._post_cut_state()["segs"] if not c["open"])
         np.savetxt(path, np.column_stack([r, z, ur, uz]), header=json.dumps(header) +
                    "\nr z u_r u_z", comments="# ")
+        if bubble is not None:
+            np.savetxt(path.with_name(path.stem + "_bubble.txt"),
+                       np.column_stack([bubble[k] for k in ("r", "z", "u_r", "u_z")]),
+                       header=json.dumps(dict(header, chain="bubble")) + "\nr z u_r u_z",
+                       comments="# ")
         st.snapshots += 1
         st.last_snapshot_t = m["time"]
         st.last_snapshot_ell = m["ell"]
@@ -683,6 +805,8 @@ class CollapseDriver:
         cut = getattr(self.pb, "cut", None)
         if cut is not None:
             meta["cut"] = cut
+            if self.reconnect is not None:
+                meta.update(self._taus(meta["time"]))
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -737,6 +861,12 @@ class CollapseDriver:
         else:  # the episode in progress began at a time this dump does not record
             self.episodes = EpisodeTracker(hys=self.s.eta_hys, history_known=False)
         if meta.get("cut") is not None:
+            if self.reconnect is None:
+                raise RuntimeError("a state written after a cut is continued only by a driver made "
+                                   "with the cut's reconnect settings (post-cut stops on both chains)")
+            if json.loads(json.dumps(self.reconnect.to_dict())) != meta["cut"].get("settings"):
+                raise ValueError("the reconnect settings differ from those of the cut that wrote "
+                                 "the state")
             from .surgery import restore_cut
 
             restore_cut(self.pb, meta["cut"])
@@ -755,10 +885,12 @@ class CollapseDriver:
         limiters of the local scale and the step, the singular-time series, the largest trough
         curvature, the jet and the neck are reset, so that the cap's curvature is not read as a
         collapse and the cycle is not counted twice; the next step is the cut's ``dt0``."""
+        if self.reconnect is None:
+            raise RuntimeError("a driver that continues after a cut needs the reconnect settings")
         st = self.state
         dt0 = float(record["settings"]["dt0"])
         st.ell_prev = st.t_prev = math.nan
-        st.dt_prev = dt0 / self.s.growth
+        st.dt_prev = dt0 / min(self.s.growth, self.reconnect.dt_growth)  # the first step is dt0
         self._reset_singular()
         st.last_singular_t = -math.inf
         st.max_curvature, st.max_curvature_time = 0.0, math.nan
@@ -778,7 +910,7 @@ class CollapseDriver:
                     bridge=geometry.get("bridge"), removed_gas=geometry.get("removed_gas"),
                     in_cut_radii=record.get("in_cut_radii"),
                     delta_KE=record.get("projection", {}).get("delta_KE"),
-                    transfer=record.get("transfer"))
+                    transfer=record.get("transfer"), focus=record.get("focus"))
         self._snapshot(m, "cut")
         return m
 
@@ -877,8 +1009,9 @@ class CollapseDriver:
         return None
 
     def _stop(self, m):
-        """The stop the measured state calls for, if any: a geometry stop before the jet stop."""
-        return self._geometry_stop(m) or self._jet_stop(m)
+        """The stop the measured state calls for, if any: a geometry stop (after a cut, those of
+        both chains too) before the jet stop."""
+        return self._geometry_stop(m) or self._post_cut_stop() or self._jet_stop(m)
 
     def _jet_stop(self, m):
         """Stop once the born jet is unambiguous: at least ``post_birth_steps`` accepted steps after
@@ -906,6 +1039,11 @@ class CollapseDriver:
 
     def run(self, newton_tolerance: float) -> dict:
         s, st, pb = self.s, self.state, self.pb
+        r = self.reconnect
+        if r is not None and self._cut_record() is None:
+            raise RuntimeError("a driver made with reconnect settings runs after a cut: make the "
+                               "cut (surgery.cut with this driver) or restore a post-cut state")
+        t_cut = self._cut_times()[0]
         m = self.measure()
         self._track(m)
         self._write_row(m, 0.0, 0.0, self._singular(m))
@@ -926,11 +1064,19 @@ class CollapseDriver:
             t = self._t()
             if s.t_end - t <= max(1e-14, 8 * math.ulp(s.t_end)):
                 break
+            if r is not None and t - t_cut >= r.tau_end - max(1e-14, 8 * math.ulp(r.tau_end)):
+                stop = {"reason": "tau-end", "tau_end": r.tau_end, **self._taus(t)}
+                break
             if st.step >= s.max_steps:
                 stop = {"reason": "max-steps"}
                 break
             dt = min(s.dt_max, s.courant * m["h_focus"] / m["U"],
                      s.capillary * math.sqrt(m["ell"] ** 3), s.t_end - t)
+            if r is not None:  # both chains: every node's Courant limit and the tips' capillary time
+                pc = self._post_cut_state()
+                dt = min(dt, pc["dt_courant"], pc["dt_capillary"], t_cut + r.tau_end - t)
+                if st.dt_prev is not None:
+                    dt = min(dt, r.dt_growth * st.dt_prev)
             if math.isfinite(st.ell_prev) and st.t_prev < t:
                 rate = (st.ell_prev - m["ell"]) / (t - st.t_prev)  # only a shrinking scale limits
                 if rate > 0:
@@ -952,7 +1098,8 @@ class CollapseDriver:
                 # the problem now holds a rejected iterate: stop on the last measured state ``m``,
                 # but only if oomph-lib gave up below its smallest step
                 stop = None
-                if type(exc) is RuntimeError and exc.args == ("OomphException",):
+                # after a cut no Newton failure is an expected end
+                if r is None and type(exc) is RuntimeError and exc.args == ("OomphException",):
                     error = oomph_error_message(pb.oomph_log_tail())
                     if MIN_DT_FAILURE in error:
                         stop = classify_failure(m, s, error)
@@ -1023,4 +1170,7 @@ class CollapseDriver:
                "max_axis_curvature_time": st.max_curvature_time, "snapshots": st.snapshots}
         if self.landing:
             out["landing"] = self._landing_summary()
+        if r is not None:
+            t_cut, t_p = self._cut_times()
+            out["cut"] = {"t_cut": t_cut, "t_p": t_p, "tau_end": r.tau_end, **self._taus(self._t())}
         return out

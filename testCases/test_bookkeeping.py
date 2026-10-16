@@ -1675,3 +1675,194 @@ def test_pinch_time_from_the_neck_samples_of_a_landing_state(tmp_path):
     fresh = PrescribedDriver(FakeProblem(), s, tmp_path / "c", fields)
     assert math.isnan(fresh.pinch_time()["t_p"])
     fresh.close()
+
+
+# --- the post-cut mode: a run after a cut, on two prescribed chains -------------------------------
+
+
+R_C = 3.8317059702075125
+
+
+class CutProblem(FakeProblem):
+    """The two chains after a cut, at rest unless ``speed(chain, r, z)`` gives an axial speed: an
+    open chain from a cap on the axis (tip radius of curvature 1e-3, at z = 4.69) to the wall, and
+    an elliptic bubble below it from z = 4.68 - 2b to 4.68 (tip radius a^2/b), whose width is
+    multiplied by ``width(t)``."""
+
+    def __init__(self, a=0.01, b=0.2, speed=None, width=None, **kw):
+        super().__init__(**kw)
+        self.a, self.b = a, b
+        self.speed = speed or (lambda chain, r, z: np.zeros_like(r))
+        self.width = width or (lambda t: 1.0)
+        self.cut = None
+
+    def _chain(self, name, r, z, ends):
+        return {"open": name == "open", "end_types": ends, "r": r, "z": z,
+                "u_r": np.zeros_like(r), "u_z": self.speed(name, r, z)}
+
+    def interface_segments(self):
+        th = np.linspace(0.0, math.pi, 801)
+        br = self.a * self.width(self.t) * np.sin(th)
+        br[[0, -1]] = 0.0
+        bz = 4.68 - self.b - self.b * np.cos(th)
+        phi = np.linspace(0.0, 0.5 * math.pi, 201)
+        A, B = 2e-3, 4e-3  # tip radius A^2/B
+        cr, cz = A * np.sin(phi), 4.69 + B * (1.0 - np.cos(phi))
+        s = np.linspace(0.0, 1.0, 401)[1:]
+        line = np.column_stack([A + (0.5 - A) * s, cz[-1] + (5.0 - cz[-1]) * s])
+        s = np.linspace(0.0, 1.0, 101)[1:]
+        wall = np.column_stack([0.5 + (R_C - 0.5) * s, 5.0 + s])
+        P = np.vstack([np.column_stack([cr, cz]), line, wall])
+        return [self._chain("bubble", br, bz, ("axis", "axis")),
+                self._chain("open", P[:, 0], P[:, 1], ("axis", "fixed"))]
+
+    def interface_arrays(self):
+        c = self.interface_segments()[1]
+        return c["r"], c["z"], c["u_r"], c["u_z"]
+
+    def axial_velocity_at(self, points):
+        return [0.0] * len(points), True
+
+    def cut_observables(self):
+        return {"volume": 1.0, "kinetic_energy": 0.0, "momentum_z": 0.0, "divergence_sq": 0.0}
+
+
+def _cut_driver(tmp_path, pb, recon, **kw):
+    """A driver in the post-cut mode, right after a cut at t = 0 with pinch time -1e-6."""
+    from faraday_singularity.reconnect import Chain, cut_geometry
+
+    drv = CollapseDriver(pb, _settings(**{"t_end": 1.0, "dt_max": 1.0, "max_steps": 3, **kw}),
+                         tmp_path, reconnect=recon)
+    chains = [Chain(np.column_stack([c["r"], c["z"]]), c["end_types"])
+              for c in pb.interface_segments()]
+    geom = cut_geometry(chains, 3.0, gas_before=1.0)
+    pb.cut = {"delta": recon.delta, "rmin": recon.delta, "r_neck": 0.95e-3, "z_neck": 4.685,
+              "t_cut": 0.0, "pinch": {"t_p": -1e-6}, "geometry": geom.to_dict(),
+              "sizing": {"h_tip": recon.tip_size * recon.delta},
+              "settings": json.loads(json.dumps(recon.to_dict()))}
+    drv.reset_after_cut(pb.cut)
+    return drv
+
+
+def _chains_rows(outdir: Path) -> dict[str, np.ndarray]:
+    path = outdir / "chains.txt"
+    cols = path.read_text().splitlines()[0][2:].split("\t")
+    data = np.loadtxt(path, ndmin=2)
+    return {c: data[:, k] for k, c in enumerate(cols)}
+
+
+def test_after_a_cut_the_step_follows_the_capillary_time_of_the_sharpest_tip(tmp_path):
+    """At rest, the step is set by the capillary time of the sharpest of the three tips, here the
+    bubble's (radius 5e-4), which the open chain the driver measures does not see."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    drv = _cut_driver(tmp_path, CutProblem(), recon)
+    out = drv.run(1e-9)
+    drv.close()
+    rows = _chains_rows(tmp_path)
+    assert rows["R_tip_min"][0] == pytest.approx(5e-4, rel=1e-3)
+    assert rows["R_bubble_bottom"][0] == pytest.approx(rows["R_bubble_top"][0], rel=1e-9)
+    assert rows["R_cavity_tip"][0] == pytest.approx(1e-3, rel=1e-3)
+    assert rows["dt_capillary"][0] == pytest.approx(0.2 * rows["R_tip_min"][0] ** 1.5, rel=1e-12)
+    assert np.all(rows["dt"][1:] == pytest.approx(rows["dt_capillary"][:-1], rel=1e-12))
+    assert math.isinf(rows["dt_courant"][0]) and out["stop"]["reason"] == "max-steps"
+    # the ordinary rule alone, on the open chain, would allow the open cap's longer time
+    assert 0.2 * 1e-3 ** 1.5 > 2 * rows["dt"][1]
+
+
+def test_after_a_cut_the_step_follows_every_node_of_both_chains(tmp_path):
+    """A fast bubble tip, outside the open chain the driver measures and far from the cut, sets the
+    step through its Courant number."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    def speed(chain, r, z):
+        return np.where(z < 4.29, 100.0, 0.0) if chain == "bubble" else np.zeros_like(r)
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3, courant=0.1)
+    drv = _cut_driver(tmp_path, CutProblem(speed=speed), recon)
+    drv.run(1e-9)
+    drv.close()
+    rows = _chains_rows(tmp_path)
+    assert np.all(rows["courant_chain"] == 1) and np.all(rows["U_courant"] == 100.0)
+    assert rows["dt_courant"][0] == pytest.approx(0.1 * rows["h_courant"][0] / 100.0, rel=1e-12)
+    assert rows["dt_courant"][0] < rows["dt_capillary"][0]
+    assert np.all(rows["dt"][1:] == pytest.approx(rows["dt_courant"][:-1], rel=1e-12))
+
+
+def test_after_a_cut_outputs_carry_tau_and_tau_p_and_end_at_tau_end(tmp_path):
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6, dt_growth=2.0, tau_end=2.5e-6)
+    pb = CutProblem()
+    drv = _cut_driver(tmp_path, pb, recon, growth=2.0, max_steps=100)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "tau-end" and out["stop"]["tau"] == pytest.approx(2.5e-6)
+    assert out["cut"]["t_cut"] == 0.0 and out["cut"]["t_p"] == -1e-6
+    assert out["cut"]["tau_p"] == pytest.approx(out["cut"]["tau"] + 1e-6, abs=1e-18)
+    rows = _chains_rows(tmp_path)
+    assert list(rows["dt"]) == pytest.approx([0.0, 1e-6, 1.5e-6])  # the last one up to tau_end
+    assert np.allclose(rows["tau"], rows["time"]) and np.allclose(rows["tau_p"], rows["time"] + 1e-6)
+    table = _rows(tmp_path)
+    assert np.allclose(table["tau"], table["time"]) and np.allclose(table["tau_p"],
+                                                                   table["time"] + 1e-6)
+    events = _read_events(tmp_path)
+    assert [e["event"] for e in events][0] == "cut" and events[-1]["event"] == "stop"
+    assert all("tau" in e and "tau_p" in e for e in events)
+    for prof in sorted((tmp_path / "profiles").glob("profile_*[0-9].txt")):
+        bubble = prof.with_name(prof.stem + "_bubble.txt")
+        head, head_b = (json.loads(f.read_text().splitlines()[0][2:]) for f in (prof, bubble))
+        assert head["chain"] == "open" and head_b["chain"] == "bubble"
+        assert head["tau_p"] == pytest.approx(head["tau"] + 1e-6, abs=1e-18)
+        assert np.loadtxt(bubble).shape == (801, 4)
+    # no landing or stop states after a cut
+    with pytest.raises(ValueError, match="one cut per run"):
+        CollapseDriver(pb, _settings(), tmp_path / "x", reconnect=recon, landing=(5e-3,))
+
+
+def test_after_a_cut_the_bubble_stops_are_checked(tmp_path):
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    pb = CutProblem(width=lambda t: 1.0 if t <= 0.0 else 0.05)  # drains after the first step
+    drv = _cut_driver(tmp_path, pb, recon)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "bubble-vanishing" and out["steps"] == 1
+    assert out["stop"]["tau"] > 0.0
+
+
+def test_after_a_cut_no_newton_failure_ends_the_run_cleanly(tmp_path):
+    """Before a cut this failure, with a neck narrower than neck_guard, would be a pinch-off
+    approach; after one it is a failed run."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    drv = _cut_driver(tmp_path, CutProblem(fail_at=2), recon)
+    with pytest.raises(RuntimeError, match="OomphException"):
+        drv.run(1e-9)
+    drv.close()
+
+
+def test_a_post_cut_state_needs_the_reconnect_settings_of_its_cut(tmp_path):
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    pb = CutProblem()
+    drv = _cut_driver(tmp_path / "a", pb, recon, state_dt=0.0)
+    drv.run(1e-9)
+    drv.close()
+    meta = json.loads(sorted((tmp_path / "a" / "states").glob("state_*.json"))[-1].read_text())
+    assert meta["cut"]["t_cut"] == 0.0 and meta["tau"] == meta["time"]
+    with pytest.raises(RuntimeError, match="reconnect settings"):
+        CollapseDriver(CutProblem(), _settings(), tmp_path / "b").restore(meta)
+    other = ReconnectSettings(delta=1e-3, dt0=2e-3)
+    with pytest.raises(ValueError, match="differ from those of the cut"):
+        CollapseDriver(CutProblem(), _settings(), tmp_path / "c", reconnect=other).restore(meta)
+    # nor does a driver without them run after a cut
+    plain = CollapseDriver(pb, _settings(), tmp_path / "d")
+    with pytest.raises(RuntimeError, match="needs the reconnect settings"):
+        plain.reset_after_cut(pb.cut)
+    with pytest.raises(RuntimeError, match="runs after a cut"):
+        CollapseDriver(CutProblem(), _settings(), tmp_path / "e", reconnect=recon).run(1e-9)
