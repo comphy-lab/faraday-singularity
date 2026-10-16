@@ -86,15 +86,17 @@ add a second top-level `cases/` tree.
   (`simulationCases/run_faraday.py`; exact commands in `README.md`), never by a script of its own:
   (1) landing states, from a restart of an existing run under a derived case that adds
   `collapse.landing` (the first state with `delta/r_n >= 1.05` for each cut radius; a radius below
-  1.05 times the neck-stop radius is refused before any output, `landing-missed` records one left
+  1.05 times the neck-stop radius is refused before any output, but not in a cut or post-cut
+  restart, where the inherited `landing` is inactive; `landing-missed` records one left
   without a state) or `keep_stop_state`, and a lower `neck_stop` if needed (`run_case.DERIVED_KEYS`:
   what the run keeps and where it stops, not the equations it solves, the dump cadence `state_dt`
-  and `state_keep` and `collapse.reconnect.tau_end` included); (2) one cut run per `delta`, a restart from the
-  landing state of that `delta` under the landing case plus a `collapse.reconnect` block and a
-  `state_dt` for the run after the cut (`restart_mode` `cut`, `run_case.CUT_DERIVED_KEYS`); (3)
-  continuations from any dump written after the cut (the `postcut` dump, the rotating dumps, the
-  dump of the state the run ended on) under its case or one derived from it (`post-cut`). The
-  `precut` dump of a cut run is a landing state: a restart from it under a case with a reconnect
+  and `state_keep` (at least 1) and `collapse.reconnect.tau_end` included); (2) one cut run per
+  `delta`, a restart from the landing state of that `delta` under the landing case plus a
+  `collapse.reconnect` block and a `state_dt` for the run after the cut (`restart_mode` `cut`,
+  `run_case.CUT_DERIVED_KEYS`); (3) continuations from any dump written after the cut (the `postcut`
+  dump, the rotating dumps, the dump of the state the run ended on) under its case or one derived
+  from it (`post-cut`). The `precut` dump of a cut run is a landing state: a restart from it under a
+  case with a reconnect
   block cuts again. `run_case.restart_admission` decides the mode and checks it
   before output: the landing state's recorded `r_n` must put `delta/r_n` within the cut's
   `[min_landing_ratio, max_landing_ratio]` (a window that contains the landing window [1.05, 1.1]),
@@ -116,14 +118,19 @@ add a second top-level `cases/` tree.
   under `cut` in `run_status.json` (with the precut dump once written); never load the precut state
   back into that problem, and an interruption is never turned into an outcome of the cut. After
   the cut the collapse driver runs in its post-cut mode (`reconnect` settings): the open chain is
-  measured as any surface, but the remesh rule reads the spacing away from the tips and the bridge,
-  whose cut sizing every later mesh keeps, and a coarsening that does not take effect waits
-  `remesh_backoff` steps; the stops before a second change of topology apply on both chains
-  (`reconnect.post_cut_stops`) and at `tau_end`, the step also follows every node of both chains
-  (`reconnect.courant_limit`) and the capillary time of the sharpest tip, no Newton failure ends the
-  run cleanly, rotating dumps follow at least each time `tau` doubles and the end state is dumped,
-  and every output carries `tau = t - t_cut` and `tau_p = t - t_p` (`collapse.txt`,
-  `chains.txt`, profiles of both chains, events, dumps). Loading a state written after the cut
+  measured as any surface and the jets of the bubble's two tips in the same way (the bubble's top
+  mirrored; `r_j`, `z_b`, `Q_j`, `V_j`, `We_j` and `jet_born` of all three tips in `chains.txt`,
+  `Q_j` and `V_j` positive along each jet), the local scale is the smallest over both chains (on
+  the bubble its jets, neck and length, not the radii of curvature of its tips, which depend on the
+  mesh at a chain's end), the remesh rule reads the spacing away from the tips and the bridge, whose
+  cut sizing every later mesh keeps, on both chains, the coarser counting, and a coarsening that
+  does not take effect waits `remesh_backoff` steps; the stops before a second change of topology
+  apply on both chains (`reconnect.post_cut_stops`) and at `tau_end`, the step also follows every
+  node of both chains (`reconnect.courant_limit`) and the capillary time of the sharpest tip, no
+  Newton failure ends the run cleanly, rotating dumps follow at least each time `tau` doubles and
+  the end state is dumped, and every output carries `tau = t - t_cut` and `tau_p = t - t_p`
+  (`collapse.txt`, `chains.txt`, profiles of both chains, events, dumps). Loading a state written
+  after the cut
   restores the cut's mesh sizing (`surgery.restore_cut`). One cut per run. A reconnected result
   counts only if the jets at a fixed time after the pinch time `t_p` do not depend on `delta`;
   compare the cuts of a study at one common `t_p` (each cut records its own fit and window,

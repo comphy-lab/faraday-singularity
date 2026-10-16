@@ -17,10 +17,13 @@ of its own. Its manifest has its own schema (``faraday-reconnect-prototype-v1``)
 feed no figure and no runner continues its states.
 
 ``CASE.json`` is the ``pyoomph-case-v1`` file of the run that wrote the state, or one derived from
-it in the keys a restart may change and in its ``reconnect`` block
-(``run_case.PROTOTYPE_DERIVED_KEYS``: the name, the description ``completion.value``, and the
-collapse keys ``keep_stop_state``, ``landing``, ``neck_stop`` and ``reconnect``); the physics, mesh
-and every other collapse setting must be the ones the state was computed with. The run that wrote
+it in the keys a cut restart of the production runner may change
+(``run_case.PROTOTYPE_DERIVED_KEYS``, which is ``run_case.CUT_DERIVED_KEYS``: those of
+``run_case.DERIVED_KEYS``, ``case_id``, ``completion.value``, ``collapse.keep_stop_state``,
+``collapse.landing``, ``collapse.neck_stop``, ``collapse.state_dt``, ``collapse.state_keep`` and
+``collapse.reconnect.tau_end``, and the whole ``collapse.reconnect`` block); the physics, the mesh
+and every collapse setting not named there must be the ones the state was computed with. The
+manifest records the keys in which the case differs (``derived_keys``). The run that wrote
 the state is the directory above ``states/``: its ``run-manifest.json`` must be a normalised one
 with a clean source commit, and its case is compared with ``CASE.json``
 (``run_case.restart_record``); the manifest of the prototype records that lineage. The state is a
@@ -34,9 +37,10 @@ The cut (``faraday_singularity.surgery.cut``) writes ``cut_diagnostics.json`` an
 there instead, with the stage reached (``failed_at``), and ``run_status.json`` names it. The run
 then ends: the problem is not restored, since ``states/precut_<delta>.dump`` holds the state before
 the cut. Otherwise the driver writes ``collapse.txt`` (with ``tau`` and ``tau_p``), ``chains.txt``
-(both chains, the budgets and the step limits), ``events.jsonl``, the profiles of both chains and its
-dumps. The run ends after ``--steps`` steps, at ``tau_end`` after the cut, or at a stop the mesh
-cannot follow; ``run_status.json`` records how (``steps``: the steps after the cut).
+(both chains, the jets of the three tips, the budgets and the step limits), ``events.jsonl``, the
+profiles of both chains and its dumps. The run ends after ``--steps`` steps, at ``tau_end`` after
+the cut, or at a stop the mesh cannot follow; ``run_status.json`` records how (``steps``: the steps
+after the cut).
 """
 
 from __future__ import annotations

@@ -25,7 +25,8 @@ keeps the state at a neck-radius stop as ``states/stop_<step>.dump``, outside th
 the landing state of a reconnection. ``landing``, a list of cut radii, keeps for each radius
 ``delta`` the first state whose neck has closed to ``delta/1.05`` as ``states/landing_<delta>.dump``
 (``driver.CollapseDriver``); a radius the run cannot reach before its neck-radius stop, below 1.05
-times ``max(neck_stop, neck_stop_elements h_floor)``, is refused before any output. A ``reconnect``
+times ``max(neck_stop, neck_stop_elements h_floor)``, is refused before any output (but in a cut or
+post-cut restart, where ``landing`` is inactive: below). A ``reconnect``
 block (``reconnect.ReconnectSettings``) builds the problem with the reconnection handler and the
 pressure-impulse projection, both inert until a cut, but compiled into it: the computed trajectory
 then differs from that of the ordinary case at round-off (deterministically; from the third step,
@@ -57,8 +58,9 @@ existing run. The restart has one of three modes (``restart_admission``), record
   continues under the collapse driver in its post-cut mode: the stops before a second change of
   topology on both chains, a step that follows the tips and jets of both chains and the capillary
   time of the smallest tip, ``tau = t - t_cut`` and ``tau_p = t - t_p`` in every output,
-  ``chains.txt`` and the profiles of both chains, rotating dumps at least each time ``tau`` doubles
-  and a dump of the state it ends on (``driver.py``). A refused or failed cut, whatever failed in
+  ``chains.txt`` (both chains and the jets of the three tips) and the profiles of both chains,
+  rotating dumps at least each time ``tau`` doubles and a dump of the state it ends on
+  (``driver.py``). A refused or failed cut, whatever failed in
   it, ends the run as ``failed``, with the record and the stage reached in ``cut_diagnostics.json``
   and under ``cut`` in ``run_status.json``, which names the ``precut`` dump once it was written;
   nothing is loaded back into the problem.
@@ -70,7 +72,10 @@ existing run. The restart has one of three modes (``restart_admission``), record
   continues in the post-cut mode.
 
 In both modes after a cut the case's ``landing`` and ``keep_stop_state`` (inherited from the landing
-run) are inactive, as ``parameters.json`` records (``inactive_after_cut``): one cut per run.
+run) are inactive, as ``parameters.json`` records (``inactive_after_cut``): one cut per run. Its cut
+radii are therefore not checked against its neck-radius stop either, so that a cut or continuation
+case may change ``neck_stop`` (``DERIVED_KEYS``); the check applies to every other run, before any
+output.
 """
 
 from __future__ import annotations
@@ -499,11 +504,10 @@ def main() -> int:
             raise SystemExit(f"{args.case}: {exc}")
         if "snapshot_dt_periods" in block:
             block["snapshot_dt"] = block.pop("snapshot_dt_periods") * period
-        settings = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
         try:
-            check_landing(landing, settings)
+            settings = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
         except ValueError as exc:
-            raise SystemExit(f"{args.case}: {exc}")
+            raise SystemExit(f"{args.case}: collapse: {exc}")
 
     if not math.isfinite(periods) or periods <= 0 or not math.isfinite(dt_out) or dt_out <= 0:
         raise SystemExit("completion time and output cadence must be positive and finite")
@@ -539,6 +543,13 @@ def main() -> int:
         if args.outdir.resolve().is_relative_to(parent_root):
             raise SystemExit("restart output cannot be inside its parent run")
         args.restart = source_state
+    if collapse and restart_mode not in (CUT, POST_CUT):
+        # the cut radii this run lands; after a cut the case's landing is the landing run's,
+        # inactive (inactive_after_cut), so its radii are not this run's to reach before its stop
+        try:
+            check_landing(landing, settings)
+        except ValueError as exc:
+            raise SystemExit(f"{args.case}: {exc}")
     if args.check:
         print(json.dumps({"valid": True, "case_id": case["case_id"], "restart": parent_record,
                           "restart_mode": restart_mode}))

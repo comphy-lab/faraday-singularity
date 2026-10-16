@@ -44,8 +44,11 @@ This module holds what needs no finite-element problem:
 * the stops of a run after the cut (:func:`post_cut_stops`), on both chains, and what the run
   records of both chains after it and steps by (:func:`post_cut_record`: the three tips on the axis
   with their radii of curvature, the bridge, the bubble and the necks of both chains;
-  :func:`courant_limit`: the time in which the fastest node of either chain, relative to its element
-  length, crosses an element), the size the cut's mesh sizing asks for along a chain
+  :func:`bubble_end` and :func:`tip_jet`: the jet bases of the bubble's two tips, measured as the
+  open chain's, the bubble's top mirrored so that the jet the bridge drives down into the bubble is
+  measured as one rising from a cavity; :func:`courant_limit`: the time in which the fastest node
+  of either chain, relative to its element length, crosses an element), the size the cut's mesh
+  sizing asks for along a chain
   (:func:`cut_size_field`, where the driver does not read the spacing of its focus), and which
   settings a continuation after the cut may change (``CONTINUATION_KEYS``: ``tau_end``).
 
@@ -71,7 +74,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .collapse import Profile, axis_curvature, necks
+from .collapse import Profile, axis_curvature, jet_base, necks
 from .selfcontact import InterfaceSelfIntersection, check_simple_interface, fold_gap
 
 AXIS, FIXED = "axis", "fixed"
@@ -87,6 +90,11 @@ CONTINUATION_KEYS = ("tau_end",)
 # After a cut the collapse driver reads the spacing near the collapse only where the cut's sizing
 # asks for at least this many focus sizes (cut_size_field; driver.CollapseDriver.measure).
 CUT_SIZING_MARGIN = 1.5
+# The three tips on the axis after a cut, as chains.txt names their jets (driver.CollapseDriver).
+JET_TIPS = ("cavity_tip", "bubble_bottom", "bubble_top")
+# For the bubble's two tips, the axial direction in which a jet from the tip runs into the gas: up
+# from its bottom (liquid below, as at the cavity's tip), down from its top (the bridge above it).
+BUBBLE_TIP_SIGNS = {"bubble_bottom": 1.0, "bubble_top": -1.0}
 
 
 @dataclass(frozen=True)
@@ -730,10 +738,12 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     bubble that crosses itself raises
     :class:`~faraday_singularity.selfcontact.InterfaceSelfIntersection`.
 
-    The collapse driver measures only the open chain (``FaradayProblem.interface_arrays``), and its
-    fold stop covers that chain within its focus region; these stops are the only ones on the
-    bubble, which before the cut was part of the open chain. Each chain is examined on its own, so
-    the bridge between the two is never a fold."""
+    The collapse driver's own neck and fold stops cover only the open chain
+    (``FaradayProblem.interface_arrays``), the fold stop within the region of its local scale; it
+    measures the jets of the bubble's tips and sizes the mesh by the bubble's features too, but
+    stops on neither, so these stops are the only ones on the bubble, which before the cut was part
+    of the open chain. Each chain is examined on its own, so the bridge between the two is never a
+    fold."""
     if len(chains) != 2:
         return {"reason": "topology-changed", "chains": len(chains)}
     bubble = next(c for c in chains if not c.is_open)
@@ -799,6 +809,48 @@ def tip_radius(r, z, nodes: int = 6) -> float:
     fails or the tip is flat."""
     k = axis_curvature(Profile(np.asarray(r, dtype=float), np.asarray(z, dtype=float)), nodes)
     return 1.0 / abs(k) if math.isfinite(k) and k != 0.0 else math.nan
+
+
+def bubble_end(seg: dict, tip: str) -> dict:
+    """One end of the bubble chain in the frame of the jet its tip launches: the nodes from the tip
+    on the axis to the widest point of the bubble, ordered from the tip, with ``z`` and ``u_z``
+    multiplied by the tip's sign (``BUBBLE_TIP_SIGNS``, kept as ``sign``).
+
+    ``seg`` is the bubble's entry of ``FaradayProblem.interface_segments``, which runs upwards from
+    the bottom tip to the top tip. In this frame the liquid lies below the tip, as at the cavity's
+    tip, so that the open chain's measurement (:func:`~faraday_singularity.collapse.jet_base`)
+    applies unchanged: the bubble's top is mirrored (``z -> -z``), and the jet the bridge drives
+    down into the bubble rises there from a base that is the highest point of the bubble's top near
+    the axis. Ending each half at the widest point keeps the other tip out of it."""
+    sign = BUBBLE_TIP_SIGNS[tip]
+    r, z, ur, uz = (np.asarray(seg[k], dtype=float) for k in ("r", "z", "u_r", "u_z"))
+    k = int(np.argmax(r))
+    idx = np.arange(k + 1) if sign > 0 else np.arange(len(r) - 1, k - 1, -1)
+    return {"r": r[idx], "z": sign * z[idx], "u_r": ur[idx], "u_z": sign * uz[idx], "sign": sign}
+
+
+def tip_jet(end: dict, *, r_search: float, rise_tol: float, flat_aspect: float,
+            jet_aspect: float, jet_max_radius: float) -> dict:
+    """The jet base of one end of the bubble chain (:func:`bubble_end`), found as the collapse
+    driver finds the open chain's, with the driver's settings of the same names.
+
+    Returns, in the frame of the axis (not of the end): the jet-base radius ``r_j`` (0 while the tip
+    is the lowest point of its end, in the end's frame) and height ``z_b``, the tip height
+    ``z_tip``; and, in the end's frame, the rise of the tip above the base (``rise``), the index of
+    the base (``index``, 0 for the tip), whether a bump stands there (``bump``, the tip above the
+    base by more than ``rise_tol``), whether it has nearly vanished (``flat_bump``: a rise below
+    ``flat_aspect r_j``) and whether it passes the driver's test of a born jet (``jet``: narrower
+    than ``jet_max_radius`` and standing more than ``max(rise_tol, jet_aspect r_j)`` above its
+    base). The flux through the base, which needs the bulk, is the driver's."""
+    sign = float(end["sign"])
+    r, z = np.asarray(end["r"], dtype=float), np.asarray(end["z"], dtype=float)
+    jb = jet_base(Profile(r, z), r_search, rise_tol)
+    rise = float(z[0]) - jb.z_b
+    return {"r_j": jb.r_j, "z_b": sign * jb.z_b, "z_tip": sign * float(z[0]), "rise": rise,
+            "index": jb.index, "bump": jb.jet_born,
+            "flat_bump": bool(jb.index > 0 and rise <= flat_aspect * jb.r_j),
+            "jet": bool(jb.jet_born and jb.r_j < jet_max_radius
+                        and rise > max(rise_tol, jet_aspect * jb.r_j))}
 
 
 def post_cut_record(segs) -> dict:

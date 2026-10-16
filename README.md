@@ -221,13 +221,14 @@ settings of `src/faraday_singularity/reconnect.py`, `ReconnectSettings`) and a d
 run after the cut, for example `"state_dt": 1e-5`, since the landing run's (0.1 by default) is
 sized for the collapse before it; its other keys must be the landing run's
 (`run_case.CUT_DERIVED_KEYS`), and its `landing` and `keep_stop_state`, inherited from the landing
-case, are inactive after the cut (`inactive_after_cut` in `parameters.json`). The run after a cut
-also dumps its state at least each time the time after the cut doubles, and dumps the state it ends
-on, whatever the stop. A run that ended at `tau_end` goes on from that dump under a case that raises
-`tau_end` (or removes it): `tau_end` is the one reconnect setting a continuation may change, and a
-continuation under the `tau_end` it ended at is refused before any output. The `precut_<delta>`
-dump of a cut run is the landing state it cut: a restart from it under a case with a reconnect
-block cuts again (`restart_mode` `cut`), never continues it before a cut.
+case, are inactive after the cut (`inactive_after_cut` in `parameters.json`), so its cut radii are
+not checked against its `neck_stop`, which a cut or continuation case may change. The run after a
+cut also dumps its state at least each time the time after the cut doubles, and dumps the state it
+ends on, whatever the stop. A run that ended at `tau_end` goes on from that dump under a case that
+raises `tau_end` (or removes it): `tau_end` is the one reconnect setting a continuation may change,
+and a continuation under the `tau_end` it ended at is refused before any output. The
+`precut_<delta>` dump of a cut run is the landing state it cut: a restart from it under a case with
+a reconnect block cuts again (`restart_mode` `cut`), never continues it before a cut.
 
 **Landing states.** With `collapse.landing`, a list of cut radii `delta`, a run keeps for each the
 first state whose neck radius `r_n` has fallen to `delta/1.05`, as `states/landing_<delta>.dump`, so
@@ -239,10 +240,11 @@ h_floor)`) is refused before any output, and a radius left without a landing sta
 the pinch time `t_p` fitted to them (a power law with a free exponent; `pinch`, with its window),
 and a restart from one makes the remesh check of its step before stepping, as the run that wrote it
 did. A restart may change only these keys, `collapse.neck_stop`, the cadence and number of
-rotating dumps (`collapse.state_dt`, `collapse.state_keep`; a dump writes the state and does not
-change it) and `collapse.reconnect.tau_end` (`run_case.DERIVED_KEYS`); a `collapse.reconnect`
-block that differs from the parent's in any other key makes the restart a cut, since the block
-compiles the reconnection terms into the problem and changes its trajectory at round-off.
+rotating dumps (`collapse.state_dt`, `collapse.state_keep`, at least 1, so that the latest dump
+is kept; a dump writes the state and does not change it) and `collapse.reconnect.tau_end`
+(`run_case.DERIVED_KEYS`); a `collapse.reconnect` block that differs from the parent's in any other
+key makes the restart a cut, since the block compiles the reconnection terms into the problem and
+changes its trajectory at round-off.
 
 **The cut** (`src/faraday_singularity/surgery.py`) is made at the start of the cut run, from the
 landing state, and refused unless `min_landing_ratio <= delta/r_n <= max_landing_ratio` (1.03 and
@@ -273,8 +275,18 @@ includes the drift of rebuilding the whole free surface, and within a box around
 compared with the plan.
 
 **After the cut** the collapse driver measures the open chain (the cavity, from its fresh tip to
-the wall) as any free surface, jet included, and in addition stops before a second change of
-topology: the bridge closing, the chains approaching each other, the bubble's two tips meeting, a
+the wall) as any free surface, jet included, and the jets of the bubble's two tips in the same way,
+the bubble's top mirrored so that the jet the bridge drives down into the bubble is measured as one
+rising from a cavity: for each of the three tips `chains.txt` holds the jet-base radius and height,
+the flux through the base, the mean jet speed and `We_j` (`r_j_<tip>`, `z_b_<tip>`, `Q_j_<tip>`,
+`V_j_<tip>`, `We_j_<tip>` and `jet_born_<tip>`, with `<tip>` one of `cavity_tip`, `bubble_bottom`
+and `bubble_top`, and `Q_j` and `V_j` positive along each jet), so that the jets of a study in
+`delta` can be compared. The local scale that sets the step and the focus is the smallest over both
+chains (on the bubble its jets, its neck and its length, `ell_bubble`; the radii of curvature of its
+tips, which depend on the mesh at the end of a chain, bound the step instead), and the spacing that
+the remesh rule reads near the collapse is the coarser of the two chains', so that a jet on either
+chain is resolved. The driver in addition stops before a second change of topology: the bridge
+closing, the chains approaching each other, the bubble's two tips meeting, a
 new neck narrower than `delta` on either chain, a closing fold on the bubble, the bubble draining
 away, or `tau_end` after the cut. The step also follows every node of both chains (a Courant limit
 `courant h/|u|` over each node's element length), the capillary time of the sharpest of the three
@@ -284,12 +296,12 @@ that cannot coarsen the mesh waits before the next, as one that cannot refine it
 no Newton failure ends a run cleanly.
 Every output after the cut carries the time after the cut `tau = t - t_cut` and after the pinch
 `tau_p = t - t_p`: the columns `tau` and `tau_p` of `collapse.txt`, `chains.txt` (both chains per
-step: the three tips with their speeds and radii of curvature, the bridge, the bubble, the necks,
-the budgets and the step limits), the profiles of the open chain with a `_bubble` profile beside
-each, the events and the dumps. The dumps carry the cut's record, from which a restart restores the
-cut and continues. The cuts of a study in `delta` are compared at fixed `t - t_p` with one common
-`t_p`, since `t_cut` depends on `delta` and fits of `t_p` over different windows differ; a
-reconnected result counts only if the jets do not depend on `delta`.
+step: the three tips with their speeds, radii of curvature and jets, the bridge, the bubble, the
+necks, the budgets and the step limits), the profiles of the open chain with a `_bubble` profile
+beside each, the events and the dumps. The dumps carry the cut's record, from which a restart
+restores the cut and continues. The cuts of a study in `delta` are compared at fixed `t - t_p` with
+one common `t_p`, since `t_cut` depends on `delta` and fits of `t_p` over different windows differ;
+a reconnected result counts only if the jets do not depend on `delta`.
 
 `simulationCases/reconnect_prototype.py` is a development tool beside this: it cuts a landing state
 at `--delta` or `--delta-ratio` times its neck radius, with options that override the case's

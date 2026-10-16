@@ -557,3 +557,99 @@ def test_prototype_refuses_a_state_without_a_parent_manifest(tmp_path):
                       "--delta-ratio", "1.05")
     assert proc.returncode != 0 and "no parent run-manifest" in proc.stderr
     assert not out.exists()
+
+
+def _runner_check(case_path, out, state=None):
+    args = [sys.executable, str(ROOT / "simulationCases/run_faraday.py"), str(case_path),
+            "--out", str(out), "--check"]
+    if state is not None:
+        args += ["--restart-from", str(state)]
+    return subprocess.run(args, capture_output=True, text=True, timeout=120, check=False)
+
+
+def test_inactive_landing_radii_are_not_checked_in_a_cut_or_post_cut_restart(tmp_path):
+    """A cut or continuation case inherits the landing case's landing list, inactive after the cut
+    (inactive_after_cut). A neck_stop raised above what those radii need (a key such a case may
+    change) refuses neither restart; an ordinary restart under it, which would land them, still is
+    refused before any output."""
+    landing_case = json.loads(json.dumps(CASE))
+    landing_case["collapse"].update(neck_stop=1e-4, h_floor=2e-5,
+                                    landing=[1e-3, 5e-4, 2.5e-4, 1.25e-4])
+    state, _ = _parent_run(tmp_path, case=landing_case)
+    _write_meta(state, landing={"delta": 1e-3, "r_neck": 9.5e-4, "z_neck": 4.7,
+                                "delta_over_r_neck": 1e-3 / 9.5e-4})
+    out = tmp_path / "out"
+
+    def derived(name, **collapse):
+        case = json.loads(json.dumps(landing_case))
+        case["case_id"] = name
+        case["collapse"].update(collapse)
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(case))
+        return case, path
+
+    cut, cut_path = derived("cut", reconnect={"delta": 1e-3})
+    proc = _runner_check(cut_path, out, state)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    _, raised_path = derived("cut-raised", reconnect={"delta": 1e-3}, neck_stop=3e-4)
+    proc = _runner_check(raised_path, out, state)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert json.loads(proc.stdout.strip().splitlines()[-1])["restart_mode"] == "cut"
+    assert not out.exists()
+    # an ordinary restart lands the radii: 2.5e-4 and 1.25e-4 lie below 1.05 * 3e-4
+    _, ordinary_path = derived("ordinary-raised", neck_stop=3e-4)
+    proc = _runner_check(ordinary_path, out, state)
+    assert proc.returncode != 0 and "collapse.landing" in proc.stderr
+    assert "0.00025, 0.000125" in proc.stderr and not out.exists()
+    # a state written after the cut, continued under the cut's case with the raised neck_stop
+    (tmp_path / "b").mkdir()
+    post, _ = _parent_run(tmp_path / "b", case=cut)
+    _write_meta(post, cut={"delta": 1e-3, "t_cut": 0.4,
+                           "settings": ReconnectSettings(delta=1e-3).to_dict()})
+    proc = _runner_check(raised_path, out, post)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert json.loads(proc.stdout.strip().splitlines()[-1])["restart_mode"] == "post-cut"
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("keep", [0, -1, 1.5, True])
+def test_runner_refuses_a_state_keep_below_one_before_output(tmp_path, keep):
+    """With no rotating dump kept, every dump is deleted as soon as it is written, the end state of
+    a run after a cut included, which its stop record would still name."""
+    case = json.loads(json.dumps(CASE))
+    case["collapse"]["state_keep"] = keep
+    path = tmp_path / "case.json"
+    path.write_text(json.dumps(case))
+    out = tmp_path / "out"
+    proc = _runner_check(path, out)
+    assert proc.returncode != 0 and "state_keep" in proc.stderr
+    assert "Traceback" not in proc.stderr and not out.exists()
+    case["collapse"]["state_keep"] = 1
+    path.write_text(json.dumps(case))
+    proc = _runner_check(path, out)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+
+def test_the_prototype_documents_every_key_its_case_may_change(tmp_path):
+    """The prototype admits a case derived from the state's in run_case.PROTOTYPE_DERIVED_KEYS, the
+    keys of a cut restart, the dump cadence among them; its docstring names every one, so that a
+    lineage audited against it finds the keys its manifest can record."""
+    import ast
+
+    assert run_case.PROTOTYPE_DERIVED_KEYS == run_case.CUT_DERIVED_KEYS == (
+        run_case.DERIVED_KEYS + ("collapse.reconnect",))
+    source = (ROOT / "simulationCases" / "reconnect_prototype.py").read_text()
+    doc = ast.get_docstring(ast.parse(source))
+    missing = [k for k in run_case.PROTOTYPE_DERIVED_KEYS if f"``{k}``" not in doc]
+    assert not missing, f"the prototype's docstring does not name {missing}"
+    state, _ = _parent_run(tmp_path)
+    child = _derived(reconnect={"delta": 1e-3}, state_dt=1e-6, state_keep=2)
+    path = tmp_path / "child.json"
+    path.write_text(json.dumps(child))
+    out = tmp_path / "out"
+    proc = _prototype(path, "--state", state, "--outdir", out, "--delta-ratio", "1.05", "--check")
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    report = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert report["state"]["parent_record"]["derived_keys"] == [
+        "case_id", "collapse.reconnect", "collapse.state_dt", "collapse.state_keep"]
+    assert not out.exists()

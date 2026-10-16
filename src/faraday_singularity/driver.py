@@ -155,6 +155,21 @@ tip on the axis is a fresh cavity bottom: the scale, step, neck and singular-tim
 restart, a new cycle begins, and the first step is the cut's ``dt0``. The jet measurement, the
 neck and fold stops and the step rule above apply to the open chain as to any surface. In addition:
 
+* the jets of the bubble's two tips are measured as the open chain's (``reconnect.bubble_end`` and
+  ``reconnect.tip_jet``; the bubble's top is mirrored, so that the jet the bridge drives down into
+  the bubble is measured as one rising from a cavity, its base the highest point of the bubble's
+  top near the axis), with the flux through the disc at the base (:meth:`_complete_tip_jet`):
+  ``chains.txt`` holds ``r_j``, ``z_b``, ``Q_j``, ``V_j``, ``We_j`` and ``jet_born`` of each of
+  the three tips (the cavity's as in ``collapse.txt``; ``Q_j`` and ``V_j`` positive along each jet,
+  downwards from the bubble's top), and the events ``tip-jet-born`` and ``tip-jet-gone`` record the
+  bubble's;
+* the local scale is the smallest of the open chain's scales and the bubble's (``ell_bubble`` in
+  ``chains.txt``: the jet-base radius of a resolved bump at either tip, the bubble's narrowest neck
+  and its length; not the radii of curvature of its tips, which depend on the mesh at a chain's end
+  and bound the step instead), so that a jet on either chain sets the step and the focus, whose
+  attractors are the nodes of both chains near the axis; the open chain's fold stop and the speed
+  ``U`` (which then includes the bubble's nodes and jets) are taken over the region of the open
+  chain's own scale, which a smaller scale of the bubble does not narrow;
 * the stops before a second change of topology, on both chains (``reconnect.post_cut_stops``), and
   ``tau-end`` once ``tau = t - t_cut`` reaches the cut's ``tau_end``;
 * the step is also at most ``courant h/|u|`` over every node of both chains
@@ -168,15 +183,18 @@ neck and fold stops and the step rule above apply to the open chain as to any su
   limits of the state (``dt_courant``, ``dt_capillary``), the profiles a ``_bubble`` file beside
   each one of the open chain, and every event, profile header and dump after the cut ``tau`` and
   ``tau_p``;
-* the remesh rule reads the spacing near the collapse (``h_near``) where the focus sets it: every
-  mesh after the cut keeps the cut's sizing at the tips on the axis and along the bridge, which no
-  focus can coarsen, so only edges where that sizing asks for at least ``CUT_SIZING_MARGIN`` focus
-  sizes count (:meth:`CollapseDriver._h_near_after_cut`); and a coarsening rebuild that did not
+* the remesh rule reads the spacing near the collapse (``h_near``) where the focus sets it, on both
+  chains, the coarser counting, so that either chain can ask for a refinement: every mesh after the
+  cut keeps the cut's sizing at the tips on the axis and along the bridge, which no focus can
+  coarsen, so only edges where that sizing asks for at least ``CUT_SIZING_MARGIN`` focus sizes count
+  (:meth:`CollapseDriver._h_near_after_cut`); and a coarsening rebuild that did not
   coarsen (the spacing grew by less than ``1/0.9``) waits ``remesh_backoff`` steps before the next,
   as a refinement does (event ``remesh-ineffective``, ``direction`` ``coarsen``);
 * the rotating dumps follow at least each time the time after the cut doubles, besides every
   ``state_dt`` (:meth:`CollapseDriver._state_interval`), and the state the run ends on is dumped
-  as well (``end_state`` in the stop record), whatever the stop;
+  as well (``end_state`` in the stop record), whatever the stop: the latest dump, which the rotation
+  keeps (``state_keep`` is at least one); the dumps also keep which of the bubble's tips carry a
+  jet (``tip_born``);
 * landing states and the stop state are not kept (one cut per run).
 
 Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore` restores
@@ -199,9 +217,10 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
 from .mesh import Focus
-from .reconnect import (AXIS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, LANDING_RATIO,
-                        MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings, courant_limit,
-                        cut_size_field, post_cut_record, post_cut_stops, tau_end_reached)
+from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
+                        LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
+                        bubble_end, courant_limit, cut_size_field, post_cut_record,
+                        post_cut_stops, tau_end_reached, tip_jet)
 from .selfcontact import InterfaceSelfIntersection, fold_gap
 from .singular import singular_time
 
@@ -249,7 +268,7 @@ class CollapseSettings:
     cone_window: tuple[float, float] = (4.0, 40.0)  # in units of the local scale
     max_steps: int = 1_000_000
     state_dt: float = 0.1  # time between state dumps (the last state_keep are kept)
-    state_keep: int = 4
+    state_keep: int = 4  # at least one: the latest dump, the end state after a cut, is kept
     singular_samples: int = 10  # samples in the running fit of the singular time
     singular_alpha_range: tuple[float, float] = (0.1, 5.0)  # exponents outside are rejected
     singular_residual: float = 0.05  # largest rms misfit of x/(dx/dt), relative to its range
@@ -273,6 +292,12 @@ class CollapseSettings:
         steps = self.post_birth_steps
         if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
             raise ValueError("post_birth_steps must be an integer of at least one")
+        keep = self.state_keep
+        if isinstance(keep, bool) or not isinstance(keep, int) or keep < 1:
+            # the rotation keeps the latest state_keep dumps: with none, a dump would be deleted as
+            # soon as it is written, the dump of the state a run after a cut ends on included
+            raise ValueError("state_keep must be an integer of at least one (the latest dump, "
+                             "after a cut the end state a continuation starts from, is kept)")
 
     @classmethod
     def from_dict(cls, data: dict, *, t_end: float, dt_max: float) -> "CollapseSettings":
@@ -404,7 +429,12 @@ CHAIN_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "z_bubble_bottom", "w_bub
                  "bubble_z_r_max", "r_neck_bubble", "z_neck_bubble", "r_neck_open", "z_neck_open",
                  "R_tip_min", "volume", "kinetic_energy", "momentum_z", "divergence_sq",
                  "h_courant", "U_courant", "courant_chain", "dt_courant", "dt_capillary",
-                 "remesh_count")
+                 "remesh_count", "ell_bubble") + tuple(
+                     f"{c}_{tip}" for tip in JET_TIPS
+                     for c in ("r_j", "z_b", "Q_j", "V_j", "We_j", "jet_born"))
+# chains.txt columns written as integers (NaN where the state has no bubble)
+INT_CHAIN_COLUMNS = ("step", "courant_chain", "remesh_count") + tuple(
+    f"jet_born_{tip}" for tip in JET_TIPS)
 
 
 @dataclass
@@ -439,6 +469,8 @@ class _State:
     last_singular_t: float = -math.inf  # time of the latest sample offered to the series
     landed: list = field(default_factory=list)  # cut radii of ``landing`` already kept or passed
     neck_samples: list = field(default_factory=list)  # [t, r_n] of the closing neck, the latest
+    # after a cut: whether a jet stands on each of the bubble's tips (reconnect.BUBBLE_TIP_SIGNS)
+    tip_born: dict = field(default_factory=dict)
 
 
 class CollapseDriver:
@@ -530,18 +562,23 @@ class CollapseDriver:
             stop.update(self._taus(self._t()))
         return stop
 
-    def _h_near_after_cut(self, r, z, ds, near_edges, in_focus, h_near: float) -> float:
-        """The spacing near the collapse after a cut, where the focus sets it.
+    def _h_near_after_cut(self, r, z, near_r: float, focus_r: float, h_near: float) -> float:
+        """The spacing near the collapse after a cut, where the focus sets it, on both chains.
 
         Every mesh after the cut keeps the cut's sizing at the tips on the axis and along the bridge
-        (``mesh.CutSizing``), so the open chain's tip is meshed at about ``h_tip`` whatever focus
-        the driver sets. Read there, the spacing could never rise above about ``h_tip`` and the
-        coarsening would rebuild the mesh at every step without effect, once the target focus
-        exceeds ``h_tip/coarsen_ratio``. It is therefore read only on edges whose two nodes the
-        cut's sizing leaves to the focus: where that sizing (``reconnect.cut_size_field``) asks for
-        at least ``CUT_SIZING_MARGIN`` times the focus size of the current mesh. Within the usual
-        window near the axis, else within the focus region, else, without any such edge, as before
-        the cut (``h_near``)."""
+        (``mesh.CutSizing``), so the tips are meshed at about ``h_tip`` whatever focus the driver
+        sets. Read there, the spacing could never rise above about ``h_tip`` and the coarsening
+        would rebuild the mesh at every step without effect, once the target focus exceeds
+        ``h_tip/coarsen_ratio``. It is therefore read only on edges whose two nodes the cut's sizing
+        leaves to the focus: where that sizing (``reconnect.cut_size_field``) asks for at least
+        ``CUT_SIZING_MARGIN`` times the focus size of the current mesh; within ``near_r`` of the
+        axis (the usual window), else within the focus region ``focus_r``. On the open chain
+        (``r``, ``z``), without any such edge, as before the cut (``h_near``); a bubble without one
+        does not count. The coarser of the two chains is returned: a chain whose spacing near the
+        axis is coarser than the target asks for a refinement although the other is fine (a jet on
+        the bubble while the open chain's cap flattens), and a coarsening needs both to be fine.
+        Both chains' nodes within ``focus_r`` of the axis are attractors of the focus
+        (``mesh.FaradayCylinderMesh``)."""
         sizing = self._cut_record().get("sizing") or {}
         if not all(k in sizing for k in ("h_tip", "h_bridge", "grading")):
             return h_near
@@ -550,14 +587,29 @@ class CollapseDriver:
                 if c["end_types"][end] == AXIS]
         focus = self.pb.active_mesh_template().focus
         size = focus.size if focus is not None else self.pb.mesh_settings.h_axis
-        free = cut_size_field(r, z, tips, sizing) >= CUT_SIZING_MARGIN * size
-        free_edges = free[:-1] & free[1:]
-        for edges in (near_edges & free_edges, (in_focus[:-1] | in_focus[1:]) & free_edges):
-            if edges.any():
-                return 2.0 * float(ds[edges].min())
-        return h_near
 
-    def _write_chain_row(self, dt: float):
+        def spacing(r, z) -> float | None:
+            r, z = np.asarray(r, dtype=float), np.asarray(z, dtype=float)
+            ds = np.hypot(np.diff(r), np.diff(z))
+            near, in_focus = r <= near_r, r <= focus_r
+            free = cut_size_field(r, z, tips, sizing) >= CUT_SIZING_MARGIN * size
+            free_edges = free[:-1] & free[1:]
+            for edges in ((near[:-1] | near[1:]) & free_edges,
+                          (in_focus[:-1] | in_focus[1:]) & free_edges):
+                if edges.any():
+                    return 2.0 * float(ds[edges].min())
+            return None
+
+        h = spacing(r, z)
+        h = h_near if h is None else h
+        bubble = next((c for c in segs if not c["open"]), None)
+        if bubble is not None:
+            h_bubble = spacing(bubble["r"], bubble["z"])
+            if h_bubble is not None:
+                h = max(h, h_bubble)
+        return h
+
+    def _write_chain_row(self, m: dict, dt: float):
         pc = self._post_cut_state()
         obs = self.pb.cut_observables()
         cl = pc["courant"]
@@ -567,10 +619,90 @@ class CollapseDriver:
                                          "divergence_sq")},
                   "h_courant": cl["h"], "U_courant": cl["U"], "courant_chain": cl["chain"],
                   "dt_courant": pc["dt_courant"], "dt_capillary": pc["dt_capillary"],
-                  "remesh_count": self.pb.remesh_count}
-        self._chains.write("\t".join(
-            str(values[c]) if c in ("step", "courant_chain", "remesh_count")
-            else f"{float(values.get(c, math.nan)):.12e}" for c in CHAIN_COLUMNS) + "\n")
+                  "remesh_count": self.pb.remesh_count,
+                  "ell_bubble": m.get("ell_bubble", math.inf)}
+        # the jets of the three tips: the open chain's as in collapse.txt, the bubble's beside it
+        jets = {"cavity_tip": m, **m.get("tips", {})}
+        for tip, jet in jets.items():
+            for k in ("r_j", "z_b", "Q_j", "V_j", "We_j"):
+                values[f"{k}_{tip}"] = jet.get(k, math.nan)
+            values[f"jet_born_{tip}"] = int(bool(jet.get("jet_born", False)))
+
+        def cell(c):
+            v = values.get(c, math.nan)
+            if c in INT_CHAIN_COLUMNS:
+                return str(int(v)) if isinstance(v, (int, np.integer)) else "nan"
+            return f"{float(v):.12e}"
+
+        self._chains.write("\t".join(cell(c) for c in CHAIN_COLUMNS) + "\n")
+
+    def _bubble_features(self) -> tuple[dict | None, dict, float]:
+        """After a cut: the bubble chain, the jet bases of its two tips (``reconnect.tip_jet``, by
+        name, without the flux) and the smallest of its scales, ``ell_bubble`` (``inf`` without a
+        bubble): the jet-base radius of each tip where a resolved bump stands (the open chain's
+        rule), its narrowest neck and its length, the gap between its tips.
+
+        The radii of curvature of the bubble's tips are not among them. Read at the end of a chain,
+        which every rebuild re-splines through the current nodes with no condition on the axis, the
+        radius of a tip depends on the mesh there: a tip whose spline leaves the axis at a slope
+        (on the synthetic cavity of the tests, from its coarse first mesh) is a cone, whose fitted
+        radius shrinks with the element length, so each refinement reads it sharper and, as a
+        scale, would refine it again (on that cavity the radius read at the bubble's bottom fell
+        from 0.016 to 6.6e-4 in four rebuilds, the step with it). They bound the step instead
+        (``dt_capillary``, from ``R_tip_min``)."""
+        s = self.s
+        pc = self._post_cut_state()
+        bubble = next((c for c in pc["segs"] if not c["open"]), None)
+        if bubble is None or len(pc["segs"]) != 2:  # a changed topology, which a stop records
+            return None, {}, math.inf
+        tips = {name: tip_jet(bubble_end(bubble, name), r_search=s.r_search, rise_tol=s.rise_tol,
+                              flat_aspect=s.flat_aspect, jet_aspect=s.jet_aspect,
+                              jet_max_radius=s.jet_max_radius)
+                for name in BUBBLE_TIP_SIGNS}
+        rec = pc["record"]
+        scales = [rec["r_neck_bubble"], rec["z_bubble_top"] - rec["z_bubble_bottom"]]
+        scales += [tj["r_j"] for tj in tips.values()
+                   if tj["bump"] and tj["r_j"] > 0.0 and not tj["flat_bump"]]
+        finite = [float(x) for x in scales if math.isfinite(x) and x > 0.0]
+        return bubble, tips, min(finite) if finite else math.inf
+
+    def _complete_tip_jet(self, name: str, tj: dict, h_focus: float):
+        """Complete the jet of one of the bubble's tips (:meth:`_bubble_features`) in place, as
+        :meth:`measure` does the open chain's: whether its axis end is the lowest point of the end
+        again (``axis_lowest``), whether a jet stands there (``jet_born``: one did at the last step
+        and the end is not lowest again, or it passes the test of a born jet now), and, while one
+        stands, the flux ``Q_j`` through the disc of radius ``r_j`` at the base, the mean speed
+        ``V_j = Q_j/(pi r_j^2)`` and ``We_j = V_j^2 r_j``. ``Q_j`` and ``V_j`` are positive along
+        the jet, into the bubble: downwards from the bubble's top."""
+        s = self.s
+        flat = tj["index"] > 0 and tj["rise"] <= s.flat_aspect * max(tj["r_j"], h_focus)
+        tj["axis_lowest"] = bool(tj["index"] == 0 or flat)
+        tj["jet_born"] = bool((self.state.tip_born.get(name, False) and not tj["axis_lowest"])
+                              or tj["jet"])
+        tj.update(Q_j=math.nan, V_j=math.nan, We_j=math.nan, flux_found=True)
+        if tj["jet_born"] and tj["r_j"] > 0.0:
+            rr, ww = gauss_disc_points(tj["r_j"], s.probe_points)
+            w, found = self.pb.axial_velocity_at([(x, tj["z_b"]) for x in rr])
+            tj["flux_found"] = found
+            if found:
+                Q = BUBBLE_TIP_SIGNS[name] * float(np.dot(ww, w))
+                V = Q / (math.pi * tj["r_j"] ** 2)
+                tj.update(Q_j=Q, V_j=V, We_j=V**2 * tj["r_j"])
+
+    def _track_tips(self, m: dict, snapshot: bool = True):
+        """After a cut: record the jets of the bubble's tips that the measured state ``m`` finds
+        born or gone (events ``tip-jet-born`` and ``tip-jet-gone``, with the tip's name), and keep
+        them for the next measurement and the dumps."""
+        st = self.state
+        for name, tj in m.get("tips", {}).items():
+            if tj["jet_born"] == bool(st.tip_born.get(name, False)):
+                continue
+            st.tip_born[name] = tj["jet_born"]
+            kind = "tip-jet-born" if tj["jet_born"] else "tip-jet-gone"
+            self._event(kind, m, tip=name, tip_r_j=tj["r_j"], tip_z_b=tj["z_b"],
+                        tip_z=tj["z_tip"], tip_V_j=tj["V_j"])
+            if snapshot and tj["jet_born"]:
+                self._maybe_snapshot(m, kind)
 
     # --- measurement --------------------------------------------------------------------------
 
@@ -602,7 +734,11 @@ class CollapseDriver:
         # scales above the one at which the focus starts refining do not matter for resolution or
         # stepping; capping also keeps 1/|z''(0)| finite while the apex curvature changes sign
         ell_cap = h_axis * s.elements_per_scale
-        ell_measured = min(min(scales) if scales else ell_cap, ell_cap)
+        ell_open = min(min(scales) if scales else ell_cap, ell_cap)
+        # after a cut the bubble's features count too (inf before a cut or without a bubble)
+        after_cut = self._cut_record() is not None
+        bubble, tips, ell_bubble = self._bubble_features() if after_cut else (None, {}, math.inf)
+        ell_measured = min(ell_open, ell_bubble)
         ell = limit_scale(ell_measured, self.state.ell_prev, s.scale_growth)
         h_focus = float(np.clip(ell / s.elements_per_scale, s.h_floor, h_axis))
 
@@ -615,27 +751,42 @@ class CollapseDriver:
                 Q = float(np.dot(ww, w))
                 V = Q / (math.pi * r_j**2)
                 We = V**2 * r_j
+        for name, tj in tips.items():
+            self._complete_tip_jet(name, tj, h_focus)
 
-        near = r <= max(2.0 * ell, 4.0 * h_focus)
+        near_r = max(2.0 * ell, 4.0 * h_focus)
+        near = r <= near_r
         ds = np.hypot(np.diff(r), np.diff(z))
         near_edges = near[:-1] | near[1:]
         h_near = 2.0 * float(ds[near_edges].min()) if near_edges.any() else math.inf
 
         focus_r = min(pb.nd.radius, s.focus_extent * ell)
-        in_focus = r <= focus_r
-        if self._cut_record() is not None:
-            h_near = self._h_near_after_cut(r, z, ds, near_edges, in_focus, h_near)
+        # the region of the open chain's own scale, for its fold stop and its speeds: after a cut a
+        # feature of the bubble can narrow the focus, but not the open chain's fold search
+        own_r = focus_r if not after_cut else max(focus_r,
+                                                  min(pb.nd.radius, s.focus_extent * ell_open))
+        in_own = r <= own_r
+        if after_cut:
+            h_near = self._h_near_after_cut(r, z, near_r, focus_r, h_near)
         # Select the fold closest to its own stop limit, using each node's local spacing.
-        fold = fold_gap(r, z, r_max=focus_r, ratio=s.fold_ratio,
+        fold = fold_gap(r, z, r_max=own_r, ratio=s.fold_ratio,
                         stop=s.fold_stop, stop_elements=s.fold_stop_elements, search_factor=FOLD_SEARCH)
         if fold.crossed:
             raise InterfaceSelfIntersection(
-                f"the free surface crosses itself within r <= {focus_r:.6g} at t = {self._t():.15g}; "
+                f"the free surface crosses itself within r <= {own_r:.6g} at t = {self._t():.15g}; "
                 "the measured state is invalid and the last row before it is the last valid one")
         fold_limit = (max(s.fold_stop, s.fold_stop_elements * fold.h_elem)
                       if math.isfinite(fold.gap) else math.nan)
-        U = max(float(np.max(np.hypot(ur[in_focus], uz[in_focus]))) if in_focus.any() else 0.0,
-                abs(V) if math.isfinite(V) else 0.0, 1e-3)
+        speeds = [float(np.max(np.hypot(ur[in_own], uz[in_own]))) if in_own.any() else 0.0,
+                  abs(V) if math.isfinite(V) else 0.0, 1e-3]
+        if bubble is not None:  # the bubble's nodes in that region and the jets of its tips
+            br = np.asarray(bubble["r"], dtype=float)
+            sel = br <= own_r
+            if sel.any():
+                speeds.append(float(np.max(np.hypot(np.asarray(bubble["u_r"])[sel],
+                                                    np.asarray(bubble["u_z"])[sel]))))
+            speeds += [abs(tj["V_j"]) for tj in tips.values() if math.isfinite(tj["V_j"])]
+        U = max(speeds)
 
         ref = max(r_j if born else 0.0,
                   1.0 / abs(kappa) if math.isfinite(kappa) and kappa != 0 else 0.0)
@@ -654,7 +805,8 @@ class CollapseDriver:
                 "beta_fit_points": npts, "beta_window_lo": lo, "beta_window_hi": hi,
                 "angles": angles, "focus_radius": focus_r, "profile": (r, z, ur, uz),
                 "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
-                "fold_h_elem": fold.h_elem, "fold_limit": fold_limit}
+                "fold_h_elem": fold.h_elem, "fold_limit": fold_limit,
+                "tips": tips, "ell_bubble": ell_bubble}
 
     # --- bookkeeping --------------------------------------------------------------------------
 
@@ -685,7 +837,7 @@ class CollapseDriver:
         self._table.write("\t".join(f"{v:.12e}" if isinstance(v, float) else str(v)
                                     for v in row) + "\n")
         if self._cut_record() is not None:
-            self._write_chain_row(dt)
+            self._write_chain_row(m, dt)
 
     def _snapshot(self, m: dict, reason: str):
         st = self.state
@@ -859,7 +1011,8 @@ class CollapseDriver:
             meta["cut"] = cut
             if self.reconnect is not None:
                 meta.update(self._taus(meta["time"]),
-                            coarsen_blocked_until=st.coarsen_blocked_until)
+                            coarsen_blocked_until=st.coarsen_blocked_until,
+                            tip_born=dict(st.tip_born))
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -879,11 +1032,14 @@ class CollapseDriver:
 
     def _save_end_state(self) -> Path:
         """After a cut: the rotating dump of the state the run ends on (as any dump, within its step
-        if it ends there), unless that step has just been dumped. A continuation starts from it."""
+        if it ends there), unless that step has just been dumped. A continuation starts from it. It
+        is the latest dump, which the rotation keeps (``state_keep`` is at least one)."""
         st = self.state
         path = self.outdir / "states" / f"state_{st.step:08d}.dump"
         if not st.states or st.states[-1] != path:
             self.save_state()
+        if not (path.is_file() and path.with_suffix(".json").is_file()):
+            raise RuntimeError(f"the dump of the end state {path} was not kept")
         return path
 
     def save_state(self):
@@ -943,6 +1099,8 @@ class CollapseDriver:
 
             restore_cut(self.pb, meta["cut"])
             st.coarsen_blocked_until = int(meta.get("coarsen_blocked_until", -10**9))
+            # dumps written before the jets of the bubble's tips were tracked: none stands yet
+            st.tip_born = {str(k): bool(v) for k, v in (meta.get("tip_born") or {}).items()}
         ep = self.episodes
         resume = {"resume_at": RESUME_REMESH_CHECK} if self._checks_pending else {}
         self._event("restart", self.measure(), from_time=meta["time"],
@@ -974,6 +1132,7 @@ class CollapseDriver:
         st.cycle += 1
         st.coarsen_held_until = -math.inf
         st.refine_blocked_until = st.coarsen_blocked_until = -10**9
+        st.tip_born = {}
         self._checks_pending = False  # the cut rebuilt the mesh; the next step follows at once
         m = self.measure()
         geometry = record.get("geometry", {})
@@ -984,6 +1143,7 @@ class CollapseDriver:
                     in_cut_radii=record.get("in_cut_radii"),
                     delta_KE=record.get("projection", {}).get("delta_KE"),
                     transfer=record.get("transfer"), focus=record.get("focus"))
+        self._track_tips(m, snapshot=False)  # a jet already inside the bubble, say
         self._snapshot(m, "cut")
         return m
 
@@ -1209,6 +1369,7 @@ class CollapseDriver:
                             max_curvature_time=st.max_curvature_time, t0_apex=st.apex_t0,
                             alpha_apex=st.apex_alpha, t_apex_est=st.apex_t_est)
                 self._maybe_snapshot(m, "jet-born")
+            self._track_tips(m)  # after a cut, the jets of the bubble's tips
             # a trough apex only: a bump or crest on the axis has z''(0) < 0
             if st.cavity_seen and not st.born and m["axis_curvature"] > st.max_curvature:
                 st.max_curvature = m["axis_curvature"]

@@ -686,3 +686,64 @@ def test_volume_correction_is_refused_on_the_stop_profile():
     chain = rc.profile_chain(r, z, 3.0)
     with pytest.raises(RuntimeError, match="self-intersecting"):
         topo.detect_and_plan([chain], 1.05 * r_n, None, volume_conservation=True)
+
+
+# --- after the cut: the jets of the bubble's tips ----------------------------------------------
+
+
+def _jet_bubble(n=4001, R_b=0.1, zc=4.58, D=0.01, w=2e-3):
+    """A spherical bubble whose top hangs down into a jet, ``z -> z - D exp(-(r/w)^2)`` on its upper
+    half, as ``FaradayProblem.interface_segments`` gives it: upwards from its bottom tip."""
+    th = np.linspace(0.0, math.pi, n)
+    r = R_b * np.sin(th)
+    r[[0, -1]] = 0.0
+    z = zc - R_b * np.cos(th)
+    upper = th > 0.5 * math.pi
+    z[upper] -= D * np.exp(-((r[upper] / w) ** 2))
+    return {"open": False, "end_types": ("axis", "axis"), "r": r, "z": z,
+            "u_r": np.zeros_like(r), "u_z": np.where(upper, -1.0, 0.5)}
+
+
+JET_KW = {"r_search": 1.5, "rise_tol": 1e-6, "flat_aspect": 0.01, "jet_aspect": 0.1,
+          "jet_max_radius": 0.3}
+
+
+def test_the_bubble_ends_are_taken_in_the_frame_of_their_jets():
+    """Each end runs from its tip to the bubble's widest point; the top is mirrored, z and u_z, so
+    that the liquid lies below its tip as at the cavity's."""
+    seg = _jet_bubble()
+    top, bottom = rc.bubble_end(seg, "bubble_top"), rc.bubble_end(seg, "bubble_bottom")
+    k = int(np.argmax(seg["r"]))
+    assert bottom["sign"] == 1.0 and top["sign"] == -1.0
+    assert np.array_equal(bottom["r"], seg["r"][:k + 1]) and np.array_equal(bottom["z"],
+                                                                            seg["z"][:k + 1])
+    assert np.array_equal(top["r"], seg["r"][k:][::-1])
+    assert np.array_equal(top["z"], -seg["z"][k:][::-1])
+    # the widest node, the last of the top, lies on the lower half of this bubble
+    assert np.all(top["u_z"][:-1] == 1.0) and top["u_z"][-1] == -0.5
+    assert np.all(bottom["u_z"] == 0.5)
+
+
+def test_the_jet_hanging_from_the_bubble_top_is_measured_as_one_rising_from_a_cavity():
+    """The base of the jet the bridge drives down into the bubble is the highest point of the
+    bubble's top near the axis; its height is returned in the frame of the axis. The bottom of the
+    bubble, a sphere, has no jet: its tip is the lowest point there."""
+    R_b, zc, D, w = 0.1, 4.58, 0.01, 2e-3
+    seg = _jet_bubble(R_b=R_b, zc=zc, D=D, w=w)
+    jet = rc.tip_jet(rc.bubble_end(seg, "bubble_top"), **JET_KW)
+    r = np.linspace(1e-6, 0.05, 500001)
+    z = zc + np.sqrt(R_b**2 - r**2) - D * np.exp(-((r / w) ** 2))
+    k = int(np.argmax(z))
+    assert jet["jet"] and jet["bump"] and not jet["flat_bump"] and jet["index"] > 0
+    assert jet["r_j"] == pytest.approx(r[k], rel=1e-3)
+    assert jet["z_b"] == pytest.approx(z[k], abs=1e-7)
+    assert jet["z_tip"] == seg["z"][-1]
+    assert jet["rise"] == pytest.approx(z[k] - seg["z"][-1], abs=1e-7)
+    none = rc.tip_jet(rc.bubble_end(seg, "bubble_bottom"), **JET_KW)
+    assert none["index"] == 0 and none["r_j"] == 0.0 and not none["bump"] and not none["jet"]
+    assert none["z_b"] == none["z_tip"] == seg["z"][0]
+    # a dimple barely deeper than the sphere's curvature allows (2 D/w^2 > 1/R_b) is a bump
+    # but no jet (its rise is below jet_aspect r_j)
+    flat = rc.tip_jet(rc.bubble_end(_jet_bubble(D=4e-5, w=2e-3), "bubble_top"), **JET_KW)
+    assert flat["bump"] and flat["index"] > 0 and not flat["jet"]
+    assert flat["rise"] < JET_KW["jet_aspect"] * flat["r_j"]

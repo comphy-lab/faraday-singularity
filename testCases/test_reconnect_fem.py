@@ -1047,6 +1047,16 @@ def test_production_runner_cuts_a_landing_state_at_its_start(production_cut, lan
                                                  chains["dt_capillary"])[:-1] * (1 + 1e-12))
     assert np.array_equal(table["tau"], chains["tau"]) and np.all(np.isfinite(table["z_axis"]))
     assert {"r_j", "V_j", "Q_j", "tau_p"} <= set(table)
+    # the jets of the three tips, the open chain's as collapse.txt has it; the bubble of the
+    # synthetic cavity has no jet, and its scale (its length here) lies above the cap of the scale
+    for tip in ("cavity_tip", "bubble_bottom", "bubble_top"):
+        names = {f"{k}_{tip}" for k in ("r_j", "z_b", "Q_j", "V_j", "We_j", "jet_born")}
+        assert names <= set(chains)
+    assert np.array_equal(chains["r_j_cavity_tip"], table["r_j"], equal_nan=True)
+    assert np.array_equal(chains["V_j_cavity_tip"], table["V_j"], equal_nan=True)
+    assert np.all(chains["jet_born_bubble_top"] == 0) and np.all(chains["r_j_bubble_top"] == 0.0)
+    assert np.all(np.isfinite(chains["ell_bubble"]))
+    assert np.all(table["ell"] <= chains["ell_bubble"])
     events = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
     kinds = [e["event"] for e in events]
     assert kinds[:2] == ["restart", "cut"] and kinds[-1] == "stop"
