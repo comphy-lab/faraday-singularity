@@ -24,8 +24,12 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
    remesh), and the focus of this remesh is set to ``focus_size`` cut radii on the interface nodes
    within ``focus_radius`` cut radii of the axis. That focus replaces the one the run that wrote the
    landing state left, whose size depends on when that run last rebuilt its mesh and on its
-   ``h_floor``; both are recorded (``focus``). The collapse driver sets the focus again by its own
-   rule at its next rebuild.
+   ``h_floor``; both are recorded (``focus``). Only the bubble's bottom, the landing's cavity bottom
+   with its jet, far from the cut, keeps the landing focus where it is finer
+   (``reconnect.kept_region``: a second region of the focus, within the landing focus radius of its
+   tip and its half of the bubble; ``focus.kept``), so that the cut coarsens no feature it does
+   not make. The collapse driver sets the focus again by its own rule, feature by feature, at its
+   next rebuild, and keeps that resolution of the bubble's bottom.
 4. **Remesh at once**, with nothing in between that could solve, move a node or remesh: the plan
    refers to the current interface nodes exactly. pyoomph transfers the fields; nodes in the former
    gas thread and on the bridge are not located in the old mesh and get its two-nearest-node blend.
@@ -105,10 +109,10 @@ from pyoomph.equations.topological_changes import AxisymmetricReconnection
 from pyoomph.expressions import div, evaluate_in_past, testfunction, var, weak
 from pyoomph.generic.codegen import Equations
 
-from .mesh import CutSizing, Focus
+from .mesh import CutSizing, Focus, FocusRegion
 from .reconnect import (Chain, ReconnectSettings, chain_volumes, cut_geometry, gas_volume_in_box,
-                        in_cut_radii, liquid_axis_spans, neck_radius, orient_chain, plan_chains,
-                        replace_caps, tip_size)
+                        in_cut_radii, kept_region, liquid_axis_spans, neck_radius, orient_chain,
+                        plan_chains, replace_caps, tip_size)
 
 INTERFACE = "liquid/interface"
 FAR_POINT = (1.0e4, -100.0)  # the chart starts at the chain end nearest this: the wall, else the bottom
@@ -630,11 +634,20 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
         sizing = CutSizing(h_tip=tip_size(rmin, s), h_bridge=s.bridge_size * rmin,
                            curvature=s.curvature_sizing, grading=template.settings.grading)
         landing_focus = template.focus
-        cut_focus = Focus(size=s.focus_size * rmin, radius=min(pb.nd.radius, s.focus_radius * rmin),
+        # the bubble's bottom, the landing's cavity bottom with its jet, keeps the resolution it
+        # had at the landing (reconnect.kept_region): a focus region beside the cut's own
+        h_cut, r_cut = s.focus_size * rmin, min(pb.nd.radius, s.focus_radius * rmin)
+        kept = kept_region(None if landing_focus is None else landing_focus.to_dict(), h_cut,
+                           geom.z_bubble_bottom, geom.z_bubble_top)
+        regions = () if kept is None else (
+            FocusRegion("cut", size=h_cut, r=0.0, z=0.0, radius=r_cut, axial=True),
+            FocusRegion("bubble_bottom", size=kept["size"], r=0.0, z=geom.z_bubble_bottom,
+                        radius=kept["radius"]))
+        cut_focus = Focus(size=min([h_cut] + [g.size for g in regions]), radius=r_cut,
                           grading=(landing_focus.grading if landing_focus is not None
-                                   else template.settings.grading))
-        record["focus"] = {"landing": None if landing_focus is None else asdict(landing_focus),
-                           "cut": asdict(cut_focus)}
+                                   else template.settings.grading), regions=regions)
+        record["focus"] = {"landing": None if landing_focus is None else landing_focus.to_dict(),
+                           "cut": cut_focus.to_dict(), "kept": kept}
         # every change of the free surface lies between the two splices
         z_lo, z_hi = min(e.z_s for e in edits), max(e.z_s for e in edits)
         margin = 2.0 * rmin
@@ -752,7 +765,7 @@ def _keep(problem, driver, outdir: Path, name: str, extra: dict) -> dict:
         problem.save_state(str(path), quiet=True)
         focus = problem.active_mesh_template().focus
         meta = {"time": problem.get_current_time(dimensional=False, as_float=True),
-                "focus": None if focus is None else asdict(focus), **extra}
+                "focus": None if focus is None else focus.to_dict(), **extra}
         if problem.cut is not None:
             meta["cut"] = problem.cut
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")

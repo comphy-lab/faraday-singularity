@@ -85,24 +85,70 @@ def catmull_rom(r, z, samples: int = 8) -> np.ndarray:
     return np.vstack([seg.reshape(-1, 2), P[-1:]])
 
 
-def check_simple_interface(points, samples: int = 8):
+REMESH_SAMPLES = 8  # spline points per interval of the remesh's check (mesh.py)
+# a contact spanning at least this many elements of the surface between its two sides is a fold of
+# the resolved surface; one within fewer is a kink at the scale of the mesh (classify_contact)
+FOLD_RESOLVED_ELEMENTS = 4
+
+
+def first_contact(points, samples: int = REMESH_SAMPLES) -> dict | None:
+    """The first self-contact of the control polygon ``points`` (``(r, z)`` pairs ordered from the
+    axis) or, if the polygon is simple, of its sampled Catmull-Rom spline; None if neither has one.
+
+    ``what`` is ``"polygon"`` or ``"spline"``; ``nodes`` the first and last node of each of the two
+    intervals that meet, ``(i, i + 1, j, j + 1)``; ``at`` and ``other`` the start of each sampled
+    chord; ``count`` the number of contacts. :func:`check_simple_interface` raises on the same
+    contact, so a state whose nodes pass here passes the remesh's check."""
+    P = np.asarray(points, dtype=float)
+    for what, Q, scale in (("polygon", P, 1),
+                           ("spline", catmull_rom(P[:, 0], P[:, 1], samples), samples)):
+        hits = chord_crossings(Q[:, 0], Q[:, 1])
+        if hits:
+            i, j = hits[0]
+            return {"what": what, "count": len(hits),
+                    "nodes": (i // scale, i // scale + 1, j // scale, j // scale + 1),
+                    "at": (float(Q[i, 0]), float(Q[i, 1])),
+                    "other": (float(Q[j, 0]), float(Q[j, 1]))}
+    return None
+
+
+def classify_contact(points, contact: dict) -> dict:
+    """Whether a contact of :func:`first_contact` is a fold of the resolved surface or a kink at
+    the scale of the mesh, with the evidence: the node intervals between the two sides (``span``,
+    two per quadratic element), the shortest and longest node spacing over the nodes involved and
+    their ratio, and the largest turn of the polygon there (degrees). A ``kink`` spans fewer than
+    ``FOLD_RESOLVED_ELEMENTS`` elements: its two sides are a few nodes apart along the surface, not
+    two parts of the surface approaching across a gap that the mesh resolves."""
+    P = np.asarray(points, dtype=float)
+    i, _, _, j1 = contact["nodes"]
+    span = j1 - i
+    lo, hi = max(0, i - 2), min(len(P) - 1, j1 + 2)
+    ds = np.hypot(*np.diff(P[lo:hi + 1], axis=0).T)
+    a = np.diff(P[lo:hi + 1], axis=0)
+    ang = np.degrees(np.arctan2(a[:, 1], a[:, 0]))
+    turn = np.abs((np.diff(ang) + 180.0) % 360.0 - 180.0)
+    return {"contact": "kink" if span < 2 * FOLD_RESOLVED_ELEMENTS else "fold", "span": int(span),
+            "spacing_min": float(ds.min()), "spacing_max": float(ds.max()),
+            "spacing_ratio": float(ds.max() / ds.min()) if ds.min() > 0 else math.inf,
+            "max_turn_deg": float(turn.max()) if len(turn) else 0.0}
+
+
+def check_simple_interface(points, samples: int = REMESH_SAMPLES):
     """Raise :class:`InterfaceSelfIntersection` if the control polygon ``points`` (``(r, z)`` pairs
-    ordered from the axis) or its sampled Catmull-Rom spline contacts itself.
+    ordered from the axis) or its sampled Catmull-Rom spline contacts itself (:func:`first_contact`).
 
     The spline uses ``samples`` points per interval; loops narrower than the sample spacing can
     pass. This is a geometric guard, not a universal certificate that the spline is simple.
     """
-    P = np.asarray(points, dtype=float)
-    for what, Q, scale in (("free surface", P, 1), ("spline through the free surface",
-                                                    catmull_rom(P[:, 0], P[:, 1], samples), samples)):
-        hits = chord_crossings(Q[:, 0], Q[:, 1])
-        if hits:
-            i, j = hits[0]
-            raise InterfaceSelfIntersection(
-                f"the {what} crosses itself ({len(hits)} crossing(s)); the first between nodes "
-                f"{i // scale}-{i // scale + 1} at (r, z) = ({Q[i, 0]:.9g}, {Q[i, 1]:.9g}) and nodes "
-                f"{j // scale}-{j // scale + 1} at ({Q[j, 0]:.9g}, {Q[j, 1]:.9g}): no planar liquid "
-                "domain to mesh (interface contact the sharp-interface mesh cannot follow)")
+    c = first_contact(points, samples)
+    if c is not None:
+        what = "free surface" if c["what"] == "polygon" else "spline through the free surface"
+        i, i1, j, j1 = c["nodes"]
+        raise InterfaceSelfIntersection(
+            f"the {what} crosses itself ({c['count']} crossing(s)); the first between nodes "
+            f"{i}-{i1} at (r, z) = ({c['at'][0]:.9g}, {c['at'][1]:.9g}) and nodes "
+            f"{j}-{j1} at ({c['other'][0]:.9g}, {c['other'][1]:.9g}): no planar liquid "
+            "domain to mesh (interface contact the sharp-interface mesh cannot follow)")
 
 
 @dataclass(frozen=True)

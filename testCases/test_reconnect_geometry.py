@@ -577,7 +577,9 @@ def test_post_cut_stops_on_a_fold_of_the_bubble():
     assert rc.post_cut_stops([slotted(0.01), cavity], cut, s, 1e-5, fold_stop=3e-4) is None
     stop = rc.post_cut_stops([slotted(5e-4), cavity], cut, s, 1e-5, fold_stop=3e-4)
     assert stop["reason"] == "self-contact-approach" and stop["chain"] == "bubble"
+    assert stop["trigger"] == "fold-gap" and stop["contact"] == "fold"  # resolved, ~16 elements deep
     assert stop["fold_gap"] == pytest.approx(5e-4) and stop["fold_limit"] == pytest.approx(3 * 2 * h)
+    assert stop["fold_arc"] >= 4 * stop["fold_h_elem"]
     crossed = slotted(5e-4)
     crossed.points[[200, 201]] = crossed.points[[201, 200]]  # two nodes of the bottom swapped
     with pytest.raises(InterfaceSelfIntersection):
@@ -747,3 +749,163 @@ def test_the_jet_hanging_from_the_bubble_top_is_measured_as_one_rising_from_a_ca
     flat = rc.tip_jet(rc.bubble_end(_jet_bubble(D=4e-5, w=2e-3), "bubble_top"), **JET_KW)
     assert flat["bump"] and flat["index"] > 0 and not flat["jet"]
     assert flat["rise"] < JET_KW["jet_aspect"] * flat["r_j"]
+
+
+# --- after the cut: self-contact the remesh would meet, and the mesh of each feature -------------
+
+
+def kinked(P, k, eps=0.02):
+    """Nodes ``k + 1`` and ``k + 2`` of a polyline pulled to within ``eps`` of its spacing of node
+    ``k``, with a zigzag: a cluster of fine nodes beside coarse ones, as gmsh's sizing from
+    curvature left on the bubble's bottom of a run. The polygon stays simple; its uniform
+    Catmull-Rom spline, the curve a remesh is built on, loops."""
+    Q = np.array(P, dtype=float)
+    t = Q[k + 3] - Q[k]
+    t /= np.hypot(*t)
+    n = np.array([-t[1], t[0]])
+    d = eps * np.hypot(*(Q[k + 1] - Q[k]))
+    Q[k + 1] = Q[k] + d * t + 0.3 * d * n
+    Q[k + 2] = Q[k] + 2 * d * t - 0.3 * d * n
+    return Q
+
+
+def test_a_kink_whose_spline_loops_is_a_clean_stop_before_the_remesh_meets_it():
+    """A kink of three nodes whose spline crosses itself, while the nodes do not, is the contact a
+    remesh from those nodes raises on (check_chains, InterfaceSelfIntersection: a failed run). The
+    stops after the cut make the same test first and stop cleanly (self-contact-approach, trigger
+    spline-contact), on either chain, and report it as a kink at the scale of the mesh, not a fold:
+    its two sides are three node intervals apart, beside a jump in node spacing."""
+    from faraday_singularity.selfcontact import InterfaceSelfIntersection, first_contact
+
+    s = rc.ReconnectSettings(delta=1e-3)
+    bubble, cavity = _bubble(), _cavity()
+    cut = rc.cut_geometry([bubble, cavity], 3.0, gas_before=1.0)
+    bad = rc.Chain(kinked(bubble.points, 300), bubble.end_types)
+    contact = first_contact(bad.points)
+    assert contact["what"] == "spline" and contact["nodes"] == (299, 300, 301, 302)
+    with pytest.raises(InterfaceSelfIntersection, match="spline through the free surface"):
+        rc.check_chains([bad, cavity])
+    stop = rc.post_cut_stops([bad, cavity], cut, s, h_min=1e-5)
+    assert stop["reason"] == "self-contact-approach" and stop["trigger"] == "spline-contact"
+    assert stop["chain"] == "bubble" and stop["contact"] == "kink" and stop["span"] == 3
+    assert stop["nodes"] == [299, 300, 301, 302] and stop["spacing_ratio"] > 20
+    assert stop["contact_r"] == pytest.approx(bad.points[299, 0], rel=1e-2)
+    # on the open chain, beyond the region of the driver's own fold stop
+    k = 200
+    bad_open = rc.Chain(kinked(cavity.points, k), cavity.end_types)
+    with pytest.raises(InterfaceSelfIntersection):
+        rc.check_chains([bubble, bad_open])
+    stop = rc.post_cut_stops([bubble, bad_open], cut, s, h_min=1e-5)
+    assert stop["trigger"] == "spline-contact" and stop["chain"] == "open"
+    assert stop["contact"] == "kink"
+    # nodes that have crossed are no state to stop on
+    crossed = bubble.points.copy()
+    crossed[[200, 201]] = crossed[[201, 200]]
+    with pytest.raises(InterfaceSelfIntersection, match="bubble"):
+        rc.post_cut_stops([rc.Chain(crossed, bubble.end_types), cavity], cut, s, h_min=1e-5)
+
+
+def test_a_fold_spanning_few_elements_is_a_kink():
+    assert rc.fold_contact(arc=4e-4, h_elem=1e-4) == "fold"
+    assert rc.fold_contact(arc=3.9e-4, h_elem=1e-4) == "kink"
+
+
+def _post_cut_segs(bottom=None, n=4001):
+    """Both chains after a cut as ``FaradayProblem.interface_segments`` gives them: the jet bubble
+    (its top hanging into a jet) with, with ``bottom = (D, w)``, its bottom rising into a jet,
+    ``z -> z + D exp(-(r/w)^2)`` on its lower half, and the cavity above it."""
+    seg = _jet_bubble(n=n)
+    if bottom is not None:
+        D, w = bottom
+        lower = np.arange(n) < n // 2
+        seg["z"][lower] += D * np.exp(-((seg["r"][lower] / w) ** 2))
+    cav = _cavity(z_tip=seg["z"][-1] + 0.01)
+    open_ = {"open": True, "end_types": ("axis", "fixed"), "r": cav.points[:, 0],
+             "z": cav.points[:, 1], "u_r": np.zeros(len(cav.points)),
+             "u_z": np.zeros(len(cav.points))}
+    return [seg, open_]
+
+
+def _regions(segs, cut, s, cavity=None, **kw):
+    bubble = segs[0]
+    tips = {name: rc.tip_jet(rc.bubble_end(bubble, name), **JET_KW) for name in rc.BUBBLE_TIP_SIGNS}
+    cavity = cavity or {"z_tip": float(segs[1]["z"][0]), "kappa": 1.0 / 1e-4, "r_j": 0.0,
+                        "rise": 0.0, "bump": False, "flat_bump": False}
+    kw = {"h_floor": 1e-6, "h_axis": 0.05, "elements_per_scale": 16.0, "focus_extent": 20.0, **kw}
+    return {g["name"]: g for g in rc.feature_regions(segs, cavity, tips, rc.post_cut_record(segs),
+                                                     cut, s, **kw)}
+
+
+def test_the_tips_the_cut_made_are_meshed_at_the_cut_focus_size_whatever_their_scale():
+    """The cavity's tip and the bubble's top, which the cut made, are meshed at the cut's focus
+    size, focus_size cut radii: an apex radius of 1e-4 (a size of 6.25e-6 by the rule, the landing
+    run's h_floor or above) does not refine them, and their regions cover the cut's focus radius
+    and the jet hanging from the top (base radius about 3e-3, 0.01 deep)."""
+    s = rc.ReconnectSettings(delta=1e-3)
+    segs = _post_cut_segs()
+    g = _regions(segs, {"delta": 1e-3, "rmin": 1e-3}, s, h_floor=6.25e-6)
+    for name in rc.FRESH_TIPS:
+        assert g[name]["target"] == pytest.approx(s.focus_size * 1e-3) == g[name]["floor"]
+        assert g[name]["r"] == 0.0
+    assert g["cavity_tip"]["z"] == segs[1]["z"][0] and g["bubble_top"]["z"] == segs[0]["z"][-1]
+    assert g["cavity_tip"]["radius"] == pytest.approx(s.focus_radius * 1e-3)
+    top = rc.tip_jet(rc.bubble_end(segs[0], "bubble_top"), **JET_KW)
+    assert g["bubble_top"]["radius"] == pytest.approx(2 * math.hypot(top["r_j"], top["rise"]))
+    assert g["bubble_top"]["radius"] > 0.02  # the jet, 0.01 long, reaches beyond 20 cut radii
+    assert "bubble_bottom" not in g  # a sphere's bottom, no landing focus: no feature
+
+
+def test_the_bubble_bottom_keeps_its_landing_resolution_far_from_the_cut():
+    """The bubble's bottom, the landing's cavity bottom with its jet (base radius about 8e-3, a
+    size of 5e-4 by its own scale), keeps the finer resolution it had at the landing (a focus of
+    4e-5 within 0.02 of the axis) over the region the landing resolved, within its half of the
+    bubble, far below the cut; the cut's focus size (6.25e-5) would coarsen it."""
+    s = rc.ReconnectSettings(delta=1e-3)
+    segs = _post_cut_segs(bottom=(2e-3, 5e-3))
+    z_bb, z_bt = float(segs[0]["z"][0]), float(segs[0]["z"][-1])
+    kept = rc.kept_region({"size": 4e-5, "radius": 0.02, "grading": 0.2}, 6.25e-5, z_bb, z_bt)
+    assert kept["size"] == 4e-5 and kept["radius"] == 0.02
+    cut = {"delta": 1e-3, "rmin": 1e-3, "focus": {"kept": kept}}
+    g = _regions(segs, cut, s, h_floor=6.25e-6)["bubble_bottom"]
+    bottom = rc.tip_jet(rc.bubble_end(segs[0], "bubble_bottom"), **JET_KW)
+    assert bottom["bump"] and 3e-3 < bottom["r_j"] < 1e-2
+    assert g["target"] == 4e-5 and g["kept"] == 4e-5 and g["floor"] == 6.25e-6
+    assert (g["r"], g["z"]) == (0.0, z_bb)
+    assert g["radius"] == pytest.approx(min(20 * bottom["r_j"], 0.5 * (z_bt - z_bb)))
+    assert g["radius"] >= kept["radius"]
+    # a narrow jet there asks for its own, finer size, floored at the landing run's h_floor
+    narrow = _regions(_post_cut_segs(bottom=(2e-4, 1e-4), n=40001), cut, s, h_floor=6.25e-6)
+    r_j = narrow["bubble_bottom"]["ell"]
+    assert narrow["bubble_bottom"]["target"] == pytest.approx(max(r_j / 16, 6.25e-6))
+    assert narrow["bubble_bottom"]["target"] < 4e-5
+    # within its half of the bubble only, so that it never reaches the bubble's fresh top
+    wide = rc.kept_region({"size": 4e-5, "radius": 1.0, "grading": 0.2}, 6.25e-5, z_bb, z_bt)
+    assert wide["radius"] == pytest.approx(0.5 * (z_bt - z_bb))
+    # the landing coarser than the cut: the cut's focus size; no landing focus: none
+    assert rc.kept_region({"size": 1e-4, "radius": 0.02}, 6.25e-5, z_bb, z_bt)["size"] == 6.25e-5
+    assert rc.kept_region(None, 6.25e-5, z_bb, z_bt) is None
+
+
+def test_a_neck_after_the_cut_is_meshed_at_its_own_scale():
+    s = rc.ReconnectSettings(delta=1e-3)
+    segs = _post_cut_segs()
+    P = np.column_stack([segs[1]["r"], segs[1]["z"]])
+    k = 300
+    P[k - 5:k + 6, 0] = np.minimum(P[k - 5:k + 6, 0], 1.6e-3 + 1e-5 * np.abs(np.arange(-5, 6)))
+    segs[1]["r"] = P[:, 0]
+    g = _regions(segs, {"delta": 1e-3, "rmin": 1e-3}, s)["neck_open"]
+    assert g["ell"] == pytest.approx(1.6e-3) and g["target"] == pytest.approx(1e-4)
+    assert (g["r"], g["z"]) == pytest.approx((1.6e-3, P[k, 1])) and g["radius"] == pytest.approx(0.032)
+    assert g["floor"] == pytest.approx(s.focus_size * 1e-3)
+
+
+def test_region_spacing_reads_the_longest_and_the_free_shortest_element():
+    segs = _post_cut_segs()
+    region = {"r": 0.0, "z": float(segs[0]["z"][0]), "radius": 0.02}
+    h_max, h_min = rc.region_spacing(segs, region, [float(segs[0]["z"][0])], None, 1e-4)
+    r, z = segs[0]["r"], segs[0]["z"]
+    inside = np.hypot(r - region["r"], z - region["z"]) <= region["radius"]
+    h = 2 * np.hypot(np.diff(r), np.diff(z))[inside[:-1] & inside[1:]]
+    assert h_max == pytest.approx(h.max()) and h_min == pytest.approx(h.min())
+    assert rc.region_spacing(segs, {"r": 1.0, "z": 0.0, "radius": 1e-3}, [], None, 1e-4) == (
+        pytest.approx(math.nan, nan_ok=True), pytest.approx(math.nan, nan_ok=True))

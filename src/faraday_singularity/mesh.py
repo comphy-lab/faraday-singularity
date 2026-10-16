@@ -24,14 +24,25 @@ is bounded by every chain (:func:`~faraday_singularity.reconnect.orient_chain`),
 bottom and the liquid spans of the axis (:func:`~faraday_singularity.reconnect.liquid_axis_spans`):
 before a cut ``[0, z_tip]``, after one ``[0, z_bb]`` below the bubble and the bridge
 ``[z_bt, z_cb]``. The chains are checked one by one and against each other before meshing. A
-:class:`CutSizing` set by the cut adds attractors at the fresh tips and along the bridge, and gmsh's
-sizing from curvature with a floor below the tip size, which a cap needs so that no curved element
-wraps around it.
+:class:`CutSizing` set by the cut adds attractors at the tips on the axis and along the bridge.
+After a cut the focus is a set of regions (:class:`FocusRegion`), one per feature (each tip with
+its jet, each neck, the bubble's bottom at the resolution it had at the landing), each meshed at its
+own size; without regions it is the focus above.
+
+gmsh's sizing from curvature (``CutSizing.curvature``, ``Mesh.MeshSizeFromCurvature``) is off
+unless a cut asks for it. The caps do not need it: an arc of radius at least the cut radius ``delta``
+meshed at ``tip_size <= delta/4`` has at least 25 elements per turn of 2 pi. Elsewhere it does harm:
+gmsh reads the curvature of the uniform Catmull-Rom spline through the nodes, which bends sharply
+where the node spacing jumps, refines there without grading, and so widens the jump at the next
+rebuild, rebuild after rebuild, until the spline through the nodes crosses itself
+(``testCases/test_reconnect_fem.py`` reproduces the feedback). Without it the ratio of adjacent
+element lengths stays near the grading's, about 1.2.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import asdict, dataclass
 from typing import Callable
 
 import numpy as np
@@ -57,10 +68,54 @@ class MeshSettings:
 
 
 @dataclass(frozen=True)
+class FocusRegion:
+    """One feature of the free surface after a cut, meshed at its own element size.
+
+    The interface nodes of every chain within ``radius`` of ``(r, z)`` are attractors of size
+    ``size`` (``axial``: those with ``r <= radius``, at any height, as a focus without regions)."""
+    name: str
+    size: float
+    r: float
+    z: float
+    radius: float
+    axial: bool = False
+
+    def __post_init__(self):  # plain numbers: they are written into gmsh field expressions
+        for name in ("size", "r", "z", "radius"):
+            object.__setattr__(self, name, float(getattr(self, name)))
+        object.__setattr__(self, "axial", bool(self.axial))
+        if not (self.size > 0 and self.radius > 0):
+            raise ValueError("a focus region needs a positive size and radius")
+
+    def selects(self, P: np.ndarray) -> np.ndarray:
+        """Which of the points ``P`` (``(M, 2)``: r, z) are attractors of this region."""
+        if self.axial:
+            return P[:, 0] <= self.radius
+        return np.hypot(P[:, 0] - self.r, P[:, 1] - self.z) <= self.radius
+
+
+@dataclass(frozen=True)
 class Focus:
     size: float  # element size on the focus attractors
     radius: float  # interface nodes with r <= radius are attractors
     grading: float  # growth rate of the element size away from the focus
+    # after a cut: one region per feature, each with its own size (FocusRegion); when given, they
+    # are the attractors, and size and radius only summarise them (smallest size, largest radius)
+    regions: tuple = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "regions", tuple(
+            g if isinstance(g, FocusRegion) else FocusRegion(**g) for g in self.regions))
+
+    def to_dict(self) -> dict:
+        """As a state dump or a record holds it: the three numbers, and the regions if any."""
+        out = {"size": self.size, "radius": self.radius, "grading": self.grading}
+        if self.regions:
+            out["regions"] = [asdict(g) for g in self.regions]
+        return out
+
+    def region(self, name: str) -> FocusRegion | None:
+        return next((g for g in self.regions if g.name == name), None)
 
 
 @dataclass(frozen=True)
@@ -193,17 +248,22 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
         check_chains(chains)
         spans = liquid_axis_spans([z for c in chains for _, z in c.axis_ends()])
 
-        curves, tips, attractor_pts = [], {}, []
+        regions = focus.regions if focus is not None else ()
+        curves, tips, attractor_pts, nodes = [], {}, [], []
+        region_pts = [[] for _ in regions]
         wall_pt = None
         for c in chains:
             pts = [self.point(x, y) for x, y in c.points.tolist()]
             curves.append(self.spline(pts, name="interface"))
+            nodes += list(zip(pts, c.points.tolist()))
             for k, z in c.axis_ends():
                 tips[z] = pts[k]
             if c.is_open:
                 wall_pt = pts[-1]
-            if focus is not None:
+            if focus is not None and not regions:
                 attractor_pts += [pt for pt, x in zip(pts, c.points[:, 0]) if x <= focus.radius]
+            for sel, g in zip(region_pts, regions):
+                sel += [pt for pt, inside in zip(pts, g.selects(c.points)) if inside]
         lowest = tips[spans[0][1]]
         self.create_lines(wall_pt, "wall", (self.radius, 0.0), "bottom", (0.0, 0.0), "axis", lowest)
         bridges = [self.line(tips[a], tips[b], name="axis") for a, b in spans[1:]]
@@ -211,13 +271,23 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
 
         h_min = min(s.h_interface, h_focus)
         d_if = self.add_mesh_size_field("Distance", CurvesList=curves, Sampling=2000)
-        attractors = attractor_pts or [lowest]
         g_focus = focus.grading if focus is not None else s.grading
-        d_ax = self.add_mesh_size_field("Distance", PointsList=attractors)
+        # the focus: its attractors near the axis at one size, or after a cut one set per feature
+        # (FocusRegion), each at its own size; a region that holds no node keeps the node nearest
+        # its centre, so that a feature between nodes is not dropped
+        if regions:
+            sized = [(g.size, pts or [min(nodes, key=lambda n: math.hypot(n[1][0] - g.r,
+                                                                         n[1][1] - g.z))[0]])
+                     for g, pts in zip(regions, region_pts)]
+        else:
+            sized = [(h_focus, attractor_pts or [lowest])]
+        d_ax = [self.add_mesh_size_field("Distance", PointsList=pts) for _, pts in sized]
         fields = [self.add_mesh_size_field(
-                      "MathEval", F=f"min({s.h_max!r}, {s.h_interface!r} + {s.grading!r}*F{d_if})"),
-                  self.add_mesh_size_field(
-                      "MathEval", F=f"min({s.h_max!r}, {h_focus!r} + {g_focus!r}*F{d_ax})")]
+            "MathEval", F=f"min({s.h_max!r}, {s.h_interface!r} + {s.grading!r}*F{d_if})")]
+        for (size, _), d in zip(sized, d_ax):
+            fields.append(self.add_mesh_size_field(
+                "MathEval", F=f"min({s.h_max!r}, {size!r} + {g_focus!r}*F{d})"))
+            h_min = min(h_min, size)
         if cut is not None:
             d_tip = self.add_mesh_size_field("Distance", PointsList=list(tips.values()))
             fields.append(self.add_mesh_size_field(

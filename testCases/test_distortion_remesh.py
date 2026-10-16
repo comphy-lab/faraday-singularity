@@ -379,10 +379,11 @@ def test_a_refined_phase_distortion_flag_is_rebuilt_once_by_the_driver(tmp_path)
 def test_after_a_cut_every_distortion_flag_is_the_drivers_rebuild(tmp_path):
     """After a cut the focus is the cut's: with thresholds that flag every checked step, each is
     rebuilt once by the driver, with the post-cut times in its event, the cut's sizing kept and the
-    focus refreshed; pyoomph rebuilds nothing of its own. pyoomph does not check the first solve on
-    a new mesh (its count of solves since the rebuild is still 0 then), so the steps right after a
-    rebuild are not flagged: the cut's projection counts as that solve, the step after the
-    driver's first rebuild does not."""
+    focus refreshed, one region per feature: the tips the cut made at the cut's focus size, which
+    a rebuild for distortion keeps; pyoomph rebuilds nothing of its own. pyoomph does not check the
+    first solve on a new mesh (its count of solves since the rebuild is still 0 then), so the steps
+    right after a rebuild are not flagged: the cut's projection counts as that solve, the step after
+    the driver's first rebuild does not."""
     pytest.importorskip("pyoomph")
     from pyoomph.equations.generic import RemeshingOptions
 
@@ -424,10 +425,13 @@ def test_after_a_cut_every_distortion_flag_is_the_drivers_rebuild(tmp_path):
     remesh = [e for e in events if e["event"] == "remesh"]
     assert pb.remesh_count == rebuilds + len(remesh) and pending == 0
     t_cut = rec["t_cut"]
+    h_cut = s.focus_size * rec["rmin"]
     for e in distortion:
         assert e["tau"] == pytest.approx(e["time"] - t_cut, abs=1e-15) and "tau_p" in e
-        assert e["focus_size"] == min(e["focus_size_before"], e["h_near_before"])
-    assert distortion[0]["focus_size_before"] == rec["focus"]["cut"]["size"]
+        sizes = {g["name"]: g["new_size"] for g in e["regions"]}
+        assert sizes["cavity_tip"] == sizes["bubble_top"] == pytest.approx(h_cut)
+        assert e["focus_size"] == min(sizes.values())
+    assert distortion[0]["focus_size_before"] == rec["focus"]["cut"]["size"] == h_cut
     last = remesh[-1]
     if last.get("reason") == "distortion":
         assert (focus.size, focus.radius) == (last["focus_size"], last["focus_radius"])

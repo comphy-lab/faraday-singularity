@@ -41,7 +41,10 @@ This module holds what needs no finite-element problem:
   the cut removes from the gas (:func:`chain_volumes`), and the gas volume within a box around the
   cut (:func:`gas_volume_in_box`), which separates the volume the cut adds to the liquid from the
   drift of rebuilding the whole free surface;
-* the stops of a run after the cut (:func:`post_cut_stops`), on both chains, and what the run
+* the stops of a run after the cut (:func:`post_cut_stops`), on both chains, the self-contact a
+  rebuild would meet among them (:func:`spline_contact_stop`), the features of both chains that the
+  mesh after the cut follows, each in its own region (:func:`feature_regions`, :func:`kept_region`,
+  :func:`region_spacing`), and what the run
   records of both chains after it and steps by (:func:`post_cut_record`: the three tips on the axis
   with their radii of curvature, the bridge, the bubble and the necks of both chains;
   :func:`bubble_end` and :func:`tip_jet`: the jet bases of the bubble's two tips, measured as the
@@ -75,7 +78,14 @@ from typing import Any, Sequence
 import numpy as np
 
 from .collapse import Profile, axis_curvature, jet_base, necks
-from .selfcontact import InterfaceSelfIntersection, check_simple_interface, fold_gap
+from .selfcontact import (
+    FOLD_RESOLVED_ELEMENTS,
+    InterfaceSelfIntersection,
+    check_simple_interface,
+    classify_contact,
+    first_contact,
+    fold_gap,
+)
 
 AXIS, FIXED = "axis", "fixed"
 FILLS = ("blend", "zero")
@@ -123,7 +133,10 @@ class ReconnectSettings:
     bridge_size: float = 1.0 / 16.0  # at most 1/4
     focus_size: float = 1.0 / 16.0
     focus_radius: float = 20.0  # interface nodes with r <= focus_radius * cut radius
-    curvature_sizing: int = 20  # gmsh MeshSizeFromCurvature after the cut (0: off)
+    # gmsh MeshSizeFromCurvature after the cut, elements per 2 pi (0: off). Off by default: the caps
+    # do not need it (tip_size <= 1/4), and it reads the curvature of the spline through the nodes,
+    # which a jump in node spacing makes spurious, and refines there ungraded (mesh.py)
+    curvature_sizing: int = 0
     fill: str = "blend"  # liquid velocity in the former gas: pyoomph's nearest-node blend, or zero
     projection: bool = True
     projection_tolerance: float = 1e-10  # absolute Newton tolerance of the projection
@@ -722,6 +735,35 @@ def plan_on_profile(r, z, rmin: float, settings: ReconnectSettings) -> tuple[str
 # --- after the cut ---------------------------------------------------------------------------------
 
 
+def fold_contact(arc: float, h_elem: float) -> str:
+    """``fold`` for a fold pair whose arc spans at least ``FOLD_RESOLVED_ELEMENTS`` local element
+    lengths, two parts of the resolved surface approaching across a gap; ``kink`` for a closer one,
+    a corner at the scale of the mesh (:func:`~faraday_singularity.selfcontact.classify_contact`)."""
+    return "fold" if arc >= FOLD_RESOLVED_ELEMENTS * h_elem else "kink"
+
+
+def spline_contact_stop(named_chains) -> dict | None:
+    """The ``self-contact-approach`` stop (trigger ``spline-contact``) of the first of the
+    ``(name, chain)`` pairs whose spline through its nodes contacts itself, the test a remesh makes
+    (:func:`check_chains`), with what met (:func:`~faraday_singularity.selfcontact.
+    classify_contact`); None if every spline is simple. A chain whose nodes have crossed raises
+    :class:`~faraday_singularity.selfcontact.InterfaceSelfIntersection`."""
+    for name, c in named_chains:
+        contact = first_contact(c.points)
+        if contact is None:
+            continue
+        i, i1, j, j1 = contact["nodes"]
+        if contact["what"] == "polygon":
+            raise InterfaceSelfIntersection(
+                f"the {name} chain's free surface crosses itself between nodes {i}-{i1} and {j}-{j1} "
+                f"at (r, z) = ({contact['at'][0]:.9g}, {contact['at'][1]:.9g}) after the cut")
+        return {"reason": "self-contact-approach", "trigger": "spline-contact", "chain": name,
+                **classify_contact(c.points, contact), "nodes": [i, i1, j, j1],
+                "contact_r": contact["at"][0], "contact_z": contact["at"][1],
+                "crossings": contact["count"]}
+    return None
+
+
 def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: ReconnectSettings,
                    h_min: float, *, neck_elements: float = 3.0, fold_ratio: float = 4.0,
                    fold_stop: float = 1e-3, fold_stop_elements: float = 3.0,
@@ -732,11 +774,21 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     cavity tips, on different chains, meeting across it), the chains touching elsewhere, the
     bubble's two tips meeting (it would become a ring), a new neck on either chain narrower than
     ``max(delta, neck_elements h_min)`` (``secondary-pinch-approach``: the thread behind a fresh cap
-    can pinch again), a closing fold on the bubble (``self-contact-approach``, with the driver's
-    fold limits: ``fold_gap`` with ``fold_ratio``, and a gap below ``max(fold_stop,
-    fold_stop_elements h_elem)``), or the bubble draining away under its constant pressure. A
-    bubble that crosses itself raises
-    :class:`~faraday_singularity.selfcontact.InterfaceSelfIntersection`.
+    can pinch again), a closing fold on the bubble (``self-contact-approach``, trigger ``fold-gap``,
+    with the driver's fold limits: ``fold_gap`` with ``fold_ratio``, and a gap below
+    ``max(fold_stop, fold_stop_elements h_elem)``), a chain whose spline through its nodes, the
+    curve every remesh is built on, contacts itself while its nodes do not (``self-contact-approach``,
+    trigger ``spline-contact``, on either chain), or the bubble draining away under its constant
+    pressure. Both self-contact stops say what met (``contact``, :func:`~faraday_singularity.selfcontact.
+    classify_contact`): ``fold`` when the two sides are at least ``FOLD_RESOLVED_ELEMENTS`` elements
+    apart along the surface, a fold of the resolved surface, ``kink`` when they are closer, a
+    contact at the scale of the mesh. A chain whose nodes have crossed (its control polygon) raises
+    :class:`~faraday_singularity.selfcontact.InterfaceSelfIntersection`: that state is not valid.
+
+    The spline test is the remesh's own (:func:`check_chains`, through
+    :func:`~faraday_singularity.selfcontact.first_contact`), so a state that passes these stops
+    passes the check of a rebuild from its nodes: the driver makes them before every rebuild after
+    the cut, and a rebuild never meets a self-intersecting spline.
 
     The collapse driver's own neck and fold stops cover only the open chain
     (``FaradayProblem.interface_arrays``), the fold stop within the region of its local scale; it
@@ -773,8 +825,12 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     fold_limit = max(fold_stop, fold_stop_elements * fold.h_elem)
     if math.isfinite(fold.gap) and fold.gap < fold_limit:
         return {"reason": "self-contact-approach", "trigger": "fold-gap", "chain": "bubble",
+                "contact": fold_contact(fold.arc, fold.h_elem),
                 "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
                 "fold_h_elem": fold.h_elem, "fold_limit": fold_limit}
+    stop = spline_contact_stop([("bubble", bubble), ("open", cavity)])
+    if stop is not None:
+        return stop
     vb = revolved_volume(bubble.points)
     if vb < settings.bubble_stop * cut.bubble_volume:
         return {"reason": "bubble-vanishing", "bubble_volume": vb}
@@ -801,6 +857,122 @@ def cut_size_field(r, z, axis_tips: Sequence[float], sizing: dict) -> np.ndarray
         dz = np.maximum(0.0, np.maximum(a - z, z - b))
         h = np.minimum(h, float(sizing["h_bridge"]) + g * np.hypot(r, dz))
     return h
+
+
+FRESH_TIPS = ("cavity_tip", "bubble_top")  # the tips on the axis the cut makes
+
+
+def kept_region(landing_focus: dict | None, cut_focus_size: float, z_bubble_bottom: float,
+                z_bubble_top: float) -> dict | None:
+    """The resolution the bubble's bottom keeps from the landing state: the landing's cavity bottom,
+    with its jet and base, was meshed at the landing focus (``size`` within ``radius`` of the axis).
+    It keeps the finer of that size and the cut's focus size within that radius of its tip, but
+    within its half of the bubble, so that it never reaches the bubble's fresh top; None without a
+    landing focus. Recorded by the cut (``focus.kept``) and kept by every later rebuild."""
+    if not landing_focus:
+        return None
+    radius = min(float(landing_focus["radius"]), 0.5 * (z_bubble_top - z_bubble_bottom))
+    return {"name": "bubble_bottom", "size": min(float(landing_focus["size"]), cut_focus_size),
+            "radius": radius, "landing_size": float(landing_focus["size"]),
+            "landing_radius": float(landing_focus["radius"])}
+
+
+def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
+                    settings: ReconnectSettings, *, h_floor: float, h_axis: float,
+                    elements_per_scale: float, focus_extent: float) -> list[dict]:
+    """The features of both chains after a cut, each to be meshed at its own size (the regions of
+    the focus, ``mesh.FocusRegion``): ``name``, ``target`` (element size), centre ``r``, ``z``,
+    ``radius``, its scale ``ell`` (``inf`` without one) and ``floor``.
+
+    * The two tips the cut made, the cavity's and the bubble's top (``FRESH_TIPS``): at the cut's
+      focus size (``focus_size`` cut radii, the sizing in cut radii the cut gave them), neither finer,
+      as the landing run's ``h_floor`` would make a scale at the tip below it, nor coarser, within
+      ``focus_radius`` cut radii of the tip and over the jet that stands on it (twice the distance
+      from the tip to the edge of its base).
+    * The bubble's bottom, which the landing state held as the cavity's bottom: at the size its jet
+      asks for (``r_j/elements_per_scale``, floored at the landing run's ``h_floor``, as before the
+      cut) but never coarser than it had at the landing (``kept``, :func:`kept_region`), over the
+      larger of its jet's region and the one the landing resolved, within its half of the bubble.
+    * Each neck of either chain: ``r_n/elements_per_scale``, floored at the cut's focus size, within
+      ``focus_extent r_n`` of it.
+
+    ``cavity`` describes the open chain's tip (``z_tip``, ``kappa`` the apex curvature, ``r_j``,
+    ``rise``, ``bump`` and ``flat_bump`` as the driver measures it), ``tips`` the bubble's two
+    (:func:`tip_jet`), ``necks`` the record's ``r_neck_open``, ``z_neck_open``, ``r_neck_bubble``
+    and ``z_neck_bubble``; ``cut`` is the cut record (``rmin``, ``focus.kept``)."""
+    rmin = float(cut.get("rmin") or cut["delta"])
+    h_cut = settings.focus_size * rmin
+    r_cut = settings.focus_radius * rmin
+    ell_cap = h_axis * elements_per_scale
+    bubble = next(c for c in segs if not c["open"])
+    z_bb, z_bt = float(bubble["z"][0]), float(bubble["z"][-1])
+
+    def jet(t: dict) -> tuple[list[float], float]:
+        """The scale of the jet on a tip (its base radius, where a resolved bump stands) and the
+        reach of the region that covers it."""
+        if t.get("bump") and t.get("r_j", 0.0) > 0.0 and not t.get("flat_bump"):
+            return [float(t["r_j"])], 2.0 * math.hypot(float(t["r_j"]), max(float(t["rise"]), 0.0))
+        return [], 0.0
+
+    def finite(xs):
+        return [float(x) for x in xs if math.isfinite(x) and x > 0.0]
+
+    out = []
+    k = cavity.get("kappa", math.nan)
+    scales, reach = jet(cavity)
+    scales = finite(scales + ([1.0 / abs(k)] if math.isfinite(k) and k != 0.0 else []))
+    out.append({"name": "cavity_tip", "target": h_cut, "r": 0.0, "z": float(cavity["z_tip"]),
+                "radius": max(r_cut, reach), "ell": min(scales) if scales else math.inf,
+                "floor": h_cut})
+    scales, reach = jet(tips.get("bubble_top", {}))
+    out.append({"name": "bubble_top", "target": h_cut, "r": 0.0, "z": z_bt,
+                "radius": max(r_cut, reach), "ell": min(scales) if scales else math.inf,
+                "floor": h_cut})
+    scales, reach = jet(tips.get("bubble_bottom", {}))
+    kept = (cut.get("focus") or {}).get("kept")
+    if scales or kept:
+        ell = min(scales + [ell_cap])
+        target = float(np.clip(ell / elements_per_scale, h_floor, h_axis))
+        radius = max(focus_extent * ell if scales else 0.0, reach)
+        if kept:
+            target, radius = min(target, float(kept["size"])), max(radius, float(kept["radius"]))
+        out.append({"name": "bubble_bottom", "target": target, "r": 0.0, "z": z_bb,
+                    "radius": min(radius, 0.5 * (z_bt - z_bb)),
+                    "ell": ell if scales else math.inf, "floor": h_floor,
+                    "kept": None if not kept else float(kept["size"])})
+    for name, chain in (("neck_open", "open"), ("neck_bubble", "bubble")):
+        r_n, z_n = necks.get(f"r_neck_{chain}", math.nan), necks.get(f"z_neck_{chain}", math.nan)
+        if math.isfinite(r_n) and r_n > 0.0:
+            out.append({"name": name, "target": float(np.clip(r_n / elements_per_scale, h_cut, h_axis)),
+                        "r": float(r_n), "z": float(z_n), "radius": focus_extent * float(r_n),
+                        "ell": float(r_n), "floor": h_cut})
+    return out
+
+
+def region_spacing(segs, region: dict, axis_tips: Sequence[float], sizing: dict | None,
+                   size: float) -> tuple[float, float]:
+    """``(h_max, h_min)``: the longest and the shortest element (twice the node spacing; the elements
+    are quadratic) of the chains within ``region`` (a ball of ``radius`` about ``(r, z)``), the
+    shortest only where the cut's sizing (:func:`cut_size_field`) asks for at least
+    ``CUT_SIZING_MARGIN`` times ``size``, since no focus can coarsen what it refines; NaN where the
+    region holds no such element."""
+    longest, shortest = [], []
+    for c in segs:
+        r, z = np.asarray(c["r"], dtype=float), np.asarray(c["z"], dtype=float)
+        if len(r) < 2:
+            continue
+        inside = np.hypot(r - region["r"], z - region["z"]) <= region["radius"]
+        edges = inside[:-1] & inside[1:]
+        if not edges.any():
+            continue
+        h = 2.0 * np.hypot(np.diff(r), np.diff(z))
+        longest.append(float(h[edges].max()))
+        if sizing and all(k in sizing for k in ("h_tip", "h_bridge", "grading")):
+            free = cut_size_field(r, z, axis_tips, sizing) >= CUT_SIZING_MARGIN * size
+            edges = edges & free[:-1] & free[1:]
+        if edges.any():
+            shortest.append(float(h[edges].min()))
+    return (max(longest) if longest else math.nan, min(shortest) if shortest else math.nan)
 
 
 def tip_radius(r, z, nodes: int = 6) -> float:

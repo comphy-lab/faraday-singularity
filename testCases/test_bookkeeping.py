@@ -1871,6 +1871,76 @@ def test_a_post_cut_state_needs_the_reconnect_settings_of_its_cut(tmp_path):
         CollapseDriver(CutProblem(), _settings(), tmp_path / "e", reconnect=recon).run(1e-9)
 
 
+class KinkingCutProblem(CutProblem):
+    """``CutProblem`` whose bubble, from solve ``kink_at`` on, has a kink of three nodes whose spline
+    loops while the nodes do not (``test_reconnect_geometry.kinked``), and whose element distortion
+    flags that solve for a rebuild, which the driver makes after the step."""
+
+    def __init__(self, kink_at=2, **kw):
+        super().__init__(**kw)
+        self.kink_at, self.solves = kink_at, 0
+        self.do_call_remeshing_when_necessary = True
+        self.flags = []
+
+    def run(self, t_end, **kw):
+        super().run(t_end, **kw)
+        self.solves += 1
+        if self.solves == self.kink_at and not self.do_call_remeshing_when_necessary:
+            self.flags.append({"trigger": "quality", "ratio": 0.13})
+
+    def take_distortion_flags(self):
+        flags, self.flags = self.flags, []
+        return flags
+
+    def force_remesh(self):
+        from faraday_singularity.reconnect import Chain, check_chains
+
+        # the check every rebuild after a cut makes first (mesh.FaradayCylinderMesh)
+        check_chains([Chain(np.column_stack([c["r"], c["z"]]), tuple(c["end_types"]))
+                      for c in self.interface_segments()])
+        super().force_remesh()
+
+    def interface_segments(self):
+        from test_reconnect_geometry import kinked
+
+        segs = super().interface_segments()
+        if self.solves >= self.kink_at:
+            b = segs[0]
+            P = kinked(np.column_stack([b["r"], b["z"]]), 300)
+            segs[0] = self._chain("bubble", P[:, 0], P[:, 1], ("axis", "axis"))
+        return segs
+
+
+def test_after_a_cut_a_kink_the_rebuild_would_meet_stops_the_run_cleanly(tmp_path):
+    """The step at which the bubble's spline begins to loop (its nodes still simple) is also flagged
+    for a rebuild by element distortion. A rebuild from those nodes would raise
+    InterfaceSelfIntersection (a failed run, as the first production cut did); the driver checks
+    the stops first and ends the run cleanly, self-contact-approach with trigger spline-contact,
+    reported as a kink at the scale of the mesh, without the rebuild, and dumps the state."""
+    from faraday_singularity.mesh import Focus
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    pb = KinkingCutProblem(kink_at=2)
+    pb.template.focus = Focus(size=6.25e-5, radius=0.02, grading=0.2)  # as the cut leaves it
+    drv = _cut_driver(tmp_path, pb, recon, max_steps=5)
+    out = drv.run(1e-9)
+    drv.close()
+    stop = out["stop"]
+    assert out["steps"] == 2 and stop["reason"] == "self-contact-approach"
+    assert stop["trigger"] == "spline-contact" and stop["chain"] == "bubble"
+    assert stop["contact"] == "kink" and stop["span"] == 3
+    assert stop["distortion_rebuild_skipped"] == 1
+    events = _read_events(tmp_path)
+    # the rebuilds of the rule at the first step (this stand-in's mesh does not follow them) are
+    # the only ones: none at the kinked step, and no rebuild for distortion
+    rebuilds = [e for e in events if e["event"] == "remesh"]
+    assert [e["step"] for e in rebuilds] == [1] and "reason" not in rebuilds[0]
+    assert pb.remesh_count == 1 and out["distortion_remeshes"] == 0
+    assert Path(stop["end_state"]).is_file()
+    assert events[-1]["event"] == "stop" and events[-1]["trigger"] == "spline-contact"
+
+
 # --- after a cut: the spacing the remesh rule reads, the dumps, a continuation ------------------
 
 
@@ -1879,23 +1949,38 @@ class CutSurfaceProblem(CutProblem):
     to ``r = 0.2``, above a spherical bubble of radius ``R_b`` (0.1, blunter than the trough: the
     trough sets the local scale) whose top lies at 4.68, with the nodes of both chains spaced as on
     a mesh after the cut: half the finer of the cut's sizing, ``h_tip + CUT_GRADING d`` with ``d``
-    the distance to the nearest tip and to the bridge, and the focus of the last rebuild, which
-    covers both chains near the axis. A rebuild cannot coarsen the focus beyond ``coarsest``, as
+    the distance to the nearest tip and to the bridge, and the focus of the last rebuild: the
+    focus size near the axis (``radius``), or with regions the size of the finest region that holds
+    the node and ``outside`` elsewhere. A rebuild cannot coarsen the focus beyond ``coarsest``, as
     where the mesh also follows the curvature. With ``dimple = (D, w)`` a jet hangs from the
-    bubble's top into it, ``z -> z - D exp(-(r/w)^2)`` on its upper half; ``bubble_spacing``
+    bubble's top into it, ``z -> z - D exp(-(r/w)^2)`` on its upper half, and with ``bottom = (D,
+    w)`` its bottom rises into one, ``z -> z + D exp(-(r/w)^2)`` on its lower half; ``bubble_spacing``
     spaces the bubble's nodes that many times wider than the mesh rule."""
 
     def __init__(self, h_tip, focus_size, R=0.08, coarsest=math.inf, R_b=0.1, dimple=None,
-                 bubble_spacing=1.0, **kw):
+                 bottom=None, bubble_spacing=1.0, outside=0.01, **kw):
         super().__init__(**kw)
         self.h_tip, self.R, self.coarsest, self.R_b = h_tip, R, coarsest, R_b
-        self.dimple, self.bubble_spacing = dimple, bubble_spacing
+        self.dimple, self.bottom, self.bubble_spacing = dimple, bottom, bubble_spacing
         self.focus_size = focus_size  # as the cut's remesh left it
+        self.outside = outside
+        self.mesh_focus = None  # the focus of the last rebuild, with regions
         self._bubble = None
 
     def force_remesh(self):
         super().force_remesh()
-        self.focus_size = min(self.template.focus.size, self.coarsest)
+        focus = self.template.focus
+        self.focus_size = min(focus.size, self.coarsest)
+        self.mesh_focus = focus if focus.regions else None
+
+    def focus_at(self, r, z):
+        """The focus size of the last rebuild at ``(r, z)``."""
+        f = self.mesh_focus
+        if f is None:
+            return self.focus_size
+        sizes = [g.size for g in f.regions
+                 if (r <= g.radius if g.axial else math.hypot(r - g.r, z - g.z) <= g.radius)]
+        return min(min(sizes) if sizes else self.outside, self.coarsest)
 
     def bubble_point(self, x):
         R_b = self.R_b
@@ -1903,12 +1988,16 @@ class CutSurfaceProblem(CutProblem):
         if self.dimple is not None and x > 0.5 * math.pi:
             D, w = self.dimple
             z -= D * math.exp(-((r / w) ** 2))
+        if self.bottom is not None and x < 0.5 * math.pi:
+            D, w = self.bottom
+            z += D * math.exp(-((r / w) ** 2))
         return r, z
 
     def bubble_chain(self):
         from faraday_singularity.reconnect import cut_size_field
 
-        if self._bubble is not None and self._bubble[0] == self.focus_size:
+        key = (self.focus_size, self.mesh_focus)
+        if self._bubble is not None and self._bubble[0] == key:
             return self._bubble[1]
         sizing = {"h_tip": self.h_tip, "h_bridge": self.h_tip, "grading": CUT_GRADING}
         tips = [self.bubble_point(0.0)[1], self.bubble_point(math.pi)[1], 4.69]
@@ -1916,7 +2005,7 @@ class CutSurfaceProblem(CutProblem):
         while th[-1] < math.pi:
             x = th[-1]
             r, z = self.bubble_point(x)
-            h = self.bubble_spacing * min(self.focus_size,
+            h = self.bubble_spacing * min(self.focus_at(r, z),
                                           float(cut_size_field([r], [z], tips, sizing)[0]))
             dx = 0.5 * h / self.R_b
             for _ in range(4):  # a chord of half an element
@@ -1927,7 +2016,7 @@ class CutSurfaceProblem(CutProblem):
         P = np.array([self.bubble_point(x) for x in th])
         P[[0, -1], 0] = 0.0
         seg = self._chain("bubble", P[:, 0], P[:, 1], ("axis", "axis"))
-        self._bubble = (self.focus_size, seg)
+        self._bubble = (key, seg)
         return seg
 
     def interface_segments(self):
@@ -1935,7 +2024,7 @@ class CutSurfaceProblem(CutProblem):
         pts = [(0.0, 4.69)]
         while pts[-1][0] < 0.2:
             r, z = pts[-1]
-            h = min(self.focus_size, self.h_tip + CUT_GRADING * math.hypot(r, z - 4.69))
+            h = min(self.focus_at(r, z), self.h_tip + CUT_GRADING * math.hypot(r, z - 4.69))
             r += 0.5 * h / math.sqrt(1.0 + (r / self.R) ** 2)  # half an element of arc length
             pts.append((r, 4.69 + r * r / (2.0 * self.R)))
         P = np.array(pts)
@@ -1944,14 +2033,14 @@ class CutSurfaceProblem(CutProblem):
         return [bubble, self._chain("open", P[:, 0], P[:, 1], ("axis", "fixed"))]
 
 
-def _surface_cut(tmp_path, coarsest=math.inf, problem=None, **kw):
-    """A run after a cut at delta = 0.01 on ``CutSurfaceProblem`` (with the keywords ``problem``):
-    its tip is meshed at h_tip = 6.25e-4, the cut's focus is as fine, and the trough asks for a
-    focus of 0.01."""
+def _surface_cut(tmp_path, coarsest=math.inf, problem=None, recon=None, **kw):
+    """A run after a cut at delta = 0.01 on ``CutSurfaceProblem`` (with the keywords ``problem``,
+    and ``recon`` for the reconnect settings): its tip is meshed at h_tip = 6.25e-4, the cut's
+    focus is as fine, and the trough asks for a focus of 0.01."""
     from faraday_singularity.mesh import Focus
     from faraday_singularity.reconnect import ReconnectSettings
 
-    recon = ReconnectSettings(delta=1e-2, dt0=1e-6)
+    recon = ReconnectSettings(**{"delta": 1e-2, "dt0": 1e-6, **(recon or {})})
     size = recon.focus_size * recon.delta
     pb = CutSurfaceProblem(recon.tip_size * recon.delta, size, coarsest=coarsest,
                            **(problem or {}))
@@ -1962,34 +2051,63 @@ def _surface_cut(tmp_path, coarsest=math.inf, problem=None, **kw):
     return drv.s, pb, out
 
 
-def test_after_a_cut_the_focus_coarsens_although_the_tips_keep_the_cut_sizing(tmp_path):
-    """Every mesh after a cut keeps the cut's sizing at the tips on the axis, so the tip of the
-    open chain stays meshed at h_tip whatever the focus. The remesh rule reads the spacing where
-    the focus sets it: each coarsening takes effect, by the bounded factor, and the rebuilds stop
-    once the focus has caught up with the target. (Read at the tip, the spacing stayed at h_tip and
-    the focus was rebuilt at every step without effect.)"""
-    s, pb, _ = _surface_cut(tmp_path, max_steps=12)
-    tab = _rows(tmp_path)
-    events = _read_events(tmp_path)
-    remesh = [e for e in events if e["event"] == "remesh"]
-    assert tab["h_focus"][0] == pytest.approx(0.01) and tab["h_near"][1] == pytest.approx(
-        6.25e-4, rel=1e-3)
-    assert [e["step"] for e in remesh] == [1, 2, 3]
-    for e in remesh:
-        assert e["focus_size"] == pytest.approx(s.max_coarsen_factor * e["h_near_before"])
-        assert e["h_near_after"] == pytest.approx(e["focus_size"], rel=5e-3)
-    assert not [e for e in events if e["event"] == "remesh-ineffective"]
-    assert np.all(tab["h_near"][4:] >= s.coarsen_ratio * tab["h_focus"][4:])
-    assert np.all(tab["remesh_count"][4:] == 3)
+def _remesh_regions(event: dict) -> dict:
+    return {g["name"]: g for g in event["regions"]}
+
+
+@pytest.mark.parametrize("R", [0.08, 4e-3])
+def test_after_a_cut_the_tips_the_cut_made_keep_its_focus_size(tmp_path, R):
+    """The tips the cut made, the cavity's and the bubble's top, keep the cut's focus size,
+    focus_size cut radii (6.25e-4 here): a broad trough on the open chain (R = 0.08, a focus of
+    0.01 by the rule before the cut) does not coarsen them, and a sharp one (R = 4e-3, ell/8 =
+    5e-4) does not refine them, as the landing run's h_floor (1e-5) would let it: the driver's focus
+    is floored at the cut's focus size after a cut, and no rebuild is made."""
+    s, pb, _ = _surface_cut(tmp_path, max_steps=12, problem={"R": R})
+    tab, rows = _rows(tmp_path), _chains_rows(tmp_path)
+    h_cut = 6.25e-4
+    assert not [e for e in _read_events(tmp_path) if e["event"].startswith("remesh")]
+    assert np.all(tab["remesh_count"] == 0)
+    assert tab["h_focus"][0] == pytest.approx(max(R / s.elements_per_scale, h_cut))
+    for tip in ("cavity_tip", "bubble_top"):  # the longest element in each tip's region
+        assert rows[f"h_{tip}"] == pytest.approx(np.full(len(rows["step"]), h_cut), rel=2e-2)
     r, z, _, _ = pb.interface_arrays()  # the tip is still meshed at h_tip
     assert 2 * math.hypot(r[1] - r[0], z[1] - z[0]) == pytest.approx(6.25e-4, rel=1e-3)
+
+
+def test_after_a_cut_a_feature_coarsens_in_its_own_region(tmp_path):
+    """The bubble's bottom rising into a broad jet (base radius about 0.024, a target of 3.1e-3)
+    is coarsened from the cut's 6.25e-4 in its own region, by the bounded factor (1.5 here), while
+    the tips the cut made keep the cut's focus size; the rebuilds stop once the bottom's shortest
+    element reaches coarsen_ratio (0.6 here) times its target."""
+    s, _, _ = _surface_cut(tmp_path, max_steps=12, problem={"bottom": (9e-3, 0.03)},
+                           recon={"focus_radius": 5.0}, coarsen_ratio=0.6, max_coarsen_factor=1.5)
+    events = _read_events(tmp_path)
+    remesh = [e for e in events if e["event"] == "remesh"]
+    rows = _chains_rows(tmp_path)
+    assert rows["jet_born_bubble_bottom"][0] == 0 and rows["r_j_bubble_bottom"][0] > 0.02
+    assert [e["step"] for e in remesh] == [1, 2, 3]
+    assert not [e for e in events if e["event"] == "remesh-ineffective"]
+    for e in remesh:
+        g = _remesh_regions(e)
+        assert e["asked_by"] == ["bubble_bottom"]
+        bottom = g["bubble_bottom"]
+        bound = bottom["size"] if math.isfinite(bottom["size"]) else bottom["h_min"]
+        assert bottom["new_size"] == pytest.approx(min(bottom["target"], s.max_coarsen_factor * bound))
+        for tip in ("cavity_tip", "bubble_top"):
+            assert g[tip]["new_size"] == pytest.approx(6.25e-4)
+    bottom = _remesh_regions(remesh[-1])["bubble_bottom"]
+    assert bottom["new_size"] == pytest.approx(6.25e-4 * 1.5**3)
+    assert bottom["new_size"] >= s.coarsen_ratio * bottom["target"]
+    assert rows["size_cavity_tip"][-1] == pytest.approx(6.25e-4)
+    assert rows["h_bubble_bottom"][-1] == pytest.approx(bottom["new_size"], rel=5e-2)
 
 
 def test_after_a_cut_a_coarsening_that_does_not_coarsen_waits(tmp_path, monkeypatch):
     """A coarsening the mesh cannot follow (here beyond 1.25e-3) is not tried again on every step:
     it waits remesh_backoff steps, as a refinement does, and the dumps after the cut keep that."""
     s, _, _ = _surface_cut(tmp_path / "a", coarsest=1.25e-3, max_steps=50, state_dt=0.0,
-                           state_keep=1000)
+                           state_keep=1000, problem={"bottom": (9e-3, 0.03)},
+                           recon={"focus_radius": 5.0}, coarsen_ratio=0.6)
     events = _read_events(tmp_path / "a")
     wait = s.remesh_backoff + s.min_steps_between_remesh
     assert [e["step"] for e in events if e["event"] == "remesh"] == [1, 2, 2 + wait, 2 + 2 * wait]
@@ -1997,20 +2115,24 @@ def test_after_a_cut_a_coarsening_that_does_not_coarsen_waits(tmp_path, monkeypa
     assert [e["step"] for e in ineffective] == [2, 2 + wait, 2 + 2 * wait]
     for e in ineffective:
         assert e["direction"] == "coarsen" and e["coarsen_blocked_until"] == e["step"] + wait
+        assert e["asked_by"] == ["bubble_bottom"]
     meta = json.loads((tmp_path / "a" / "states" / "state_00000030.json").read_text())
     assert meta["coarsen_blocked_until"] == 2 + 2 * wait
-    # a restart keeps the wait (restore_cut needs the finite-element problem; here it only puts the
-    # record back)
+    assert {g["name"] for g in meta["focus"]["regions"]} == {"cavity_tip", "bubble_top",
+                                                             "bubble_bottom"}
+    # a restart keeps the wait and the regions (restore_cut needs the finite-element problem; here
+    # it only puts the record back)
     monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
         restore_cut=lambda problem, record: setattr(problem, "cut", record)))
     from faraday_singularity.reconnect import ReconnectSettings
 
-    pb = CutSurfaceProblem(6.25e-4, 1.25e-3, coarsest=1.25e-3)
+    pb = CutSurfaceProblem(6.25e-4, 1.25e-3, coarsest=1.25e-3, bottom=(9e-3, 0.03))
     pb.t = meta["time"]
     drv = CollapseDriver(pb, s, tmp_path / "b",
                          reconnect=ReconnectSettings.from_dict(meta["cut"]["settings"]))
     drv.restore(meta)
     assert drv.state.coarsen_blocked_until == 2 + 2 * wait
+    assert pb.template.focus.to_dict() == meta["focus"]
     drv.close()
 
 
@@ -2168,21 +2290,39 @@ def test_after_a_cut_the_jets_of_the_bubble_tips_are_measured(tmp_path, monkeypa
     assert not [e for e in _read_events(tmp_path / "b") if e["event"].startswith("tip-jet")]
 
 
-def test_after_a_cut_a_jet_on_the_bubble_sets_the_scale_and_refines_the_mesh(tmp_path):
+def test_after_a_cut_a_jet_into_the_bubble_sets_the_scale_but_not_the_mesh_of_its_tip(tmp_path):
     """While the open chain's trough asks for a focus of 0.01, a thin jet hanging into the bubble
-    (base radius about 8e-4) sets the local scale, and the mesh is refined for it, as for a feature
-    of the open chain; the open chain alone would have coarsened the focus at the first step."""
-    s, _, _ = _surface_cut(tmp_path, max_steps=1, problem={"dimple": (3e-4, 3e-4)})
+    from its top (base radius about 8e-4) sets the local scale, and with it the step, but the
+    bubble's top is a tip the cut made: its mesh keeps the cut's focus size, and no rebuild
+    refines it below that (the focus is floored at the cut's focus size)."""
+    _surface_cut(tmp_path, max_steps=1, problem={"dimple": (3e-4, 3e-4)})
     tab, rows = _rows(tmp_path), _chains_rows(tmp_path)
     assert rows["jet_born_bubble_top"][0] == 1 and rows["r_j_bubble_top"][0] < 1e-3
     assert tab["ell"][0] == rows["ell_bubble"][0] == rows["r_j_bubble_top"][0]
-    assert tab["h_focus"][0] == pytest.approx(tab["ell"][0] / s.elements_per_scale)
+    assert tab["h_focus"][0] == pytest.approx(6.25e-4)  # ell/8 = 1e-4, floored
+    assert not [e for e in _read_events(tmp_path) if e["event"] == "remesh"]
+
+
+def test_after_a_cut_a_jet_on_the_bubble_bottom_refines_its_own_region(tmp_path):
+    """The bubble's bottom is the landing's cavity bottom, no tip the cut made: a thin jet rising
+    from it (base radius about 1.9e-3, a target of 2.4e-4) refines the mesh in its own region, by
+    the bounded factor, and the tips the cut made keep the cut's focus size."""
+    s, _, _ = _surface_cut(tmp_path, max_steps=4, problem={"bottom": (2e-4, 1e-3)},
+                           recon={"focus_radius": 5.0})
+    rows = _chains_rows(tmp_path)
+    assert rows["r_j_bubble_bottom"][0] == pytest.approx(1.92e-3, rel=0.05)
     remesh = [e for e in _read_events(tmp_path) if e["event"] == "remesh"]
-    assert len(remesh) == 1 and remesh[0]["step"] == 1
-    e = remesh[0]  # a refinement by the bounded factor, of both chains
-    assert e["focus_size"] == pytest.approx(e["h_near_before"] / s.max_refine_factor)
-    assert e["h_near_before"] == pytest.approx(6.25e-4, rel=1e-2)
-    assert e["h_near_after"] == pytest.approx(e["focus_size"], rel=1e-2)
+    assert remesh and remesh[0]["step"] == 1 and remesh[0]["asked_by"] == ["bubble_bottom"]
+    first = _remesh_regions(remesh[0])
+    bottom = first["bubble_bottom"]
+    assert bottom["new_size"] == pytest.approx(max(bottom["target"],
+                                                   bottom["h_max"] / s.max_refine_factor))
+    for tip in ("cavity_tip", "bubble_top"):
+        assert first[tip]["new_size"] == pytest.approx(6.25e-4)
+    last = _remesh_regions(remesh[-1])["bubble_bottom"]
+    assert last["new_size"] == pytest.approx(last["target"])
+    assert rows["h_bubble_bottom"][-1] == pytest.approx(last["target"], rel=0.1)
+    assert rows["size_bubble_top"][-1] == pytest.approx(6.25e-4)
 
 
 def test_after_a_cut_the_remesh_rule_reads_the_coarser_chain(tmp_path):

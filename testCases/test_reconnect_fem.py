@@ -458,12 +458,27 @@ def test_cut_records_the_geometry_in_cut_radii(neck_cut):
     assert g["removed_gas"] == pytest.approx(rec["geometry"]["removed_gas"] / rmin**3)
 
 
+def _bottom_spacing(pb, radius: float) -> float:
+    """The longest element (twice the node spacing) of the bubble's chain within ``radius`` of its
+    bottom tip; before a cut, of the free surface within ``radius`` of its tip on the axis."""
+    segs = pb.interface_segments()
+    c = next((c for c in segs if not c["open"]), segs[0])
+    r, z = np.asarray(c["r"]), np.asarray(c["z"])
+    inside = np.hypot(r, z - z[0]) <= radius
+    return float(2 * np.hypot(np.diff(r), np.diff(z))[inside[:-1] & inside[1:]].max())
+
+
 def test_the_cut_mesh_is_sized_in_cut_radii_whatever_the_landing_focus(tmp_path):
     """The tips, the bridge and the focus of the cut's remesh are fixed fractions of the cut radius:
-    two landing states that differ only in the focus their run left are cut onto the same mesh."""
-    meshes, records = [], []
-    for k, landing in enumerate((Focus(size=R_N / 3, radius=0.1, grading=0.3),
-                                 Focus(size=R_N / 12, radius=0.6, grading=0.3))):
+    two landing states that differ only in a focus coarser than the cut's are cut onto the same
+    mesh. A landing focus finer than the cut's is kept on the bubble's bottom, which the landing
+    state held as the cavity's bottom (``focus.kept``, within its half of the bubble), so that the
+    cut does not coarsen it there, while the open chain is meshed as after a coarse landing."""
+    meshes, records, opens, bottoms = [], [], [], []
+    landings = (Focus(size=R_N / 3, radius=0.1, grading=0.3),
+                Focus(size=R_N / 2.5, radius=0.6, grading=0.3),
+                Focus(size=R_N / 12, radius=0.6, grading=0.3))
+    for k, landing in enumerate(landings):
         out = tmp_path / f"cut{k}"
         s = ReconnectSettings(**FAST_CUT)
         with neck_problem(out, s) as pb:
@@ -473,17 +488,38 @@ def test_the_cut_mesh_is_sized_in_cut_radii_whatever_the_landing_focus(tmp_path)
             rec = surgery.cut(pb, s, out)
             meshes.append(mesh_signature(pb))
             records.append(rec)
+            opens.append(next(np.column_stack([c["r"], c["z"]]) for c in pb.interface_segments()
+                              if c["open"]))
+            kept = rec["focus"]["kept"]
+            bottoms.append(_bottom_spacing(pb, kept["radius"]))
             assert pb.active_mesh_template().focus == Focus(**rec["focus"]["cut"])
-    assert meshes[0] == meshes[1]
-    for rec, landing in zip(records, (R_N / 3, R_N / 12)):
+    assert meshes[0] == meshes[1] and meshes[2] != meshes[0]
+    assert np.array_equal(opens[0], opens[2])  # the open chain, near the cut, as after either
+    for rec, landing in zip(records, landings):
         rmin = rec["rmin"]
-        assert rec["focus"]["landing"]["size"] == landing
-        assert rec["focus"]["cut"] == {"size": pytest.approx(0.25 * rmin),
-                                       "radius": pytest.approx(20 * rmin), "grading": 0.3}
+        h_cut = 0.25 * rmin
+        assert rec["focus"]["landing"] == landing.to_dict()
+        cut = rec["focus"]["cut"]
+        assert (cut["size"], cut["radius"], cut["grading"]) == (
+            pytest.approx(min(h_cut, landing.size)), pytest.approx(20 * rmin), 0.3)
+        regions = {g["name"]: g for g in cut["regions"]}
+        assert regions["cut"]["axial"] and regions["cut"]["size"] == pytest.approx(h_cut)
+        assert regions["cut"]["radius"] == pytest.approx(20 * rmin)
+        kept = rec["focus"]["kept"]
+        assert kept["size"] == pytest.approx(min(h_cut, landing.size))
+        g = rec["geometry"]
+        assert kept["radius"] == pytest.approx(min(landing.radius,
+                                                   0.5 * (g["z_bubble_top"] - g["z_bubble_bottom"])))
+        assert regions["bubble_bottom"]["size"] == kept["size"]
+        assert regions["bubble_bottom"]["z"] == g["z_bubble_bottom"]
         assert rec["sizing"]["h_tip"] == pytest.approx(0.25 * rmin)
         assert rec["sizing"]["h_bridge"] == pytest.approx(0.25 * rmin)
+        assert rec["sizing"]["curvature"] == 0  # gmsh's sizing from curvature is off
         assert rec["sizing_in_cut_radii"] == {"h_tip": 0.25, "h_bridge": 0.25, "focus_size": 0.25,
                                               "focus_radius": 20.0}
+    # the bottom is meshed at the finer landing focus there, at the cut's otherwise
+    assert bottoms[2] <= 1.25 * landings[2].size < 0.5 * bottoms[0]
+    assert bottoms[0] == pytest.approx(0.25 * records[0]["rmin"], rel=0.25)
 
 
 def test_cut_records_the_local_kinetic_energy(neck_cut):
@@ -644,11 +680,13 @@ def test_zero_fill_zeroes_every_node_of_the_former_gas(neck_cut):
     assert c["max_speed"] == 0.0
 
 
-def test_after_a_cut_the_driver_rebuilds_the_mesh_only_when_a_coarsening_takes_effect(tmp_path):
-    """Every mesh after the cut keeps the cut's sizing at the tips, here h_tip = delta/32. Read at
-    the open chain's tip, the spacing near the collapse stayed at about 1.17 h_tip whatever focus
-    the driver set, and the driver rebuilt the whole mesh at each of 6 steps to coarsen it, without
-    effect. Read where the focus sets it, the coarsening takes effect and then stops."""
+def test_after_a_cut_the_driver_does_not_coarsen_the_tips_the_cut_made(tmp_path):
+    """Every mesh after the cut keeps the cut's sizing at the tips, here h_tip = delta/32, and the
+    tips the cut made keep the cut's focus size, delta/16, within 20 cut radii: the fresh cap's
+    scale asks the rule for a coarser focus (before this was a rebuild at each of 6 steps without
+    effect, read at the tip, and then coarsenings read away from it), but the driver makes no
+    rebuild at all. The spacing near the collapse in collapse.txt is still read away from the tips,
+    where the cut's sizing leaves it to the focus."""
     from faraday_singularity.reconnect import CUT_SIZING_MARGIN
 
     s = ReconnectSettings(delta=1.05 * R_N, dt0=1e-5, tip_size=1 / 32)
@@ -660,17 +698,199 @@ def test_after_a_cut_the_driver_rebuilds_the_mesh_only_when_a_coarsening_takes_e
         rec = surgery.cut(pb, s, tmp_path, driver=driver, log=lambda *_: None)
         result = driver.run(1e-8)
         driver.close()
+        tips = _mesh_report(pb, 0.1, 5 * rec["rmin"])["tips"]
     events = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
-    remesh = [e for e in events if e["event"] == "remesh"]
     assert result["stop"]["reason"] == "max-steps" and result["steps"] == 6
-    assert 1 <= len(remesh) <= 2 and result["remesh_count"] == 1 + len(remesh)  # the cut's own
-    assert not [e for e in events if e["event"] == "remesh-ineffective"]
-    for e in remesh:  # coarsenings that coarsened
-        assert e["focus_size"] > e["h_near_before"] and e["h_near_after"] > e["h_near_before"] / 0.9
+    assert result["remesh_count"] == 1  # the cut's own
+    assert not [e for e in events if e["event"].startswith("remesh")]
     table = _columns(tmp_path / "collapse.txt")
     h_tip = rec["sizing"]["h_tip"]
     assert np.all(table["h_near"] > CUT_SIZING_MARGIN * h_tip)  # read away from the tips
-    assert table["h_near"][-1] >= settings.coarsen_ratio * table["h_focus"][-1]
+    assert np.all(table["h_focus"] > s.focus_size * rec["rmin"])  # the rule's coarser target
+    for name, h in tips.items():
+        assert 0.9 * h_tip <= h.min() and h.max() <= 1.25 * s.focus_size * rec["rmin"], (name, h)
+
+
+class FlaggingNeckProblem(NeckProblem):
+    """The neck problem with thresholds of element distortion that flag every step pyoomph checks,
+    so that the driver rebuilds the mesh after a cut at about every other step."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        from pyoomph.equations.generic import RemeshingOptions
+
+        self.remeshing_options = RemeshingOptions(max_expansion=1 + 1e-9, min_expansion=1 - 1e-9)
+
+
+def _mesh_report(pb, kept_radius: float, near: float) -> dict:
+    """The mesh of a state after a cut: the longest element of the bubble's bottom within
+    ``kept_radius`` of its tip; the elements of each tip the cut made within ``near`` of it, beyond
+    its first two (which the cut's tip sizing sets); and the largest ratio of adjacent element
+    lengths on each chain."""
+    segs = pb.interface_segments()
+    bubble = next(c for c in segs if not c["open"])
+    cavity = next(c for c in segs if c["open"])
+    out = {"bottom": _bottom_spacing(pb, kept_radius), "tips": {}, "adjacent": {}}
+    for name, c, k in (("cavity_tip", cavity, 0), ("bubble_top", bubble, -1)):
+        r, z = np.asarray(c["r"]), np.asarray(c["z"])
+        if k == -1:
+            r, z = r[::-1], z[::-1]
+        h = 2 * np.hypot(np.diff(r), np.diff(z))
+        d = np.hypot(r[:-1], z[:-1] - z[0])
+        out["tips"][name] = h[(d <= near) & (np.arange(len(h)) >= 4)]
+    for name, c in (("bubble", bubble), ("open", cavity)):
+        ds = np.hypot(np.diff(c["r"]), np.diff(c["z"]))
+        h = ds[0::2][:len(ds[1::2])] + ds[1::2]  # quadratic elements: vertex, midside, vertex
+        out["adjacent"][name] = float(np.max(np.maximum(h[1:] / h[:-1], h[:-1] / h[1:])))
+    return out
+
+
+# the cut of the post-cut feature runs: tips, bridge and focus at an eighth of the cut radius, finer
+# than the cavity's h_axis, and a landing focus finer still (the bubble's bottom keeps it)
+FEATURE_CUT = dict(FAST_CUT, tip_size=0.125, focus_size=0.125)
+FEATURE_LANDING = Focus(size=R_N / 12, radius=0.6, grading=0.3)
+
+
+@pytest.fixture(scope="module")
+def post_cut_features(tmp_path_factory):
+    """A run after a cut of the synthetic cavity whose landing state was meshed at a focus of R_N/12
+    near the axis, finer than the cut's focus (delta/8), with a rule that would refine the tips the
+    cut made to ell/400 (about 5e-4, above an h_floor of 1e-6) and distortion flags that make the
+    driver rebuild the mesh: the mesh after the cut and after every rebuild of the driver."""
+    out = tmp_path_factory.mktemp("features")
+    s = ReconnectSettings(**FEATURE_CUT)
+    settings = CollapseSettings(t_end=10.0, dt_max=0.01, max_steps=4, elements_per_scale=400.0,
+                                h_floor=1e-6)
+    nd = nondimensionalise(CaseParameters.from_dict(PHYSICS))
+    pb = FlaggingNeckProblem(nd, mesh=MeshSettings(**MESH), reconnect=s)
+    pb.set_output_directory(str(out))
+    res = {"meshes": [], "out": out}
+    with pb:
+        pb.initialise()
+        pb.active_mesh_template().focus = FEATURE_LANDING
+        pb.force_remesh()  # the landing state, its cavity bottom meshed at the landing focus
+        impose_closing_flow(pb)
+        res["landing_bottom"] = _bottom_spacing(pb, 0.1)
+        driver = CollapseDriver(pb, settings, out, reconnect=s)
+        rec = surgery.cut(pb, s, out, driver=driver, log=lambda *_: None)
+        res["record"] = rec
+        report = (lambda: _mesh_report(pb, rec["focus"]["kept"]["radius"], 5 * rec["rmin"]))
+        res["meshes"].append(report())
+        original = pb.force_remesh
+
+        def recording(*args, **kw):
+            original(*args, **kw)
+            res["meshes"].append(report())
+
+        pb.force_remesh = recording
+        res["result"] = driver.run(1e-8)
+        driver.close()
+        res["focus"] = pb.active_mesh_template().focus
+    res["events"] = [json.loads(x) for x in (out / "events.jsonl").read_text().splitlines()]
+    return res
+
+
+def test_after_a_cut_the_bubble_bottom_keeps_its_landing_resolution(post_cut_features):
+    """The bubble's bottom, far below the cut (its tip 0.3 from the neck, 14 cut radii), was meshed
+    at the landing focus R_N/12; the cut's focus (delta/8, 1.6 times coarser) and every rebuild of
+    the driver after it keep it there, never coarser than at the landing."""
+    res = post_cut_features
+    rec = res["record"]
+    landing = FEATURE_LANDING.size
+    assert res["landing_bottom"] <= 1.25 * landing
+    assert rec["focus"]["kept"]["size"] == pytest.approx(landing)
+    assert landing < 0.125 * rec["rmin"]
+    meshes = res["meshes"]
+    assert len(meshes) >= 3  # the cut's and at least two rebuilds of the driver
+    for m in meshes:
+        assert m["bottom"] <= 1.25 * landing, m["bottom"]
+    regions = {g.name: g for g in res["focus"].regions}
+    assert regions["bubble_bottom"].size == pytest.approx(landing)
+    assert res["result"]["stop"]["reason"] == "max-steps"
+
+
+def test_after_a_cut_the_tips_are_meshed_at_the_cut_radius_sizing(post_cut_features):
+    """Near the tips the cut made, the elements are the cut's focus size, delta/8: the rule's own
+    size there, ell/400, about 5e-4, lies above the landing run's h_floor (1e-6)
+    and would have refined them some fivefold; after a cut the focus is floored at the cut's focus
+    size, and every rebuild sizes the tips' regions at it."""
+    res = post_cut_features
+    rmin = res["record"]["rmin"]
+    h_cut = 0.125 * rmin
+    table = _columns(res["out"] / "collapse.txt")
+    assert np.all(table["ell"] / 400 < 0.5 * h_cut)  # the size the rule would have asked for
+    assert np.all(table["h_focus"] == pytest.approx(h_cut, rel=1e-12))
+    for m in res["meshes"]:
+        for name, h in m["tips"].items():
+            assert len(h) > 10 and 0.6 * h_cut <= h.min() and h.max() <= 1.4 * h_cut, (name, h)
+    regions = {g.name: g for g in res["focus"].regions}
+    for name in ("cavity_tip", "bubble_top"):
+        assert regions[name].size == pytest.approx(h_cut)
+        assert regions[name].radius >= 20 * rmin * (1 - 1e-12)
+    rows = _columns(res["out"] / "chains.txt")
+    later = np.isfinite(rows["size_cavity_tip"])
+    assert later.any() and np.all(rows["size_cavity_tip"][later] == pytest.approx(h_cut))
+    assert np.all(rows["h_cavity_tip"] <= 1.4 * h_cut) and np.all(rows["h_bubble_top"] <= 1.4 * h_cut)
+    distortion = [e for e in res["events"] if e.get("reason") == "distortion"]
+    assert distortion
+    for e in distortion:  # a rebuild for distortion keeps the size of every region
+        sizes = {g["name"]: g["new_size"] for g in e["regions"]}
+        assert sizes["cavity_tip"] == sizes["bubble_top"] == pytest.approx(h_cut)
+        assert sizes["bubble_bottom"] == pytest.approx(FEATURE_LANDING.size)
+
+
+def test_after_a_cut_no_mesh_has_a_jump_in_element_length(post_cut_features):
+    """With gmsh's sizing from curvature off, adjacent elements of either chain differ by no more
+    than the grading allows, on the cut's mesh and every rebuild after it: no cluster of short
+    elements beside long ones, through which the spline of a later rebuild could loop. A guard: this
+    short run does not grow such a cluster even with the sizing on; the feedback that does is
+    pinned by test_gmsh_sizing_from_curvature_amplifies_a_jump_in_node_spacing."""
+    for m in post_cut_features["meshes"]:
+        for chain, ratio in m["adjacent"].items():
+            assert ratio < 2.0, (chain, ratio)
+
+
+def test_gmsh_sizing_from_curvature_amplifies_a_jump_in_node_spacing(tmp_path):
+    """Why gmsh's sizing from curvature is off after a cut (``reconnect.ReconnectSettings``,
+    ``curvature_sizing``): on a gently curved wall meshed at a uniform size, a jump in the spacing
+    of the nodes the spline runs through (two intervals six times shorter than their neighbours)
+    comes back from a rebuild with 20 elements per turn as a jump of more than ten in adjacent
+    element lengths, and without it as none: gmsh reads the curvature of the uniform Catmull-Rom
+    spline, which the jump makes spurious, and does not grade what it asks for."""
+    gmsh = pytest.importorskip("gmsh")
+
+    def rebuilt(P, h0, curvature):
+        geo = tmp_path / f"c{curvature}.geo"
+        lines = [f"Point({k}) = {{{float(x)!r}, {float(y)!r}, 0, 1}};"
+                 for k, (x, y) in enumerate(P, 1)]
+        lines.append("Spline(1) = {" + ", ".join(str(k) for k in range(1, len(P) + 1)) + "};")
+        lines.append(f'Field[1] = MathEval; Field[1].F = "{float(h0)!r}"; Background Field = 1;')
+        geo.write_text("\n".join(lines) + "\n")
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Terminal", 0)
+            gmsh.option.setNumber("General.NumThreads", 1)
+            gmsh.open(str(geo))
+            for k, v in (("Mesh.MeshSizeMin", h0 / 100), ("Mesh.MeshSizeMax", 1.0),
+                         ("Mesh.MeshSizeFromCurvature", curvature), ("Mesh.MeshSizeFromPoints", 0),
+                         ("Mesh.MeshSizeExtendFromBoundary", 0)):
+                gmsh.option.setNumber(k, v)
+            gmsh.model.mesh.generate(1)
+            _, xyz, par = gmsh.model.mesh.getNodes(1, 1, includeBoundary=False,
+                                                   returnParametricCoord=True)
+            X = np.asarray(xyz).reshape(-1, 3)[np.argsort(par), :2]
+        finally:
+            gmsh.finalize()
+        h = np.hypot(*np.diff(np.vstack([P[:1], X, P[-1:]]), axis=0).T)
+        return float(np.max(np.maximum(h[1:] / h[:-1], h[:-1] / h[1:])))
+
+    long, short = 8.3e-5, 1.47e-5
+    n = int(3e-3 / long)
+    r = np.concatenate([[0.0], np.cumsum([long] * n + [short] * 2 + [long] * n)])
+    P = np.column_stack([r, 0.12 * r**2 / 1e-3 + 2e4 * r**4 / 1e-3])
+    assert rebuilt(P, 4e-4, 20) > 10.0
+    assert rebuilt(P, 4e-4, 0) < 1.05
+    assert ReconnectSettings(delta=1e-3).curvature_sizing == 0
 
 
 @pytest.mark.parametrize("ratio", [1.2, 2.0])

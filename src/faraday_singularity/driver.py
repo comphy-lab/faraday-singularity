@@ -50,9 +50,11 @@ by a cut, or restored from a dump), pyoomph only flags the distortion
 (``do_call_remeshing_when_necessary`` off) and the driver rebuilds after the step, before it
 measures it (:meth:`CollapseDriver._distortion_remesh`): it measures the step, refreshes the focus
 to ``min(focus size, h_near)``, which does not coarsen the mesh near the collapse, within the
-current focus radius, rebuilds and measures again (event ``remesh``, ``reason`` ``distortion``,
-with the trigger and ``h_near`` before and after). So the rebuild no longer reuses a focus set at
-an earlier, smaller scale, and every rebuild in the refined phase is the driver's and is logged. A
+current focus radius (after a cut: every feature's region at its current place, at the size it
+has, once the stops have been checked), rebuilds and measures again (event ``remesh``, ``reason``
+``distortion``, with the trigger and ``h_near`` before and after). So the rebuild no longer reuses
+a focus set at an earlier, smaller scale, and every rebuild in the refined phase is the driver's
+and is logged. A
 driver step makes at most one such rebuild, however many of its sub-steps were flagged. Neither
 kind of distortion rebuild starts or ends a hold, nor counts for ``min_steps_between_remesh``; the
 stop checks and the rule above follow on the rebuilt mesh, as after pyoomph's own. The run result
@@ -182,12 +184,31 @@ neck and fold stops and the step rule above apply to the open chain as to any su
 * the local scale is the smallest of the open chain's scales and the bubble's (``ell_bubble`` in
   ``chains.txt``: the jet-base radius of a resolved bump at either tip, the bubble's narrowest neck
   and its length; not the radii of curvature of its tips, which depend on the mesh at a chain's end
-  and bound the step instead), so that a jet on either chain sets the step and the focus, whose
-  attractors are the nodes of both chains near the axis; the open chain's fold stop and the speed
-  ``U`` (which then includes the bubble's nodes and jets) are taken over the region of the open
-  chain's own scale, which a smaller scale of the bubble does not narrow;
-* the stops before a second change of topology, on both chains (``reconnect.post_cut_stops``), and
-  ``tau-end`` once ``tau = t - t_cut`` reaches the cut's ``tau_end``;
+  and bound the step instead), so that a jet on either chain sets the step; the open chain's fold
+  stop and the speed ``U`` (which then includes the bubble's nodes and jets) are taken over the
+  region of the open chain's own scale, which a smaller scale of the bubble does not narrow;
+* the focus size of the rule is floored at the cut's focus size (``focus_size`` cut radii), not at
+  the landing run's ``h_floor`` (:meth:`CollapseDriver._focus_floor`), and the mesh follows each
+  feature of both chains in its own region (``reconnect.feature_regions``, ``mesh.FocusRegion``):
+  the tips the cut made (the cavity's and the bubble's top) at the cut's focus size, within
+  ``focus_radius`` cut radii and over the jet on them; the bubble's bottom, which the landing state
+  held as the cavity's bottom, at the size its jet asks for but never coarser than at the landing
+  (the cut record's ``focus.kept``); each neck at its own scale. The rule
+  (:meth:`CollapseDriver._maybe_remesh_features`) rebuilds when some region's longest element
+  exceeds ``refine_ratio`` times its target, or, once the hold has passed, when some region's
+  shortest element lies below ``coarsen_ratio`` times it, refining or coarsening each region by at
+  most the bounded factors; a rebuild that changed none of the regions that asked waits
+  ``remesh_backoff`` steps (event ``remesh-ineffective``, ``direction`` ``coarsen`` for a
+  coarsening). ``chains.txt`` gives, at each tip, the longest element of its region and the size
+  the current mesh has there (``h_<tip>``, ``size_<tip>``), the ``remesh`` events every region;
+* the stops before a second change of topology, on both chains (``reconnect.post_cut_stops``: the
+  bridge, the chains, the bubble's tips, a new neck, a closing fold, a spline through the nodes of
+  either chain that contacts itself, the bubble draining), and ``tau-end`` once ``tau = t - t_cut``
+  reaches the cut's ``tau_end``. They are checked before every rebuild, the rebuilds for distortion
+  included, since a state that calls for one is not rebuilt (``distortion_rebuild_skipped`` in its
+  stop record): the spline test is the rebuild's own, so no rebuild meets a self-intersecting
+  spline; a contact is reported as a ``fold`` of the resolved surface or a ``kink`` at the scale of
+  the mesh (``contact``);
 * the step is also at most ``courant h/|u|`` over every node of both chains
   (``reconnect.courant_limit``: the tips and jets of either chain wherever they go), at most
   ``capillary R^(3/2)`` with ``R`` the smallest radius of curvature of the three tips on the axis,
@@ -199,13 +220,10 @@ neck and fold stops and the step rule above apply to the open chain as to any su
   limits of the state (``dt_courant``, ``dt_capillary``), the profiles a ``_bubble`` file beside
   each one of the open chain, and every event, profile header and dump after the cut ``tau`` and
   ``tau_p``;
-* the remesh rule reads the spacing near the collapse (``h_near``) where the focus sets it, on both
-  chains, the coarser counting, so that either chain can ask for a refinement: every mesh after the
-  cut keeps the cut's sizing at the tips on the axis and along the bridge, which no focus can
-  coarsen, so only edges where that sizing asks for at least ``CUT_SIZING_MARGIN`` focus sizes count
-  (:meth:`CollapseDriver._h_near_after_cut`); and a coarsening rebuild that did not
-  coarsen (the spacing grew by less than ``1/0.9``) waits ``remesh_backoff`` steps before the next,
-  as a refinement does (event ``remesh-ineffective``, ``direction`` ``coarsen``);
+* ``h_near`` is read where the focus sets it, on both chains, the coarser counting: every mesh
+  after the cut keeps the cut's sizing at the tips on the axis and along the bridge, so only edges
+  where that sizing asks for at least ``CUT_SIZING_MARGIN`` focus sizes count
+  (:meth:`CollapseDriver._h_near_after_cut`; the rule above reads its regions instead);
 * the rotating dumps follow at least each time the time after the cut doubles, besides every
   ``state_dt`` (:meth:`CollapseDriver._state_interval`), and the state the run ends on is dumped
   as well (``end_state`` in the stop record), whatever the stop: the latest dump, which the rotation
@@ -232,11 +250,11 @@ import numpy as np
 from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_disc_points,
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
-from .mesh import Focus
+from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
-                        bubble_end, courant_limit, cut_size_field, post_cut_record,
-                        post_cut_stops, tau_end_reached, tip_jet)
+                        bubble_end, courant_limit, cut_size_field, feature_regions,
+                        post_cut_record, post_cut_stops, region_spacing, tau_end_reached, tip_jet)
 from .selfcontact import InterfaceSelfIntersection, fold_gap
 from .singular import singular_time
 
@@ -447,7 +465,10 @@ CHAIN_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "z_bubble_bottom", "w_bub
                  "h_courant", "U_courant", "courant_chain", "dt_courant", "dt_capillary",
                  "remesh_count", "ell_bubble") + tuple(
                      f"{c}_{tip}" for tip in JET_TIPS
-                     for c in ("r_j", "z_b", "Q_j", "V_j", "We_j", "jet_born"))
+                     for c in ("r_j", "z_b", "Q_j", "V_j", "We_j", "jet_born")) + tuple(
+                     # the mesh at each tip: the longest element within its focus region and the
+                     # size the region asks for (CollapseDriver._feature_regions)
+                     f"{c}_{tip}" for tip in JET_TIPS for c in ("h", "size"))
 # chains.txt columns written as integers (NaN where the state has no bubble)
 INT_CHAIN_COLUMNS = ("step", "courant_chain", "remesh_count") + tuple(
     f"jet_born_{tip}" for tip in JET_TIPS)
@@ -509,6 +530,8 @@ class CollapseDriver:
         # and pyoomph's own inside the solve before that
         self._distortion_remeshes = 0
         self._pyoomph_remeshes = 0
+        # after a cut: the sub-steps flagged for a rebuild that a stop of the step's state cancelled
+        self._distortion_skipped = 0
         self.outdir = Path(outdir)
         (self.outdir / "profiles").mkdir(parents=True, exist_ok=True)
         self.state = _State()
@@ -572,7 +595,16 @@ class CollapseDriver:
         if cut is None:
             return None
         segs = self._post_cut_state()["segs"]
-        chains = [Chain(np.column_stack([c["r"], c["z"]]), tuple(c["end_types"])) for c in segs]
+        # the chains as a rebuild takes them (mesh.FaradayCylinderMesh._current_chains: the ends on
+        # the axis put on r = 0, the wall node already on the wall), so that the spline test of
+        # the stops is the rebuild's own
+        chains = []
+        for c in segs:
+            P = np.column_stack([c["r"], c["z"]]).astype(float)
+            for k, end in ((0, 0), (-1, 1)):
+                if c["end_types"][end] == AXIS:
+                    P[k, 0] = 0.0
+            chains.append(Chain(P, tuple(c["end_types"])))
         s = self.s
         stop = post_cut_stops(chains, CutGeometry(**cut["geometry"]), self.reconnect,
                               cut["sizing"]["h_tip"], neck_elements=s.neck_stop_elements,
@@ -629,6 +661,84 @@ class CollapseDriver:
                 h = max(h, h_bubble)
         return h
 
+    def _focus_floor(self) -> float:
+        """The smallest focus size of the driver's rule: ``h_floor``, and after a cut the cut's
+        focus size (``focus_size`` cut radii), the sizing in cut radii the cut gave its tips, so
+        that the meshes of a study in ``delta`` stay alike in cut radii; the landing run's
+        ``h_floor`` is no length of the cut. The bubble's bottom, a feature of the landing state,
+        keeps ``h_floor`` (:func:`reconnect.feature_regions`)."""
+        cut = self._cut_record()
+        if cut is None:
+            return self.s.h_floor
+        return self.reconnect.focus_size * float(cut.get("rmin") or cut["delta"])
+
+    def _feature_regions(self, cavity: dict, tips: dict) -> list[dict]:
+        """After a cut: the features of both chains (``reconnect.feature_regions``: the tips the cut
+        made at the cut's focus size, the bubble's bottom never coarser than at the landing, the
+        necks), each with the size it has in the current mesh (``size``, NaN for a feature the
+        current focus has no region for) and the longest and shortest element within its region
+        (``h_max``, ``h_min``, ``reconnect.region_spacing``); empty in a state whose topology has
+        changed, which a stop records."""
+        pc = self._post_cut_state()
+        segs = pc["segs"]
+        if len(segs) != 2 or not pc["record"]:
+            return []
+        s, cut = self.s, self._cut_record()
+        regions = feature_regions(segs, cavity, tips, pc["record"], cut, self.reconnect,
+                                  h_floor=s.h_floor, h_axis=self.pb.mesh_settings.h_axis,
+                                  elements_per_scale=s.elements_per_scale,
+                                  focus_extent=s.focus_extent)
+        focus = self.pb.active_mesh_template().focus
+        axis_tips = [float(c["z"][k]) for c in segs for k, end in ((0, 0), (-1, 1))
+                     if c["end_types"][end] == AXIS]
+        for g in regions:
+            current = focus.region(g["name"]) if focus is not None else None
+            g["size"] = current.size if current is not None else math.nan
+            g["h_max"], g["h_min"] = region_spacing(
+                segs, g, axis_tips, cut.get("sizing"),
+                current.size if current is not None else g["target"])
+        return regions
+
+    def _regions_focus(self, regions: list[dict], *, keep: bool) -> Focus:
+        """The focus of a rebuild after a cut: one region per feature (``mesh.FocusRegion``) at its
+        current centre and radius. A rebuild of the rule (:meth:`_maybe_remesh_features`) sizes
+        each at its target, refining it by at most ``max_refine_factor`` on its longest element and
+        coarsening it by at most ``max_coarsen_factor`` on its size in the current mesh (on its
+        shortest element for a feature that has no region yet), but never coarser than a size it
+        keeps from the landing (``kept``); a rebuild for distortion (``keep``) keeps the size of
+        every region the current mesh has, so that it coarsens nothing. The tips the cut made have
+        the cut's focus size as their target, so every rebuild meshes them at it."""
+        s = self.s
+        old = self.pb.active_mesh_template().focus
+        out = []
+        for g in regions:
+            prev = old.region(g["name"]) if old is not None else None
+            if keep and prev is not None:
+                size = prev.size
+            else:
+                size = g["target"]
+                if math.isfinite(g["h_max"]):
+                    size = max(size, g["h_max"] / s.max_refine_factor)
+                bound = prev.size if prev is not None else g["h_min"]
+                if math.isfinite(bound):
+                    size = min(size, s.max_coarsen_factor * bound)
+                if g.get("kept") is not None:
+                    size = min(size, g["kept"])
+            out.append(FocusRegion(g["name"], size=size, r=g["r"], z=g["z"], radius=g["radius"]))
+        return Focus(size=min(x.size for x in out), radius=max(x.radius for x in out),
+                     grading=s.focus_grading, regions=tuple(out))
+
+    @staticmethod
+    def _region_record(regions: list[dict], focus: Focus | None = None) -> list[dict]:
+        """The regions of a ``remesh`` event: the measured ones, with the size the rebuild set."""
+        out = []
+        for g in regions:
+            new = focus.region(g["name"]) if focus is not None else None
+            out.append({k: g[k] for k in ("name", "target", "size", "h_max", "h_min", "r", "z",
+                                          "radius")}
+                       | ({"new_size": new.size} if new is not None else {}))
+        return out
+
     def _write_chain_row(self, m: dict, dt: float):
         pc = self._post_cut_state()
         obs = self.pb.cut_observables()
@@ -647,6 +757,9 @@ class CollapseDriver:
             for k in ("r_j", "z_b", "Q_j", "V_j", "We_j"):
                 values[f"{k}_{tip}"] = jet.get(k, math.nan)
             values[f"jet_born_{tip}"] = int(bool(jet.get("jet_born", False)))
+        for g in m.get("regions", []):
+            if g["name"] in JET_TIPS:
+                values[f"h_{g['name']}"], values[f"size_{g['name']}"] = g["h_max"], g["size"]
 
         def cell(c):
             v = values.get(c, math.nan)
@@ -760,7 +873,7 @@ class CollapseDriver:
         bubble, tips, ell_bubble = self._bubble_features() if after_cut else (None, {}, math.inf)
         ell_measured = min(ell_open, ell_bubble)
         ell = limit_scale(ell_measured, self.state.ell_prev, s.scale_growth)
-        h_focus = float(np.clip(ell / s.elements_per_scale, s.h_floor, h_axis))
+        h_focus = float(np.clip(ell / s.elements_per_scale, self._focus_floor(), h_axis))
 
         Q = V = We = math.nan
         found = True
@@ -816,6 +929,10 @@ class CollapseDriver:
         angles = cone_angles(prof, start, s.cone_radii)
 
         flat = jb.index > 0 and rise <= s.flat_aspect * max(jb.r_j, h_focus)
+        # after a cut: the features of both chains, each meshed at its own size
+        regions = self._feature_regions(
+            {"z_tip": float(z[0]), "kappa": kappa, "r_j": jb.r_j, "rise": rise,
+             "bump": jb.jet_born and cavity, "flat_bump": flat_bump}, tips) if after_cut else []
         return {"time": self._t(), "axis_lowest": jb.index == 0 or flat, "flat_bump": flat_bump,
                 "z_axis": float(z[0]), "w_axis": float(uz[0]), "axis_curvature": kappa,
                 "cavity": cavity, "jet_born": born, "r_j": r_j,
@@ -826,7 +943,7 @@ class CollapseDriver:
                 "angles": angles, "focus_radius": focus_r, "profile": (r, z, ur, uz),
                 "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
                 "fold_h_elem": fold.h_elem, "fold_limit": fold_limit,
-                "tips": tips, "ell_bubble": ell_bubble}
+                "tips": tips, "ell_bubble": ell_bubble, "regions": regions}
 
     # --- bookkeeping --------------------------------------------------------------------------
 
@@ -897,6 +1014,8 @@ class CollapseDriver:
         if st.step - st.last_remesh_step < s.min_steps_between_remesh:
             return False
         after_cut = self._cut_record() is not None
+        if after_cut and m.get("regions"):
+            return self._maybe_remesh_features(m)
         target = m["h_focus"]
         refining = m["h_near"] > s.refine_ratio * target
         if refining:
@@ -939,6 +1058,61 @@ class CollapseDriver:
                         coarsen_blocked_until=st.coarsen_blocked_until)
         return True
 
+    def _maybe_remesh_features(self, m: dict) -> bool:
+        """The remesh rule after a cut, feature by feature (``m["regions"]``,
+        :meth:`_feature_regions`): a rebuild refines when the longest element of some feature's
+        region exceeds ``refine_ratio`` times its target, and coarsens, once the hold and any wait
+        after a coarsening without effect have passed, when the shortest element of some feature's
+        region lies below ``coarsen_ratio`` times its target; every region is then sized by
+        :meth:`_regions_focus`. A refinement that refined none of the regions that asked for it
+        waits ``remesh_backoff`` steps, and so does a coarsening that coarsened none (events
+        ``remesh-ineffective``, with ``direction`` ``coarsen`` for the latter). The hold on
+        coarsening after a refining rebuild is that of the rule before the cut."""
+        s, st = self.s, self.state
+        regions = m["regions"]
+        refine = [g for g in regions
+                  if math.isfinite(g["h_max"]) and g["h_max"] > s.refine_ratio * g["target"]]
+        coarsen = [g for g in regions
+                   if math.isfinite(g["h_min"]) and g["h_min"] < s.coarsen_ratio * g["target"]]
+        if refine:
+            if st.step < st.refine_blocked_until:
+                return False
+            refining, asked = True, refine
+        elif coarsen:
+            if m["time"] < st.coarsen_held_until or st.step < st.coarsen_blocked_until:
+                return False
+            refining, asked = False, coarsen
+        else:
+            return False
+        template = self.pb.active_mesh_template()
+        focus = self._regions_focus(regions, keep=False)
+        template.focus = focus
+        self.pb.force_remesh()
+        st.last_remesh_step = st.step
+        hold = {}
+        if refining:
+            held = m["time"] + s.coarsen_hold * local_time(m["ell"], m["U"])
+            st.coarsen_held_until = max(st.coarsen_held_until, held)
+            hold["coarsen_held_until"] = st.coarsen_held_until
+        after = self.measure()
+        self._event("remesh", m, focus_size=focus.size, focus_radius=focus.radius,
+                    h_near_before=m["h_near"], h_near_after=after["h_near"],
+                    asked_by=[g["name"] for g in asked],
+                    regions=self._region_record(regions, focus), **hold)
+        done = {g["name"]: g for g in after.get("regions", [])}
+        if refining and not any(done.get(g["name"], {}).get("h_max", math.inf) <= 0.9 * g["h_max"]
+                                for g in asked):
+            st.refine_blocked_until = st.step + s.remesh_backoff + s.min_steps_between_remesh
+            self._event("remesh-ineffective", after, focus_size=focus.size,
+                        asked_by=[g["name"] for g in asked])
+        elif not refining and not any(
+                done.get(g["name"], {}).get("h_min", -math.inf) >= g["h_min"] / 0.9 for g in asked):
+            st.coarsen_blocked_until = st.step + s.remesh_backoff + s.min_steps_between_remesh
+            self._event("remesh-ineffective", after, focus_size=focus.size, direction="coarsen",
+                        asked_by=[g["name"] for g in asked],
+                        coarsen_blocked_until=st.coarsen_blocked_until)
+        return True
+
     def distortion_counts(self) -> dict:
         """The rebuilds element distortion asked for in this run (``run_status.json``): the
         driver's, once a focus is set (events ``remesh`` with ``reason`` ``distortion``), and
@@ -977,15 +1151,31 @@ class CollapseDriver:
         m = self.measure()
         template = self.pb.active_mesh_template()
         old = template.focus
-        size = min(old.size, m["h_near"])
-        template.focus = Focus(size=size, radius=m["focus_radius"], grading=old.grading)
+        extra = {}
+        if self._cut_record() is not None:
+            # after a cut the stops come first: a state that calls for one is not rebuilt, so that
+            # no rebuild meets a self-intersecting spline (reconnect.post_cut_stops); the run then
+            # stops on it, at the end of this step
+            if (self._geometry_stop(m) or self._post_cut_stop()) is not None:
+                self._distortion_skipped = len(flags)
+                return m
+            if m.get("regions"):
+                new = self._regions_focus(m["regions"], keep=True)
+                extra["regions"] = self._region_record(m["regions"], new)
+            else:
+                new = Focus(size=min(old.size, m["h_near"]), radius=m["focus_radius"],
+                            grading=old.grading)
+        else:
+            new = Focus(size=min(old.size, m["h_near"]), radius=m["focus_radius"],
+                        grading=old.grading)
+        template.focus = new
         self.pb.force_remesh()
         self._distortion_remeshes += 1
         after = self.measure()
         self._event("remesh", m, reason="distortion", **flags[0], flagged_substeps=len(flags),
-                    focus_size=size, focus_radius=m["focus_radius"], focus_size_before=old.size,
+                    focus_size=new.size, focus_radius=new.radius, focus_size_before=old.size,
                     focus_radius_before=old.radius, h_near_before=m["h_near"],
-                    h_near_after=after["h_near"])
+                    h_near_after=after["h_near"], **extra)
         return after
 
     def _singular(self, m: dict) -> tuple[float, float, int]:
@@ -1067,7 +1257,7 @@ class CollapseDriver:
         focus = self.pb.active_mesh_template().focus
         meta = {k: getattr(st, k) for k in self._STATE_FIELDS + self._OPTIONAL_FIELDS}
         meta.update(time=self._t(), remesh_count=self.pb.remesh_count,
-                    focus=None if focus is None else asdict(focus), dt_prev=st.dt_prev,
+                    focus=None if focus is None else focus.to_dict(), dt_prev=st.dt_prev,
                     episodes=self.episodes.to_dict(), max_curvature_kind=MAX_CURVATURE_KIND)
         if self.landing:
             meta["landed"] = list(st.landed)
@@ -1464,6 +1654,8 @@ class CollapseDriver:
             self._keep_landings(m)
             found = self._stop(m)
             if found is not None:
+                if self._distortion_skipped:  # the rebuild of this step, cancelled by this stop
+                    found["distortion_rebuild_skipped"] = self._distortion_skipped
                 stop = found
                 break
             self._maybe_snapshot(m)
