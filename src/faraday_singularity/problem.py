@@ -22,7 +22,8 @@ evaluated on the interface with ``n_z ds = dr`` and pyoomph's ``2 pi r`` measure
 A problem made with ``reconnect`` settings (a case's ``collapse.reconnect`` block) can be cut through
 a closing neck (``surgery.py``). Only then does it carry the reconnection handler on the free surface
 (inert until the cut calls it), the pressure-impulse projection as an auxiliary residual, and the
-observables the cut reports (axial momentum, ``int (div u)^2``, the change made by the projection, the
+observables the cut reports (axial momentum, ``int (div u)^2`` of the P2 velocity, an order-``h``
+discretisation diagnostic rather than a test of the projection, the change made by the projection, the
 pressure on the free surface). It adds no field, degree of freedom or global parameter, so state dumps
 of either kind of problem load into the other. Without ``reconnect`` the problem is the one above.
 """

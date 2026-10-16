@@ -191,6 +191,19 @@ def test_projection_energy_identity_and_convergence(manufactured):
     assert b["Pi_rms_on_surface"] < 1e-2 * b["max_abs_Pi"]
 
 
+def test_the_strong_divergence_is_a_discretisation_diagnostic(manufactured):
+    """``u+`` is divergence-free weakly (its residual, which holds ``int q div u+`` for every P1
+    pressure, converges to round-off); the L2 norm of its pointwise divergence is not zero and falls
+    at about first order in the mesh size (observed order 0.83 here)."""
+    a, b = manufactured[8], manufactured[16]
+    for out in (a, b):
+        assert "divergence_L2_after" not in out
+        assert out["strong_divergence_L2_after"] > 1e8 * out["newton_residuals"][-1]
+        assert out["strong_divergence_L2_after"] < out["strong_divergence_L2_before"]
+    ratio = a["strong_divergence_L2_after"] / b["strong_divergence_L2_after"]
+    assert 1.5 < ratio < 2.5  # first order, not second
+
+
 def test_projection_restores_time_and_history(manufactured):
     for out in manufactured.values():
         assert out["time"] == out["t0"] and out["counter"] == 0

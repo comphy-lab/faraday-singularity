@@ -43,7 +43,14 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
    stationary solve pyoomph replaces the history value ``u~`` by the current one and the system is
    singular. ``u+`` is the L2 projection of ``u~`` onto discretely divergence-free fields with the
    (homogeneous) pinned values, so ``KE(u~) - KE(u+) = |u+ - u~|^2/2`` holds to round-off; the cut
-   is refused unless it does, to ``energy_tolerance``.
+   is refused unless it does, to ``energy_tolerance``, and unless the solve converged to
+   ``projection_tolerance``. That residual includes ``int q div u+`` for every pressure test
+   function: ``u+`` is divergence-free weakly, against the P1 pressures, and these two tests are
+   the acceptance of the projection. The pointwise divergence of the P2 velocity is not zero: its
+   L2 norm (``strong_divergence_L2_after``, and the per-step ``divergence_sq``, its square) is a
+   discretisation diagnostic of order ``h``. On the manufactured field of the tests it is 4.2, 2.3
+   and 1.3 on meshes of 8, 16 and 32 elements per side (an observed order of 0.8-0.9), while the
+   residual stays near 5e-15.
 8. **History := u+**, the time and the step sizes put back (``dt0`` for every level), and the step
    counter set for a BDF1 first step (``restart = "bdf1"``) or a BDF2 step on the flat history.
 9. The interface chart is oriented from a far point so that both chains keep their orientation
@@ -404,8 +411,10 @@ def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None
                    # u+ - u~ = -grad Pi with Pi = 0 on the free surfaces: delta P_z ~ int_bottom Pi
                    Pi_on_bottom=after.get("pressure_bottom", math.nan),
                    Pi_rms_on_surface=math.sqrt(max(after["pressure_sq"], 0.0) / after["area"]),
-                   divergence_L2_before=math.sqrt(max(before["divergence_sq"], 0.0)),
-                   divergence_L2_after=math.sqrt(max(after["divergence_sq"], 0.0)),
+                   # the L2 norm of the pointwise divergence of the P2 velocity: a discretisation
+                   # diagnostic of order h (module docstring), not the acceptance of the cut
+                   strong_divergence_L2_before=math.sqrt(max(before["divergence_sq"], 0.0)),
+                   strong_divergence_L2_after=math.sqrt(max(after["divergence_sq"], 0.0)),
                    **_pressure_impulse_stats(pb))
         if not residuals or residuals[-1] > s.projection_tolerance:
             raise CutFailed(f"the projection did not converge: residuals {residuals}")
