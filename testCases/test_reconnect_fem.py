@@ -1324,8 +1324,9 @@ def test_the_ordinary_driver_runs_as_at_9e0d8a1(tmp_path):
     """The collapse driver and problem of this commit, run on a small ordinary case (no reconnection
     key) for a few steps with rebuilds and dumps, against those of commit 9e0d8a1, each in a fresh
     process with MKL single-threaded: the same output files, columns, events and dump keys, and the
-    same numbers to round-off (the wall time aside). With MKL on one thread they have agreed to the
-    byte; the test asks for round-off only."""
+    same numbers to round-off (the wall time aside); the result only gains the counts of the
+    rebuilds element distortion asked for, none in this run. With MKL on one thread they have
+    agreed to the byte; the test asks for round-off only."""
     ref = tmp_path / "ref"
     try:
         archive = subprocess.run(["git", "-C", str(ROOT), "archive", "9e0d8a1", "src"],
@@ -1353,7 +1354,10 @@ def test_the_ordinary_driver_runs_as_at_9e0d8a1(tmp_path):
     assert (a / "collapse_settings.json").read_text() == (b / "collapse_settings.json").read_text()
     result = json.loads((a / "result.json").read_text())
     assert result["steps"] == 6 and result["remesh_count"] >= 2, result
-    _close(result, json.loads((b / "result.json").read_text()), "result")
+    # the result gains the counts of the rebuilds element distortion asked for: none here
+    head = json.loads((b / "result.json").read_text())
+    assert (head.pop("distortion_remeshes"), head.pop("pyoomph_remeshes")) == (0, 0)
+    _close(result, head, "result")
     head_a, rows_a = _table(a / "collapse.txt")
     head_b, rows_b = _table(b / "collapse.txt")
     assert head_a == head_b

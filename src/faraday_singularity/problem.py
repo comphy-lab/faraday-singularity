@@ -10,7 +10,10 @@ to an axisymmetric container whose free surface can deform arbitrarily:
 * axis ``r = 0`` (``AxisymmetryBC``), free-slip bottom ``z = 0``, free-slip side wall ``r = R_c``
   along which the contact line slides with the natural 90 degree angle;
 * hyperelastic mesh smoothing on an unstructured triangular mesh that is rebuilt from the live free
-  surface whenever elements are too distorted (``RemeshWhen``).
+  surface whenever elements are too distorted (``RemeshWhen``). pyoomph makes that rebuild inside
+  the solve unless ``do_call_remeshing_when_necessary`` is off: then it only flags the distortion,
+  which the collapse driver reads after the step (:meth:`FaradayProblem.take_distortion_flags`)
+  and rebuilds itself at a focus it refreshes (``driver.py``).
 
 With ``R_c = j_{1,n}`` and a free-slip wall, ``J0(r)`` is an exact mode of the linearised problem,
 so the fundamental-mode amplitude is the Hankel coefficient
@@ -71,6 +74,12 @@ class FaradayProblem(Problem):
         self.interface_zeta: AssignZetaCoordinatesByArclength | None = None
         self.cut: dict | None = None  # the record of a cut, once one has been made
         self._projecting = False  # set while the projection's auxiliary solve runs
+        # the thresholds of RemeshWhen, pyoomph's defaults: an element shrunk below 0.6 or grown
+        # beyond 1.75 times its size at the build, or of a fifth of its quality then
+        self.remeshing_options = RemeshingOptions()
+        # what RemeshWhen flagged on the accepted steps since the last take_distortion_flags(),
+        # while pyoomph leaves the rebuild to the driver (do_call_remeshing_when_necessary off)
+        self._distortion_flags: list[dict] = []
 
     def initial_elevation(self, r):
         return self.nd.a0 * j0(r)
@@ -88,7 +97,7 @@ class FaradayProblem(Problem):
         eqs = NavierStokesEquations(mass_density=1, dynamic_viscosity=nd.Oh, gravity=gravity)
         eqs += HyperelasticSmoothedMesh()
         if self.remesh:
-            eqs += RemeshWhen(RemeshingOptions())
+            eqs += RemeshWhen(self.remeshing_options)
 
         eqs += AxisymmetryBC() @ "axis"  # velocity_x = mesh_x = 0, also at the interface end
         eqs += DirichletBC(velocity_y=0, mesh_y=0) @ "bottom"  # free slip, nodes slide along r
@@ -270,6 +279,50 @@ class FaradayProblem(Problem):
         except OSError:
             return ""
 
+    def distortion_reading(self) -> dict:
+        """The element distortion of the liquid mesh as ``RemeshWhen`` reads it.
+
+        ``trigger`` and ``ratio`` belong to the first element, in pyoomph's order, outside its
+        limits (``expansion`` or ``shrinkage`` of its size against its size at the build, else a
+        ``quality`` fallen below ``min_quality_decrease`` of its quality then): the element pyoomph
+        names in its message, not necessarily the worst one. ``trigger`` is None when no element
+        is outside them. The extremes over the mesh are ``size_ratio_min``, ``size_ratio_max`` and
+        ``quality_ratio_min``. It only reads the mesh."""
+        o = self.remeshing_options
+        trigger, ratio = None, math.nan
+        size_min, size_max, quality_min = math.inf, 0.0, math.inf
+        for e in self.get_mesh("liquid").elements():
+            initial = e.get_initial_cartesian_nondim_size()
+            size = e.get_current_cartesian_nondim_size() / initial if initial > 0 else math.nan
+            size_min, size_max = min(size_min, size), max(size_max, size)
+            if trigger is None and o.max_expansion and size > o.max_expansion:
+                trigger, ratio = "expansion", size
+            elif trigger is None and o.min_expansion and size < o.min_expansion:
+                trigger, ratio = "shrinkage", size
+            initial = e.get_initial_quality_factor()
+            if initial > 0:
+                quality = e.get_quality_factor() / initial
+                quality_min = min(quality_min, quality)
+                if trigger is None and o.min_quality_decrease and quality < o.min_quality_decrease:
+                    trigger, ratio = "quality", quality
+        return {"trigger": trigger, "ratio": float(ratio), "size_ratio_min": float(size_min),
+                "size_ratio_max": float(size_max), "quality_ratio_min": float(quality_min)}
+
+    def take_distortion_flags(self) -> list[dict]:
+        """The distortion ``RemeshWhen`` flagged on the accepted steps since the last call, one
+        :meth:`distortion_reading` per flagged step (empty without), and clear the request.
+
+        Only while ``do_call_remeshing_when_necessary`` is off does a flag reach this list, and the
+        rebuild is then the caller's. pyoomph clears its request (``_domains_to_remesh``) at the
+        start of every Newton solve, but neither its rebuild nor ``force_remesh`` clears it; it is
+        cleared here, so that a flag already answered, by the caller or by pyoomph inside the solve,
+        is not taken for a new one. Nothing reads it before the next solve otherwise."""
+        flags, self._distortion_flags = self._distortion_flags, []
+        if self.remeshing_necessary() and not self.do_call_remeshing_when_necessary and not flags:
+            flags = [self.distortion_reading()]  # flagged outside a step in time
+        self._domains_to_remesh.clear()
+        return flags
+
     def actions_after_remeshing(self):
         super().actions_after_remeshing()
         self.remesh_count += 1
@@ -278,3 +331,7 @@ class FaradayProblem(Problem):
         super().actions_after_transient_solve()
         if not self._projecting:  # the projection's solve is no step in time
             self.write_diagnostics()
+            # an accepted step whose last Newton solve RemeshWhen flagged, while the rebuild is left
+            # to the driver: read the distortion now, since a later sub-step clears the flag
+            if self._domains_to_remesh and not self.do_call_remeshing_when_necessary:
+                self._distortion_flags.append(self.distortion_reading())

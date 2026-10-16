@@ -140,6 +140,21 @@ add a second top-level `cases/` tree.
   `testCases/test_reconnect_fem.py`; check them when the pin moves. Planner tests on stored neck
   profiles run when `FARADAY_RECONNECT_PROFILES` names their directory; a synthetic slender thread
   covers the same planner classes by default.
+- Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
+  quality ratio below 0.2, against the element at its build; never checked on the first solve on a
+  new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the
+  solve, as it always did (counted as `pyoomph_remeshes`, no event). Once a focus is set (the
+  first refinement, a cut, a restored dump) the driver turns `do_call_remeshing_when_necessary`
+  off, so pyoomph only flags it (`FaradayProblem.take_distortion_flags`), and rebuilds after the
+  step, before measuring it, at focus size `min(focus size, h_near)` (never coarser near the
+  collapse; not floored at `h_floor`) within the current `focus_radius`, the grading kept: one
+  rebuild per driver step however many sub-steps were flagged, a `remesh` event with `reason`
+  `distortion` (trigger, ratio, extremes, focus and `h_near` before and after) and
+  `distortion_remeshes` in `run_status.json`. These rebuilds neither start nor end a hold nor count
+  for `min_steps_between_remesh`. This holds in every mode that steps through the driver (landing,
+  cut and post-cut restarts, the prototype). A run without such a rebuild in the refined phase is
+  the same to the byte as at 148340e (`testCases/test_distortion_remesh.py`); in one with it, the
+  `diagnostics.txt` row of that step precedes the rebuild, as for the driver's other rebuilds.
 - Runs of one case in fresh processes differ by about 1e-14 relative unless MKL runs on one thread
   (`MKL_NUM_THREADS=1`; `OMP_NUM_THREADS` alone does not do it); compare runs to round-off, or set
   it when a comparison must be exact.

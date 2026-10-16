@@ -40,10 +40,26 @@ scale and speed that asked for the rebuild) of physical time; refinement and the
 held. After a refining rebuild that did not refine, refinement also waits ``remesh_backoff`` steps.
 A step whose Newton solve fails is rejected, the state restored and the step halved by pyoomph's
 adaptive stepping, which the driver uses with ``dt`` as the largest step: the driver step then
-reaches ``t + dt`` in several accepted sub-steps, and only its end is measured. Element distortion
-still triggers pyoomph's own remeshing, at the focus the driver last set, which a hold keeps from
-coarsening; those rebuilds neither start nor end a hold. The run stops right before a pinch-off,
-when a neck becomes narrower than ``max(neck_stop, neck_stop_elements h_floor)``, at the
+reaches ``t + dt`` in several accepted sub-steps, and only its end is measured.
+
+Element distortion (pyoomph's ``RemeshWhen``: an element shrunk below 0.6 or grown beyond 1.75
+times its size at the build, or of a fifth of its quality then) also asks for a rebuild. Before the
+driver has set a focus, pyoomph makes that rebuild itself, inside the solve of the sub-step that
+asked, at the initial sizing, as before. Once the driver has set a focus (at its first refinement,
+by a cut, or restored from a dump), pyoomph only flags the distortion
+(``do_call_remeshing_when_necessary`` off) and the driver rebuilds after the step, before it
+measures it (:meth:`CollapseDriver._distortion_remesh`): it measures the step, refreshes the focus
+to ``min(focus size, h_near)``, which does not coarsen the mesh near the collapse, within the
+current focus radius, rebuilds and measures again (event ``remesh``, ``reason`` ``distortion``,
+with the trigger and ``h_near`` before and after). So the rebuild no longer reuses a focus set at
+an earlier, smaller scale, and every rebuild in the refined phase is the driver's and is logged. A
+driver step makes at most one such rebuild, however many of its sub-steps were flagged. Neither
+kind of distortion rebuild starts or ends a hold, nor counts for ``min_steps_between_remesh``; the
+stop checks and the rule above follow on the rebuilt mesh, as after pyoomph's own. The run result
+counts both (``distortion_remeshes``, ``pyoomph_remeshes``).
+
+The run stops right before a pinch-off, when a neck becomes narrower than
+``max(neck_stop, neck_stop_elements h_floor)``, at the
 conservative self-contact cutoff, when a fold in the focus region (two nodes closer than
 ``1/fold_ratio`` of the arc length between them, :func:`selfcontact.fold_gap`; the air slot that
 can close at the jet base) is narrower than ``max(fold_stop, fold_stop_elements h_elem)``, with
@@ -489,6 +505,10 @@ class CollapseDriver:
         self._post_cut_cache: tuple | None = None
         # the measured state has had its stop checks but not yet its snapshot and remesh checks
         self._checks_pending = False
+        # rebuilds asked for by element distortion in this run: the driver's, once a focus is set,
+        # and pyoomph's own inside the solve before that
+        self._distortion_remeshes = 0
+        self._pyoomph_remeshes = 0
         self.outdir = Path(outdir)
         (self.outdir / "profiles").mkdir(parents=True, exist_ok=True)
         self.state = _State()
@@ -919,6 +939,55 @@ class CollapseDriver:
                         coarsen_blocked_until=st.coarsen_blocked_until)
         return True
 
+    def distortion_counts(self) -> dict:
+        """The rebuilds element distortion asked for in this run (``run_status.json``): the
+        driver's, once a focus is set (events ``remesh`` with ``reason`` ``distortion``), and
+        pyoomph's own inside the solve before that (no event; ``remesh_count`` counts them)."""
+        return {"distortion_remeshes": self._distortion_remeshes,
+                "pyoomph_remeshes": self._pyoomph_remeshes}
+
+    def _defers_distortion(self) -> bool:
+        """Whether the rebuild that element distortion asks for in the next step is the driver's:
+        once a focus is set. pyoomph then only flags it (``do_call_remeshing_when_necessary``
+        off); before, it rebuilds inside the solve, as it always did."""
+        defer = self.pb.active_mesh_template().focus is not None
+        self.pb.do_call_remeshing_when_necessary = not defer
+        return defer
+
+    def _distortion_flags(self) -> list[dict]:
+        """What element distortion flagged in the step just taken, the request cleared
+        (``FaradayProblem.take_distortion_flags``); nothing from a problem that cannot flag."""
+        take = getattr(self.pb, "take_distortion_flags", None)
+        return take() if take is not None else []
+
+    def _distortion_remesh(self, flags: list[dict]) -> dict:
+        """The rebuild that element distortion asked for in the step just taken, once a focus is
+        set; returns the measurement of the rebuilt mesh, from which the step goes on.
+
+        The step is measured on its own mesh first. The focus is then refreshed: its size to
+        ``min(focus size, h_near)``, so that the rebuild does not coarsen what the mesh near the
+        collapse resolves (it resets the edges compressed below the focus size to it otherwise),
+        and its radius to that of the measured scale (``focus_radius``), not of the scale at
+        which the focus was last set; its grading is kept. Event ``remesh`` with ``reason``
+        ``distortion``: the first flagged sub-step's reading (``trigger``, ``ratio`` and the
+        extremes, ``FaradayProblem.distortion_reading``), the number of flagged sub-steps, the
+        focus before and after and ``h_near`` before and after. No hold starts or ends, and
+        ``last_remesh_step`` is kept, so that the rule of :meth:`_maybe_remesh` follows on the
+        rebuilt mesh within the same step, as after pyoomph's own rebuild."""
+        m = self.measure()
+        template = self.pb.active_mesh_template()
+        old = template.focus
+        size = min(old.size, m["h_near"])
+        template.focus = Focus(size=size, radius=m["focus_radius"], grading=old.grading)
+        self.pb.force_remesh()
+        self._distortion_remeshes += 1
+        after = self.measure()
+        self._event("remesh", m, reason="distortion", **flags[0], flagged_substeps=len(flags),
+                    focus_size=size, focus_radius=m["focus_radius"], focus_size_before=old.size,
+                    focus_radius_before=old.radius, h_near_before=m["h_near"],
+                    h_near_after=after["h_near"])
+        return after
+
     def _singular(self, m: dict) -> tuple[float, float, int]:
         """Add ``m`` to the singular-time samples; return ``(t0_est, alpha_est, t0_source)``."""
         s, st = self.s, self.state
@@ -1324,6 +1393,8 @@ class CollapseDriver:
             # temporal_error engages pyoomph's adaptive stepping: without an error estimator every
             # converged step is accepted, while a failed Newton solve is rejected and halved
             tol = max(newton_tolerance, s.newton_floor / dt)
+            defer = self._defers_distortion()
+            rebuilds = pb.remesh_count
             try:
                 pb.run(t + dt, timestep=dt, maxstep=dt, outstep=False, temporal_error=1.0,
                        newton_solver_tolerance=tol)
@@ -1331,6 +1402,9 @@ class CollapseDriver:
                 # the problem now holds a rejected iterate: stop on the last measured state ``m``,
                 # but only if oomph-lib gave up below its smallest step
                 stop = None
+                if not defer:  # sub-steps accepted before the failure may have been rebuilt
+                    self._pyoomph_remeshes += pb.remesh_count - rebuilds
+                flagged = self._distortion_flags()
                 # after a cut no Newton failure is an expected end
                 if r is None and type(exc) is RuntimeError and exc.args == ("OomphException",):
                     error = oomph_error_message(pb.oomph_log_tail())
@@ -1339,11 +1413,19 @@ class CollapseDriver:
                 if stop is None:
                     raise
                 stop["dt_attempted"] = dt
+                if defer and flagged:
+                    # sub-steps accepted before the failure asked for a rebuild that the driver
+                    # makes only after the step: the failure came on the mesh they flagged
+                    stop["distortion_flagged_substeps"] = len(flagged)
                 break
             st.step += 1
             dt = self._t() - t
             st.dt_prev = dt
-            m = self.measure()
+            flags = self._distortion_flags()
+            if not defer:  # pyoomph rebuilt inside the solve wherever distortion asked
+                self._pyoomph_remeshes += pb.remesh_count - rebuilds
+            # with a focus, the driver's rebuild, before the step is measured, as pyoomph's was
+            m = self._distortion_remesh(flags) if defer and flags else self.measure()
             self._checks_pending = True  # until the remesh check of this step
             self._track(m)
             self._write_row(m, dt, time.time() - wall0, self._singular(m))
@@ -1403,7 +1485,8 @@ class CollapseDriver:
         self._snapshot(m, "stop")
         out = {"stop": stop, "steps": st.step, "remesh_count": pb.remesh_count,
                "jet_born": st.born, "max_axis_curvature_before_birth": st.max_curvature,
-               "max_axis_curvature_time": st.max_curvature_time, "snapshots": st.snapshots}
+               "max_axis_curvature_time": st.max_curvature_time, "snapshots": st.snapshots,
+               **self.distortion_counts()}
         if self.landing:
             out["landing"] = self._landing_summary()
         if r is not None:

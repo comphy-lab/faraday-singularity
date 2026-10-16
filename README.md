@@ -72,6 +72,13 @@ and test:
   of curvature, the jet-base radius or the narrowest neck, whichever is smallest. The scale may
   grow by at most a fixed factor per step, and each rebuild of the mesh coarsens it near the axis
   by at most a fixed factor.
+- The mesh is also rebuilt when an element becomes too distorted (pyoomph's default criterion: an
+  element shrunk below 0.6 or grown beyond 1.75 times its size when it was built, or with a fifth
+  of its quality then). Before the mesh near the axis is first refined, pyoomph makes that rebuild
+  within the solve. Afterwards the driver makes it, once the step has converged and before the
+  step is measured: the element size near the collapse is set to the smaller of its current target
+  and the measured spacing there, so that the rebuild never coarsens what the mesh resolves, over
+  the region of the current local scale, and the rebuild is recorded.
 
 ## Model
 
@@ -156,7 +163,13 @@ Its run directory also receives:
   before birth when the jet is born at a finite radius);
 - `events.jsonl`: cavities, jet birth, the first neck, crest and trough episodes (a trough carries
   the preceding crest height `h_crest` and `crest_jet`, whether a jet stood on the axis during that
-  crest), remeshes, restarts and the stop;
+  crest), remeshes, restarts and the stop. A remesh that element distortion asked for after the
+  first refinement has `reason` `distortion`, with the criterion that fired (`trigger`, `ratio`),
+  the extreme size and quality ratios, the element size near the collapse before and after
+  (`focus_size_before`, `focus_size`) and the spacing there before and after (`h_near_before`,
+  `h_near_after`); the earlier rebuilds, made by pyoomph within the solve, appear only in
+  `remesh_count`. The `collapse` record of `run_status.json` counts both (`distortion_remeshes`,
+  `pyoomph_remeshes`);
 - `profiles/` (free-surface profiles with velocities) and `states/` (the latest state dumps).
 
 A run ends at its end time, at the step-size floor or step limit, or right before a pinch-off or

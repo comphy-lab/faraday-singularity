@@ -615,6 +615,7 @@ def main() -> int:
     status = {"state": "running", "started": time.time()}
     write_json(args.outdir / "run_status.json", status)
     problem = None
+    driver = None
     cut_error = None
     try:
         extra = {"reconnect": reconnect} if reconnect is not None else {}
@@ -675,6 +676,9 @@ def main() -> int:
         state = "interrupted" if interrupted or not isinstance(exc, Exception) else "failed"
         status.update(state=state, detail=f"{type(exc).__name__}: {exc}", ended=time.time(),
                       remesh_count=getattr(problem, "remesh_count", None))
+        counts = getattr(driver, "distortion_counts", None)
+        if counts is not None:  # the rebuilds element distortion asked for before the failure
+            status.update(counts())
         write_json(args.outdir / "run_status.json", status)
         raise
     finally:

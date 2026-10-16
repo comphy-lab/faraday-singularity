@@ -40,7 +40,8 @@ the cut. Otherwise the driver writes ``collapse.txt`` (with ``tau`` and ``tau_p`
 (both chains, the jets of the three tips, the budgets and the step limits), ``events.jsonl``, the
 profiles of both chains and its dumps. The run ends after ``--steps`` steps, at ``tau_end`` after
 the cut, or at a stop the mesh cannot follow; ``run_status.json`` records how (``steps``: the steps
-after the cut).
+after the cut) and the rebuilds element distortion asked for (``distortion_remeshes``, made by the
+driver after the cut, as in the production runner).
 """
 
 from __future__ import annotations
@@ -161,6 +162,7 @@ def main(argv=None) -> int:
     run_case.write_json(out / "run_status.json", status)
     problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, reconnect=settings)
     problem.set_output_directory(str(out))
+    driver = None
     try:
         with problem:
             problem.initialise()
@@ -184,7 +186,8 @@ def main(argv=None) -> int:
                 result = driver.run(tol)
                 status.update(state="completed", steps=result["steps"] - step0,
                               stop=result["stop"], cut="cut_diagnostics.json",
-                              tau=result["cut"]["tau"], tau_p=result["cut"]["tau_p"])
+                              tau=result["cut"]["tau"], tau_p=result["cut"]["tau_p"],
+                              **driver.distortion_counts())
             except (CutRefused, CutFailed) as exc:
                 # the run ends here; the problem is not restored (a failed remesh can leave it
                 # half rebuilt, and a failing reload would hide this failure): the precut dump
@@ -201,6 +204,8 @@ def main(argv=None) -> int:
         interrupted = isinstance(exc, run_case.Terminated) or not isinstance(exc, Exception)
         status.update(state="interrupted" if interrupted else "failed",
                       detail=f"{type(exc).__name__}: {exc}")
+        if driver is not None:  # the rebuilds element distortion asked for before the failure
+            status.update(driver.distortion_counts())
         status["ended"] = time.time()
         run_case.write_json(out / "run_status.json", status)
         raise
