@@ -17,7 +17,10 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
    refers to the current interface nodes exactly. pyoomph transfers the fields; nodes in the former
    gas thread and on the bridge are not located in the old mesh and get its two-nearest-node blend.
    Any failure clears the plan; the caller restores the ``precut`` state.
-5. **Fill**: keep the blend, or zero the velocity at bulk nodes inside the former gas.
+5. **Fill**: keep the blend, or zero the velocity at bulk nodes inside the former gas. Nodes on the
+   free surface are never zeroed: the fresh caps take the velocity of the nearest point of the old
+   neck surface (pyoomph's transfer projects them onto it), and zeroing them would put a jump in
+   the velocity at the splice.
 6. **History := transferred field** (``assign_initial_values_impulsive``), so that level 1 holds it.
 7. **Project**: find ``u+`` (P2) and the pressure impulse ``Pi`` (P1) with
    ``int (u+ - u~).v - Pi div v = 0`` and ``int q div u+ = 0`` for all admissible ``v`` and all ``q``;
@@ -56,8 +59,8 @@ from pyoomph.expressions import div, evaluate_in_past, testfunction, var, weak
 from pyoomph.generic.codegen import Equations
 
 from .mesh import CutSizing
-from .reconnect import (ReconnectSettings, Chain, chain_volumes, cut_geometry, liquid_axis_spans,
-                        neck_radius, plan_chains, replace_caps)
+from .reconnect import (Chain, ReconnectSettings, chain_volumes, cut_geometry, liquid_axis_spans,
+                        neck_radius, plan_chains, replace_caps, tip_size)
 
 INTERFACE = "liquid/interface"
 FAR_POINT = (1.0e4, -100.0)  # the chart starts at the chain end nearest this: the wall, else the bottom
@@ -68,7 +71,11 @@ class CutRefused(RuntimeError):
 
 
 class CutFailed(RuntimeError):
-    """The cut failed after the problem was changed; restore the ``precut`` state."""
+    """The cut failed after the problem was changed; restore the ``precut`` state (``precut``)."""
+
+    def __init__(self, message: str, precut: str | None = None):
+        super().__init__(message)
+        self.precut = precut
 
 
 class DriverTriggeredReconnection(AxisymmetricReconnection):
@@ -316,6 +323,8 @@ def project(problem, settings: ReconnectSettings, t_cut: float) -> dict:
         out.update(after=after, newton_residuals=residuals, delta_KE=dke,
                    energy_identity_error=identity,
                    delta_Pz=after["momentum_z"] - before["momentum_z"],
+                   # u+ - u~ = -grad Pi with Pi = 0 on the free surfaces: delta P_z ~ int_bottom Pi
+                   Pi_on_bottom=after.get("pressure_bottom", math.nan),
                    Pi_rms_on_surface=math.sqrt(max(after["pressure_sq"], 0.0) / after["area"]),
                    divergence_L2_before=math.sqrt(max(before["divergence_sq"], 0.0)),
                    divergence_L2_after=math.sqrt(max(after["divergence_sq"], 0.0)),
@@ -419,6 +428,7 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         raise CutRefused(f"no plan after {len(attempts)} attempts: {attempts[-1]}")
     record["rmin"] = rmin
 
+    remeshing = False
     try:
         plan, _extra = template._pending_surgery_plans[INTERFACE]
         gas_before = float(sum(plan.fragment_volumes_before))
@@ -436,7 +446,7 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
             [[c.points[0, 1], c.points[-1, 1] + (s.reservoir_depth if c.is_open else 0.0)]
              for c in chains])
         plan.fragment_volumes_after = chain_volumes(chains, s.reservoir_depth)
-        h_tip = max(min(e.radius for e in edits) / s.tip_elements, s.tip_floor * rmin)
+        h_tip = tip_size(min(e.radius for e in edits), rmin, s)
         sizing = CutSizing(h_tip=h_tip, h_bridge=min(h_tip, geom.bridge / s.bridge_elements),
                            curvature=s.curvature_sizing,
                            grading=pb.active_mesh_template().settings.grading)
@@ -445,14 +455,17 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         record["sizing"] = asdict(sizing)
         template.cut_sizing = sizing
         # 4. the remesh, at once
+        remeshing = True
         with captured_stdout() as printed:
             pb.force_remesh({template})
         pb._domains_to_remesh.clear()
     except BaseException as e:
         clear_plan(pb)
         template.cut_sizing = None
-        raise CutFailed(f"the cut remesh failed ({type(e).__name__}: {e}); restore "
-                        f"{record['precut_state']['path']}") from e
+        if not remeshing:  # nothing has changed but the plan, now dropped
+            raise CutRefused(f"the plan could not be built ({type(e).__name__}: {e})") from e
+        raise CutFailed(f"the cut remesh failed ({type(e).__name__}: {e})",
+                        record["precut_state"]["path"]) from e
     record["transfer"] = transfer_warnings("".join(printed))
     record["transfer"]["former_gas_nodes"] = former_gas_nodes(pb, old_open, s.reservoir_depth,
                                                               0.05 * rmin)
@@ -469,7 +482,7 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         tips = [float(c["z"][k]) for c in segs for k in (0, -1)
                 if c["end_types"][0 if k == 0 else 1] == "axis"]
         expected = liquid_axis_spans(tips)
-        record["mesh"] = {"chains": [{"open": c["open"], "nodes": int(len(c["r"])),
+        record["mesh"] = {"chains": [{"open": c["open"], "nodes": len(c["r"]),
                                       "z_ends": [float(c["z"][0]), float(c["z"][-1])]} for c in segs],
                           "axis_spans": spans, "expected_axis_spans": [list(x) for x in expected]}
         if len(spans) != len(expected):
@@ -485,11 +498,12 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
         # 6-8. projection and restart
         record["projection"] = project(pb, s, t_cut)
         orient_interface_chart(pb)
-    except CutFailed:
+    except CutFailed as e:
+        e.precut = record["precut_state"]["path"]
         raise
     except BaseException as e:
-        raise CutFailed(f"after the cut remesh: {type(e).__name__}: {e}; restore "
-                        f"{record['precut_state']['path']}") from e
+        raise CutFailed(f"after the cut remesh: {type(e).__name__}: {e}",
+                        record["precut_state"]["path"]) from e
     record["budgets_after"] = pb.cut_observables()
     volumes = {"liquid_before": record["budgets_before"]["volume"],
                "liquid_after": record["budgets_after"]["volume"],

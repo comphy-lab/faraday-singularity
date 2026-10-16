@@ -33,7 +33,6 @@ import math
 from pathlib import Path
 
 import numpy as np
-
 from pyoomph import Problem
 from pyoomph.equations.ALE import HyperelasticSmoothedMesh
 from pyoomph.equations.generic import (AxisymmetryBC, DirichletBC, IntegralObservables,
@@ -128,6 +127,7 @@ class FaradayProblem(Problem):
                 cap_window_factor=self.reconnect.cap_window_factor)
             surf += self.recon
             surf += IntegralObservables(pressure_sq=p**2)
+            eqs += IntegralObservables(pressure_bottom=p) @ "bottom"
         eqs += surf @ "interface"
 
         self.add_equations(eqs @ "liquid")
@@ -229,14 +229,17 @@ class FaradayProblem(Problem):
         return sorted(out, key=lambda c: float(np.min(c["z"])))
 
     def cut_observables(self) -> dict[str, float]:
-        """The budgets a cut reports: bulk integrals, and on the free surface its area and the
-        integral of the squared pressure (the pressure impulse, right after the projection)."""
+        """The budgets a cut reports: bulk integrals, on the free surface its area and the integral
+        of the squared pressure, and the integral of the pressure over the bottom (the pressure
+        impulse, right after the projection)."""
         bulk = self.get_mesh("liquid")
         surf = self.get_mesh("liquid/interface")
         out = {name: float(bulk.evaluate_observable(name))
                for name in ("volume", "kinetic_energy", "momentum_z", "divergence_sq",
                             "projection_change")}
         out.update({name: float(surf.evaluate_observable(name)) for name in ("area", "pressure_sq")})
+        out["pressure_bottom"] = float(self.get_mesh("liquid/bottom").evaluate_observable(
+            "pressure_bottom"))
         return out
 
     def axial_velocity_at(self, points) -> tuple[list[float], bool]:

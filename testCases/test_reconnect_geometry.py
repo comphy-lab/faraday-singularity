@@ -185,7 +185,7 @@ def synthetic_scan():
 
 def test_planner_classes_on_a_synthetic_neck(synthetic_scan):
     s = rc.ReconnectSettings(delta=1.0)
-    for r_n, (r, z, rn) in synthetic_scan.items():
+    for r, z, rn in synthetic_scan.values():
         assert rc.plan_on_profile(r, z, 0.97 * rn, s)[0] == "none"
         assert rc.plan_on_profile(r, z, 1.0 * rn, s)[0] == "none"
         for f in (1.005, 1.01, 1.02):
@@ -200,7 +200,7 @@ def test_planner_classes_on_a_synthetic_neck(synthetic_scan):
 
 def test_replaced_caps_on_a_synthetic_neck_scale_with_the_cut(synthetic_scan):
     removed, bridges = [], []
-    for r_n, (r, z, rn) in synthetic_scan.items():
+    for r, z, rn in synthetic_scan.values():
         delta = 1.05 * rn
         s = rc.ReconnectSettings(delta=delta)
         outcome, plan = rc.plan_on_profile(r, z, delta, s)
@@ -278,7 +278,7 @@ def _stored(step: int):
 @stored
 def test_neck_radius_is_the_driver_minimum():
     r, z, header = _stored(1076)
-    r_n, z_n, _ = rc.neck_radius(r, z)
+    r_n, _, _ = rc.neck_radius(r, z)
     assert r_n == header["ell"]  # the stop profile: the local scale is the neck
     # a second, nearly equal local minimum sits beside it
     i = np.arange(1, len(r) - 1)

@@ -67,8 +67,8 @@ class ReconnectSettings:
     cap_min_points: int = 16  # control points of each arc, at least
     cap_tangent_fit: float = 2.0  # the tangent at the splice is fitted over this many r_s of arc
     min_cap_angle: float = 30.0  # smallest interior angle (deg) of a cap polyline
-    tip_elements: float = 8.0  # element size at the fresh tips: arc radius / tip_elements
-    tip_floor: float = 1.0 / 64.0  # but not below tip_floor * delta
+    tip_elements: float = 8.0  # element size at the fresh tips: arc radius / tip_elements,
+    tip_floor: float = 1.0 / 64.0  # at most delta/4 and not below tip_floor * delta
     bridge_elements: float = 8.0  # at least this many elements along the bridge of liquid
     curvature_sizing: int = 20  # gmsh MeshSizeFromCurvature after the cut (0: off)
     fill: str = "blend"  # liquid velocity in the former gas: pyoomph's nearest-node blend, or zero
@@ -314,6 +314,13 @@ class CapEdit:
     splice_angle: float  # interior angle at the splice, degrees (180: tangent)
 
 
+def tip_size(radius: float, delta: float, settings: ReconnectSettings) -> float:
+    """Element size at a fresh tip: ``radius/tip_elements`` but at most ``delta/4`` (a cap needs a
+    size floor at or below a quarter of the cut radius for gmsh to follow its curvature without
+    inverting curved elements), and at least ``tip_floor * delta``."""
+    return max(min(radius / settings.tip_elements, 0.25 * delta), settings.tip_floor * delta)
+
+
 def fresh_tip_run(origin: np.ndarray, end: int) -> int:
     """Number of planner points (``origin < 0``) at one end of a chain."""
     o = np.asarray(origin)
@@ -438,7 +445,7 @@ def replace_caps(new_chains, delta: float, settings: ReconnectSettings) -> list[
             n_pts = s.cap_min_points
             arc, R, z_tip = tangent_arc(P[k], t, n_pts)
             arc_len = R * abs(0.5 * math.pi - math.radians(beta))
-            h_tip = max(R / s.tip_elements, s.tip_floor * delta)
+            h_tip = tip_size(R, delta, s)
             n_pts = max(n_pts, int(math.ceil(arc_len / h_tip)),
                         int(math.ceil(abs(z_tip_old - z_splice) / (5.0 * median_dz))))
             arc, R, z_tip = tangent_arc(P[k], t, n_pts)
