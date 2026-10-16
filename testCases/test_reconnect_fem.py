@@ -9,15 +9,22 @@
   steps, a restart from the ``postcut`` state, a quality remesh of the two chains after the cut and
   a step after it, the remesh after a restart in a new process, the zero fill on every node of the
   former gas, and the zero fill with an impulsive restart;
+* the collapse driver after a cut of that cavity, whose rebuilds of the mesh take effect and stop
+  although the tips keep the cut's sizing;
 * the refusal and the failure of a cut, which leave their partial record in
   ``cut_diagnostics.json``;
 * the prototype entry point on a landing state of that cavity, with the lineage of its parent run,
   the pinch time fitted to the neck samples of the landing state, and a failing cut;
+* the production runner: the cut at the start of a restart from a landing state of a case with the
+  default dump cadence, continuations from its first rotating dump, its ``postcut`` dump and the
+  state it ended on at ``tau_end`` (under a later ``tau_end``), and failures of the cut at several
+  stages, each recorded under ``cut`` in ``run_status.json``;
 * the ordinary path: meshes as with the mesh class of commit 9e0d8a1 (to the byte), steps
-  (to round-off), dumps that load across the two kinds of problem, and a short run of the collapse
-  driver against that of 9e0d8a1, every output compared (to round-off, dump keys exactly).
+  (to round-off), dumps that load across the two kinds of problem, a short run of the collapse
+  driver against that of 9e0d8a1, every output compared (to round-off, dump keys exactly), and the
+  same run with and without its dumps (to the byte).
 
-Each problem compiles in seconds; the module takes about a minute.
+Each problem compiles in seconds; the module takes a little over three minutes.
 """
 
 from __future__ import annotations
@@ -637,6 +644,35 @@ def test_zero_fill_zeroes_every_node_of_the_former_gas(neck_cut):
     assert c["max_speed"] == 0.0
 
 
+def test_after_a_cut_the_driver_rebuilds_the_mesh_only_when_a_coarsening_takes_effect(tmp_path):
+    """Every mesh after the cut keeps the cut's sizing at the tips, here h_tip = delta/32. Read at
+    the open chain's tip, the spacing near the collapse stayed at about 1.17 h_tip whatever focus
+    the driver set, and the driver rebuilt the whole mesh at each of 6 steps to coarsen it, without
+    effect. Read where the focus sets it, the coarsening takes effect and then stops."""
+    from faraday_singularity.reconnect import CUT_SIZING_MARGIN
+
+    s = ReconnectSettings(delta=1.05 * R_N, dt0=1e-5, tip_size=1 / 32)
+    settings = CollapseSettings(t_end=10.0, dt_max=0.01, max_steps=6)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        impose_closing_flow(pb)
+        driver = CollapseDriver(pb, settings, tmp_path, reconnect=s)
+        rec = surgery.cut(pb, s, tmp_path, driver=driver, log=lambda *_: None)
+        result = driver.run(1e-8)
+        driver.close()
+    events = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    remesh = [e for e in events if e["event"] == "remesh"]
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 6
+    assert 1 <= len(remesh) <= 2 and result["remesh_count"] == 1 + len(remesh)  # the cut's own
+    assert not [e for e in events if e["event"] == "remesh-ineffective"]
+    for e in remesh:  # coarsenings that coarsened
+        assert e["focus_size"] > e["h_near_before"] and e["h_near_after"] > e["h_near_before"] / 0.9
+    table = _columns(tmp_path / "collapse.txt")
+    h_tip = rec["sizing"]["h_tip"]
+    assert np.all(table["h_near"] > CUT_SIZING_MARGIN * h_tip)  # read away from the tips
+    assert table["h_near"][-1] >= settings.coarsen_ratio * table["h_focus"][-1]
+
+
 @pytest.mark.parametrize("ratio", [1.2, 2.0])
 def test_cut_is_refused_far_above_the_neck(tmp_path, ratio):
     s = ReconnectSettings(delta=ratio * R_N)
@@ -743,12 +779,13 @@ def landing_run(tmp_path_factory):
         state = driver.keep_state(landing / "states" / f"landing_{delta:.6g}.dump", landing=info,
                                   pinch=driver.pinch_time())
         driver.close()
-    # every step after the cut is dumped (state_dt), so that a restart can start from any of them
+    # the default state_dt (0.1), as in a production landing case: far beyond the run after the cut,
+    # whose dumps follow from the doubling of tau after the cut and the end of the run
     parent_case = {"schema": "pyoomph-case-v1", "case_id": "neck-landing",
                    "geometry": {"kind": "axisymmetric"}, "physics": PHYSICS, "mesh": MESH,
                    "tolerances": {"newton": 1e-8},
                    "time_stepping": {"scheme": "BDF2", "steps_per_forcing_period": 100},
-                   "collapse": {"keep_stop_state": True, "state_dt": 1e-6, "state_keep": 10},
+                   "collapse": {"keep_stop_state": True, "state_keep": 10},
                    "output": {"cadence": 0.25, "cadence_unit": "forcing periods",
                               "write_states": False},
                    "completion": {"kind": "event", "t_max": 10, "unit": "forcing periods"}}
@@ -931,7 +968,9 @@ def _runner_manifest_problems(m: dict) -> list[str]:
 @pytest.fixture(scope="module")
 def production_cut(landing_run, tmp_path_factory):
     """The production runner cuts the landing state at its start (the case of the landing run with
-    a reconnect block), then continues from a dump written after the cut."""
+    a reconnect block), then continues from dumps written after the cut: the first rotating one,
+    the ``postcut`` dump, and the dump of the state it ended on at ``tau_end``, under a case that
+    raises ``tau_end`` and dumps every step (and, refused before any output, under its own)."""
     root = tmp_path_factory.mktemp("production")
     cut_run = root / "cut" / "runtime"
     res = {"cut": cut_run, "proc_cut": _run_faraday(landing_run["cut_case"], "--restart-from",
@@ -943,11 +982,29 @@ def production_cut(landing_run, tmp_path_factory):
         res["cut_commit"] = m["component_commit"]
         m["component_commit"] = m["component_commit"].removesuffix("-dirty")
         path.write_text(json.dumps(m))
+        status = json.loads((cut_run / "run_status.json").read_text())
         dumps = sorted((cut_run / "states").glob("state_*.dump"))
         res["from"] = dumps[0]
         res["post"] = root / "post" / "runtime"
         res["proc_post"] = _run_faraday(landing_run["cut_case"], "--restart-from", dumps[0],
                                         "--out", res["post"])
+        res["postcut"] = Path(status["cut"]["postcut"])
+        res["from_postcut"] = root / "from-postcut" / "runtime"
+        res["proc_from_postcut"] = _run_faraday(landing_run["cut_case"], "--restart-from",
+                                                res["postcut"], "--out", res["from_postcut"])
+        res["end"] = Path(status["collapse"]["stop"]["end_state"])
+        later = json.loads(landing_run["cut_case"].read_text())
+        later["case_id"] = "neck-cut-later"
+        later["collapse"]["reconnect"]["tau_end"] = 6e-5
+        later["collapse"]["state_dt"] = 1e-6
+        res["later_case"] = root / "later-case.json"
+        res["later_case"].write_text(json.dumps(later))
+        res["later"] = root / "later" / "runtime"
+        res["proc_later"] = _run_faraday(res["later_case"], "--restart-from", res["end"], "--out",
+                                         res["later"])
+        res["same"] = root / "same" / "runtime"
+        res["proc_same"] = _run_faraday(landing_run["cut_case"], "--restart-from", res["end"],
+                                        "--out", res["same"], "--check")
     return res
 
 
@@ -998,13 +1055,18 @@ def test_production_runner_cuts_a_landing_state_at_its_start(production_cut, lan
     bubbles = sorted((run / "profiles").glob("profile_*_bubble.txt"))
     assert bubbles and all(json.loads(b.read_text().splitlines()[0][2:])["chain"] == "bubble"
                            for b in bubbles)
+    # the landing case's state_dt (0.1) exceeds the run after the cut: its dumps are the first
+    # step, the next at twice its tau, and the state it ended on at tau_end
     dumps = sorted((run / "states").glob("state_*.json"))
-    assert len(dumps) == 3
+    step0 = json.loads(landing_run["state"].with_suffix(".json").read_text())["step"]
+    assert [json.loads(d.read_text())["step"] - step0 for d in dumps] == [1, 2, 3]
+    assert status["collapse"]["stop"]["end_state"] == str(dumps[-1].with_suffix(".dump"))
     for d in dumps:
         meta = json.loads(d.read_text())
         assert meta["cut"]["t_cut"] == rec["t_cut"] and meta["tau"] == pytest.approx(
             meta["time"] - rec["t_cut"], abs=1e-15)
         assert "landed" not in meta and "resume_at" not in meta
+        assert meta["coarsen_blocked_until"] == -10**9
 
 
 def test_production_runner_continues_a_post_cut_dump(production_cut, landing_run):
@@ -1035,6 +1097,112 @@ def test_production_runner_continues_a_post_cut_dump(production_cut, landing_run
     meta = json.loads(max((run / "states").glob("state_*.json")).read_text())
     assert meta["cut"]["sizing"] == json.loads(
         (cut_run / "cut_diagnostics.json").read_text())["sizing"]
+
+
+def test_production_runner_continues_from_the_postcut_dump(production_cut):
+    """The postcut dump, the one dump after the cut that a run of a production case had: a
+    continuation from it makes the steps of the cut run, to round-off."""
+    proc = production_cut["proc_from_postcut"]
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    run, cut_run = production_cut["from_postcut"], production_cut["cut"]
+    status = json.loads((run / "run_status.json").read_text())
+    assert status["state"] == "completed" and status["collapse"]["stop"]["reason"] == "tau-end"
+    manifest = json.loads((run / "run-manifest.json").read_text())
+    assert manifest["restart_mode"] == "post-cut"
+    assert manifest["restart_from"]["path"] == str(production_cut["postcut"].resolve())
+    a, b = _columns(cut_run / "chains.txt"), _columns(run / "chains.txt")
+    assert b["tau"][0] == 0.0 and np.array_equal(a["step"], b["step"])
+    for name in b:
+        first = 1 if name == "dt" else 0  # the restart's first row records no step
+        assert np.allclose(b[name][first:], a[name][first:], rtol=1e-8, atol=1e-13,
+                           equal_nan=True), name
+
+
+def test_production_runner_continues_a_run_that_ended_at_tau_end_under_a_later_tau_end(
+        production_cut):
+    """The state a cut run ended on at tau_end is dumped; under the cut's case a continuation from
+    it is refused before any output (it would stop at once), and under a case derived from it that
+    raises tau_end, and dumps every step, it goes on to the new tau_end. The cut's record keeps its
+    own settings."""
+    same = production_cut["proc_same"]
+    assert same.returncode != 0 and "raise tau_end" in same.stderr
+    assert not production_cut["same"].exists()
+    proc = production_cut["proc_later"]
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    run = production_cut["later"]
+    status = json.loads((run / "run_status.json").read_text())
+    assert status["state"] == "completed" and status["collapse"]["stop"]["reason"] == "tau-end"
+    assert status["collapse"]["cut"]["tau"] == pytest.approx(6e-5)
+    assert status["collapse"]["cut"]["tau_end"] == 6e-5
+    manifest = json.loads((run / "run-manifest.json").read_text())
+    assert manifest["restart_mode"] == "post-cut" and manifest["reconnect"]["tau_end"] == 6e-5
+    assert manifest["restart_from"]["path"] == str(production_cut["end"].resolve())
+    assert manifest["restart_from"]["parent_record"]["derived_keys"] == [
+        "case_id", "collapse.reconnect.tau_end", "collapse.state_dt"]
+    chains = _columns(run / "chains.txt")
+    assert chains["tau"][0] == pytest.approx(3e-5) and len(chains["tau"]) >= 3
+    assert np.all(np.diff(chains["tau"]) > 0) and np.all(chains["bridge"] > 0)
+    dumps = [json.loads(d.read_text()) for d in sorted((run / "states").glob("state_*.json"))]
+    assert [d["step"] for d in dumps] == list(chains["step"][1:].astype(int))  # every step
+    assert all(d["cut"]["settings"]["tau_end"] == 3e-5 for d in dumps)
+
+
+FAILING_AT = """
+import runpy, sys
+sys.path.insert(0, sys.argv[1] + "/src")
+from faraday_singularity import driver, surgery
+from faraday_singularity.selfcontact import InterfaceSelfIntersection
+
+def crossed(self, record):  # the fresh open chain crosses itself in the driver's measurement
+    raise InterfaceSelfIntersection("the free surface crosses itself")
+
+def planner_bug(self, problem, rmin):
+    raise ValueError("a planner bug")
+
+where = sys.argv[2]
+if where == "postcut":
+    driver.CollapseDriver.reset_after_cut = crossed
+elif where == "plan":
+    surgery.DriverTriggeredReconnection.request_pinch = planner_bug
+else:  # every attempt deferred: the cut itself refuses
+    surgery.DriverTriggeredReconnection.request_pinch = lambda self, problem, rmin: "deferral"
+sys.argv = [sys.argv[1] + "/simulationCases/run_faraday.py"] + sys.argv[3:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+@pytest.mark.parametrize("where, outcome, failed_at, cause", [
+    ("postcut", "failed", "postcut", "InterfaceSelfIntersection"),
+    ("plan", "refused", "plan", "ValueError"),
+    ("deferral", "refused", "plan", None)])
+def test_production_runner_records_every_failure_of_a_cut_under_cut(landing_run, tmp_path, where,
+                                                                    outcome, failed_at, cause):
+    """A failure in the bookkeeping after the cut, an unexpected error in the plan and a refusal of
+    every plan attempt all end the run as failed with the cut's record under ``cut`` in
+    ``run_status.json``, the stage reached and the precut dump named; an unexpected error is the
+    cause, with its traceback in ``cut_diagnostics.json``."""
+    out = tmp_path / "runtime"
+    proc = _run_faraday(where, landing_run["cut_case"], "--restart-from", landing_run["state"],
+                        "--out", out, script=FAILING_AT)
+    assert proc.returncode == 1, proc.stdout[-3000:] + proc.stderr[-3000:]
+    status = json.loads((out / "run_status.json").read_text())
+    assert status["state"] == "failed" and "collapse" not in status
+    assert status["cut"]["outcome"] == outcome and status["cut"]["failed_at"] == failed_at
+    precut = Path(status["cut"]["precut"])
+    assert precut.is_file() and precut.parent == out / "states"
+    rec = json.loads((out / "cut_diagnostics.json").read_text())
+    assert rec["outcome"] == outcome and rec["failed_at"] == failed_at
+    assert rec["precut_state"]["path"] == str(precut)
+    if cause is None:
+        assert "traceback" not in rec
+        assert {a["outcome"] for a in rec["plan_attempts"]} == {"deferral"}
+    else:
+        assert cause in status["detail"] and cause in rec["error"]
+        assert any(cause in line for line in rec["traceback"])
+    # the precut dump records the neck it was cut at: a landing state for a new cut
+    meta = json.loads(precut.with_suffix(".json").read_text())
+    assert meta["cut_stage"] == "precut" and meta["neck"]["r_neck"] == pytest.approx(
+        landing_run["r_neck"], rel=1e-12)
 
 
 FAILING_CUT_RUN = """
@@ -1102,9 +1270,10 @@ physics = json.loads(sys.argv[3])
 nd = nondimensionalise(CaseParameters.from_dict(physics))
 mesh = MeshSettings(h_interface=0.05, h_axis=0.05, h_max=0.4, grading=0.3, interface_points=201)
 # a refine ratio below one rebuilds the focus every few steps, so that the run goes through the
-# driver's remesh path too; every step is dumped
+# driver's remesh path too; every step is dumped, unless the fourth argument sets another state_dt
+state_dt = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
 settings = CollapseSettings(t_end=1.0, dt_max=0.02, max_steps=6, refine_ratio=0.5,
-                            remesh_backoff=2, state_dt=0.0, state_keep=3, snapshot_dt=0.03)
+                            remesh_backoff=2, state_dt=state_dt, state_keep=3, snapshot_dt=0.03)
 pb = FaradayProblem(nd, mesh=mesh)
 pb.set_output_directory(str(out))
 with pb:
@@ -1191,6 +1360,41 @@ def test_the_ordinary_driver_runs_as_at_9e0d8a1(tmp_path):
     for name in sorted(n for n in names if n.startswith("profiles/") or n == "diagnostics.txt"):
         assert (a / name).read_text().splitlines()[0] == (b / name).read_text().splitlines()[0]
         assert np.allclose(np.loadtxt(a / name), np.loadtxt(b / name), rtol=1e-10, atol=1e-13), name
+
+
+def test_dumps_do_not_change_the_trajectory(tmp_path):
+    """A rotating dump writes the state and does not change it: the short run of the driver above
+    with a dump at every step and with one at its first step only, each in a fresh process with MKL
+    on one thread, gives the same rows (but the wall time), events, profiles and diagnostics, to
+    the byte. This is why a derived case may change the cadence and number of dumps
+    (``collapse.state_dt``, ``collapse.state_keep``; ``run_case.DERIVED_KEYS``)."""
+    physics = dict(PHYSICS, forcing={"Gamma": 0.3, "detuning": 1.0, "phase": 0.0},
+                   initial={"amplitude": 0.2}, container={"mode": 1, "depth": 2.0})
+    env = dict(os.environ, MKL_NUM_THREADS="1", OMP_NUM_THREADS="1")
+    runs = {}
+    for name, state_dt in (("every", "0.0"), ("first", "10.0")):
+        out = tmp_path / name
+        proc = subprocess.run([sys.executable, "-c", DRIVER_RUN, str(ROOT / "src"), str(out),
+                               json.dumps(physics), state_dt], capture_output=True, text=True,
+                              timeout=900, cwd=tmp_path, env=env, check=False)
+        assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+        runs[name] = out
+    a, b = runs["every"], runs["first"]
+    assert len(list((a / "states").glob("state_*.dump"))) == 3  # the last state_keep of six
+    assert [p.name for p in (b / "states").glob("state_*.dump")] == ["state_00000001.dump"]
+    result = json.loads((a / "result.json").read_text())
+    assert result == json.loads((b / "result.json").read_text()) and result["remesh_count"] >= 2
+    head_a, rows_a = _table(a / "collapse.txt")
+    head_b, rows_b = _table(b / "collapse.txt")
+    wall = head_a[2:].split("\t").index("wall")
+    keep = [k for k in range(rows_a.shape[1]) if k != wall]
+    assert head_a == head_b
+    assert np.array_equal(rows_a[:, keep], rows_b[:, keep], equal_nan=True)
+    assert (a / "events.jsonl").read_text() == (b / "events.jsonl").read_text()
+    names = sorted(f.relative_to(a).as_posix() for f in (a / "profiles").glob("*.txt"))
+    assert names == sorted(f.relative_to(b).as_posix() for f in (b / "profiles").glob("*.txt"))
+    for name in names + ["diagnostics.txt"]:
+        assert (a / name).read_text() == (b / name).read_text(), name
 
 
 def test_ordinary_meshes_steps_and_dumps_are_unchanged(tmp_path):

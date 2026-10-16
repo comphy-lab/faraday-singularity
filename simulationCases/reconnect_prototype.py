@@ -188,7 +188,7 @@ def main(argv=None) -> int:
                 status.update(state="refused" if isinstance(exc, CutRefused) else "failed",
                               detail=str(exc), cut_diagnostics="cut_diagnostics.json",
                               failed_at=(exc.record or {}).get("failed_at"))
-                if isinstance(exc, CutFailed):
+                if exc.precut is not None:  # every failure, and refusals from the plan on
                     status["precut"] = exc.precut
             finally:
                 driver.close()

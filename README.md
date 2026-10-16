@@ -208,17 +208,26 @@ python simulationCases/run_faraday.py <landing-case>.json \
 python simulationCases/run_faraday.py <cut-case-delta>.json \
     --restart-from <landing-attempt>/runtime/states/landing_<delta>.dump --out <cut-attempt>/runtime
 
-# 3. to go on after the cut run has ended (or was stopped): any dump it wrote after the cut,
-#    under the same case (or one derived from it in case_id, completion.value or neck_stop)
+# 3. to go on after the cut run has ended (or was stopped): any dump it wrote after the cut, the
+#    one it ended on included, under the same case or one derived from it in the keys a restart
+#    may change (run_case.DERIVED_KEYS), a later collapse.reconnect.tau_end among them
 python simulationCases/run_faraday.py <cut-case-delta>.json \
     --restart-from <cut-attempt>/runtime/states/state_<step>.dump --out <continuation>/runtime
 ```
 
 `--check` validates any of these without writing output. The cut case is the landing case with,
 in its `collapse` block, for example `"reconnect": {"delta": 0.001, "tau_end": 4e-5}` (the
-settings of `src/faraday_singularity/reconnect.py`, `ReconnectSettings`); its other keys must be the
-landing run's (`run_case.CUT_DERIVED_KEYS`), and its `landing` and `keep_stop_state`, inherited
-from the landing case, are inactive after the cut (`inactive_after_cut` in `parameters.json`).
+settings of `src/faraday_singularity/reconnect.py`, `ReconnectSettings`) and a dump cadence for the
+run after the cut, for example `"state_dt": 1e-5`, since the landing run's (0.1 by default) is
+sized for the collapse before it; its other keys must be the landing run's
+(`run_case.CUT_DERIVED_KEYS`), and its `landing` and `keep_stop_state`, inherited from the landing
+case, are inactive after the cut (`inactive_after_cut` in `parameters.json`). The run after a cut
+also dumps its state at least each time the time after the cut doubles, and dumps the state it ends
+on, whatever the stop. A run that ended at `tau_end` goes on from that dump under a case that raises
+`tau_end` (or removes it): `tau_end` is the one reconnect setting a continuation may change, and a
+continuation under the `tau_end` it ended at is refused before any output. The `precut_<delta>`
+dump of a cut run is the landing state it cut: a restart from it under a case with a reconnect
+block cuts again (`restart_mode` `cut`), never continues it before a cut.
 
 **Landing states.** With `collapse.landing`, a list of cut radii `delta`, a run keeps for each the
 first state whose neck radius `r_n` has fallen to `delta/1.05`, as `states/landing_<delta>.dump`, so
@@ -229,8 +238,10 @@ h_floor)`) is refused before any output, and a radius left without a landing sta
 `landing-missed` with its reason. A landing state holds the latest samples of the closing neck and
 the pinch time `t_p` fitted to them (a power law with a free exponent; `pinch`, with its window),
 and a restart from one makes the remesh check of its step before stepping, as the run that wrote it
-did. A restart may change only these keys and `collapse.neck_stop` (`run_case.DERIVED_KEYS`); a
-`collapse.reconnect` block that differs from the parent's makes the restart a cut, since the block
+did. A restart may change only these keys, `collapse.neck_stop`, the cadence and number of
+rotating dumps (`collapse.state_dt`, `collapse.state_keep`; a dump writes the state and does not
+change it) and `collapse.reconnect.tau_end` (`run_case.DERIVED_KEYS`); a `collapse.reconnect`
+block that differs from the parent's in any other key makes the restart a cut, since the block
 compiles the reconnection terms into the problem and changes its trajectory at round-off.
 
 **The cut** (`src/faraday_singularity/surgery.py`) is made at the start of the cut run, from the
@@ -254,9 +265,10 @@ limit of zero gas density. The run writes `cut_diagnostics.json` (the planner at
 caps, the volumes, the kinetic energy and axial momentum before and after the transfer and the
 projection, also within 20 cut radii of the neck, the nodes the transfer could not locate in the
 old mesh, the landing and cut foci, and the pinch time with its fit window) and keeps the
-`precut_<delta>` and `postcut_<delta>` states. A refused or failed cut ends the run as `failed`,
-with its partial record and the stage it reached in `cut_diagnostics.json` and under `cut` in
-`run_status.json`. The liquid volume the cut adds is recorded both over the whole mesh, which
+`precut_<delta>` and `postcut_<delta>` states. A refused or failed cut, whatever failed in it,
+ends the run as `failed`, with its partial record and the stage it reached in
+`cut_diagnostics.json` and under `cut` in `run_status.json`, which names the `precut` dump once it
+was written. The liquid volume the cut adds is recorded both over the whole mesh, which
 includes the drift of rebuilding the whole free surface, and within a box around the cut, which is
 compared with the plan.
 
@@ -266,7 +278,10 @@ topology: the bridge closing, the chains approaching each other, the bubble's tw
 new neck narrower than `delta` on either chain, a closing fold on the bubble, the bubble draining
 away, or `tau_end` after the cut. The step also follows every node of both chains (a Courant limit
 `courant h/|u|` over each node's element length), the capillary time of the sharpest of the three
-tips on the axis and the cut's `dt_growth`. After a cut, no Newton failure ends a run cleanly.
+tips on the axis and the cut's `dt_growth`. The mesh keeps the cut's sizing at the tips and along
+the bridge, so the focus near the collapse is set from the spacing away from them, and a rebuild
+that cannot coarsen the mesh waits before the next, as one that cannot refine it does. After a cut,
+no Newton failure ends a run cleanly.
 Every output after the cut carries the time after the cut `tau = t - t_cut` and after the pinch
 `tau_p = t - t_p`: the columns `tau` and `tau_p` of `collapse.txt`, `chains.txt` (both chains per
 step: the three tips with their speeds and radii of curvature, the bridge, the bubble, the necks,

@@ -45,7 +45,9 @@ This module holds what needs no finite-element problem:
   records of both chains after it and steps by (:func:`post_cut_record`: the three tips on the axis
   with their radii of curvature, the bridge, the bubble and the necks of both chains;
   :func:`courant_limit`: the time in which the fastest node of either chain, relative to its element
-  length, crosses an element).
+  length, crosses an element), the size the cut's mesh sizing asks for along a chain
+  (:func:`cut_size_field`, where the driver does not read the spacing of its focus), and which
+  settings a continuation after the cut may change (``CONTINUATION_KEYS``: ``tau_end``).
 
 Units are those of the solver: length ``1/k``. The neck radius ``r_n`` is the narrowest interior
 local minimum of ``r`` along the free surface, as the collapse driver measures it
@@ -62,6 +64,7 @@ the settings refuse a window ``[min_landing_ratio, max_landing_ratio]`` that doe
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Sequence
@@ -78,6 +81,12 @@ BUBBLE_MODELS = ("constant-pressure",)
 CAPS = ("arc",)
 LANDING_RATIO = 1.05  # a landing state for cut radius delta: the first with delta / r_n >= this
 MAX_LANDING_RATIO = 1.1  # and a cut is refused above this delta / r_n (the default of the settings)
+# Keys of the settings that decide only where a run after the cut ends: a continuation of a state
+# written after the cut may change them; every other key must be the cut's (continues_cut).
+CONTINUATION_KEYS = ("tau_end",)
+# After a cut the collapse driver reads the spacing near the collapse only where the cut's sizing
+# asks for at least this many focus sizes (cut_size_field; driver.CollapseDriver.measure).
+CUT_SIZING_MARGIN = 1.5
 
 
 @dataclass(frozen=True)
@@ -202,6 +211,24 @@ class ReconnectSettings:
         if not math.isfinite(out["tau_end"]):
             out["tau_end"] = None
         return out
+
+    def continues_cut(self, recorded) -> bool:
+        """Whether a run with these settings may continue a state written after a cut made with
+        the ``recorded`` settings (the ``settings`` of its cut record, as JSON): equal in every key
+        but those of ``CONTINUATION_KEYS``, which decide only where the run after the cut ends."""
+        if not isinstance(recorded, dict):
+            return False
+
+        def cut_keys(d):
+            return {k: v for k, v in d.items() if k not in CONTINUATION_KEYS}
+
+        return cut_keys(json.loads(json.dumps(self.to_dict()))) == cut_keys(recorded)
+
+
+def tau_end_reached(tau: float, tau_end: float) -> bool:
+    """Whether the time after the cut ``tau`` has reached ``tau_end``, to round-off: where the
+    collapse driver stops a run after a cut (``tau-end``), and where no continuation goes on."""
+    return tau >= tau_end - max(1e-14, 8 * math.ulp(tau_end))
 
 
 def split_collapse_block(block: dict) -> tuple[dict, dict | None, bool, tuple[float, ...]]:
@@ -742,6 +769,28 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     if vb < settings.bubble_stop * cut.bubble_volume:
         return {"reason": "bubble-vanishing", "bubble_volume": vb}
     return None
+
+
+def cut_size_field(r, z, axis_tips: Sequence[float], sizing: dict) -> np.ndarray:
+    """The element size the mesh sizing of a cut asks for at the points ``(r, z)``.
+
+    ``sizing`` is the cut's ``mesh.CutSizing`` as its record holds it (``h_tip``, ``h_bridge``,
+    ``grading``) and ``axis_tips`` the heights of the interface ends on the axis. As the mesh
+    template builds every mesh after the cut (``mesh.FaradayCylinderMesh``): the finer of ``h_tip +
+    grading d_tip``, with ``d_tip`` the distance to the nearest end on the axis, and ``h_bridge +
+    grading d_bridge``, with ``d_bridge`` the distance to the bridge, the liquid spans of the axis
+    between the ends (:func:`liquid_axis_spans`). The template's cap at ``h_max`` and its sizing
+    from curvature are left out: this is where the cut's attractors make the mesh finer than a
+    focus."""
+    r, z = np.asarray(r, dtype=float), np.asarray(z, dtype=float)
+    tips = sorted(float(x) for x in axis_tips)
+    g = float(sizing["grading"])
+    d_tip = np.min(np.hypot(r[:, None], z[:, None] - np.asarray(tips)[None, :]), axis=1)
+    h = float(sizing["h_tip"]) + g * d_tip
+    for a, b in liquid_axis_spans(tips)[1:]:
+        dz = np.maximum(0.0, np.maximum(a - z, z - b))
+        h = np.minimum(h, float(sizing["h_bridge"]) + g * np.hypot(r, dz))
+    return h
 
 
 def tip_radius(r, z, nodes: int = 6) -> float:

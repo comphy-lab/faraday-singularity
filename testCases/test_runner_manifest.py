@@ -289,12 +289,158 @@ def test_restart_admission_continues_a_post_cut_state_under_the_case_of_its_cut(
     record, mode = run_case.restart_admission(state, child, child_path, RECON)
     assert mode == run_case.POST_CUT and record["parent_record"]["derived_keys"] == [
         "case_id", "collapse.neck_stop"]
+    # a later or no tau_end: where the run after the cut ends, which a continuation may change
+    for tau_end in (2e-4, None):
+        later = ReconnectSettings.from_dict(dict(RECON.to_dict(), tau_end=tau_end))
+        child["collapse"]["reconnect"] = later.to_dict()
+        child_path.write_text(json.dumps(child))
+        record, mode = run_case.restart_admission(state, child, child_path, later)
+        assert mode == run_case.POST_CUT and record["parent_record"]["derived_keys"] == [
+            "case_id", "collapse.neck_stop", "collapse.reconnect.tau_end"]
     # other cut settings than those the cut recorded
-    other = ReconnectSettings(delta=RECON.delta, tau_end=2e-4)
+    other = ReconnectSettings(delta=RECON.delta, tau_end=RECON.tau_end, dt0=2e-9)
     child["collapse"]["reconnect"] = other.to_dict()
     child_path.write_text(json.dumps(child))
     with pytest.raises(SystemExit, match="differs from the settings of the cut"):
         run_case.restart_admission(state, child, child_path, other)
+
+
+def test_a_run_that_ended_at_tau_end_continues_under_a_later_tau_end(tmp_path):
+    """A dump at ``tau_end`` after its cut (the end state of a run that stopped there): under the
+    cut's own case it is refused before any output, since the run would stop at once; under a case
+    derived from it with a later ``tau_end`` it is a post-cut continuation."""
+    cut_case = json.loads(json.dumps(CASE))
+    cut_case["collapse"]["reconnect"] = RECON.to_dict()
+    state, _ = _parent_run(tmp_path, case=cut_case)
+    t_cut = 0.5 - RECON.tau_end
+    _write_meta(state, cut={"delta": RECON.delta, "t_cut": t_cut, "settings": RECON.to_dict()})
+    path = tmp_path / "parent-case.json"
+    with pytest.raises(SystemExit, match="raise tau_end"):
+        run_case.restart_admission(state, cut_case, path, RECON)
+    out = tmp_path / "out"
+    proc = subprocess.run([sys.executable, str(ROOT / "simulationCases/run_faraday.py"), str(path),
+                           "--out", str(out), "--restart-from", str(state), "--check"],
+                          capture_output=True, text=True, timeout=120, check=False)
+    assert proc.returncode != 0 and "raise tau_end" in proc.stderr and not out.exists()
+    later = ReconnectSettings.from_dict(dict(RECON.to_dict(), tau_end=3 * RECON.tau_end))
+    child = json.loads(json.dumps(cut_case))
+    child["case_id"] = "sigterm-later"
+    child["collapse"]["reconnect"] = later.to_dict()
+    child_path = tmp_path / "later.json"
+    child_path.write_text(json.dumps(child))
+    record, mode = run_case.restart_admission(state, child, child_path, later)
+    assert mode == run_case.POST_CUT
+    assert record["parent_record"]["derived_keys"] == ["case_id", "collapse.reconnect.tau_end"]
+    proc = subprocess.run([sys.executable, str(ROOT / "simulationCases/run_faraday.py"),
+                           str(child_path), "--out", str(out), "--restart-from", str(state),
+                           "--check"], capture_output=True, text=True, timeout=120, check=False)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert json.loads(proc.stdout.strip().splitlines()[-1])["restart_mode"] == "post-cut"
+    # before the end it continues under the cut's own case too
+    _write_meta(state, cut={"delta": RECON.delta, "t_cut": 0.5 - 0.5 * RECON.tau_end,
+                            "settings": RECON.to_dict()})
+    assert run_case.restart_admission(state, cut_case, path, RECON)[1] == run_case.POST_CUT
+
+
+def test_a_derived_case_may_change_the_dump_cadence(tmp_path):
+    """The cadence and number of rotating dumps decide what a run keeps, as the kept states do: a
+    landing, cut or continuation case may set them (a landing run's state_dt, sized for the collapse
+    before the cut, can exceed the whole run after it)."""
+    state, _ = _parent_run(tmp_path)
+    child, path = _child_case(tmp_path, state_dt=1e-6, state_keep=50)
+    lineage = run_case.restart_record(state, child, path)
+    assert lineage["parent_record"]["derived_keys"] == [
+        "case_id", "collapse.state_dt", "collapse.state_keep"]
+    _write_meta(state, landing={"delta": 1.05e-3, "r_neck": 1e-3})
+    cut, cut_path = _child_case(tmp_path, RECON.to_dict(), name="cut.json", state_dt=1e-6)
+    record, mode = run_case.restart_admission(state, cut, cut_path, RECON)
+    assert mode == run_case.CUT and record["parent_record"]["derived_keys"] == [
+        "case_id", "collapse.reconnect", "collapse.state_dt"]
+
+
+def test_a_reconnect_block_that_differs_only_in_tau_end_makes_no_cut(tmp_path):
+    """tau_end decides only where a run after a cut ends: before any cut, a case whose reconnect
+    block differs from the parent's in it alone restarts ordinarily, from any state."""
+    parent = json.loads(json.dumps(CASE))
+    parent["collapse"]["reconnect"] = RECON.to_dict()
+    state, _ = _parent_run(tmp_path, case=parent)
+    later = dict(RECON.to_dict(), tau_end=2e-4)
+    child, path = _child_case(tmp_path, later, landing=[1e-3])
+    record, mode = run_case.restart_admission(state, child, path,
+                                              ReconnectSettings.from_dict(later))
+    assert mode == run_case.ORDINARY
+    assert record["parent_record"]["derived_keys"] == ["case_id", "collapse.landing",
+                                                       "collapse.reconnect.tau_end"]
+
+
+PRECUT_NECK = {"delta": 1.05e-3, "r_neck": 1e-3, "z_neck": 4.7, "delta_over_r_neck": 1.05}
+
+
+def test_a_precut_state_is_cut_again_and_never_continued_before_a_cut(tmp_path):
+    """The precut dump of a cut run is the landing state it cut, with its neck: a restart from it
+    under any case with a reconnect block (the cut's own, to make the same cut again, or one that
+    changes it) is a cut; without the block it is refused, not continued as an ordinary run that
+    would land its cut radii again."""
+    cut_case = json.loads(json.dumps(CASE))
+    cut_case["collapse"].update(reconnect=RECON.to_dict(), landing=[2e-3, 1.1e-3])
+    state, _ = _parent_run(tmp_path, case=cut_case)
+    _write_meta(state, cut_stage="precut", neck=PRECUT_NECK, pinch={"t_p": 0.6})
+    path = tmp_path / "parent-case.json"
+    record, mode = run_case.restart_admission(state, cut_case, path, RECON)
+    assert mode == run_case.CUT and "derived_keys" not in record["parent_record"]
+    wider = ReconnectSettings.from_dict(dict(RECON.to_dict(), cap_window_factor=8.0))
+    child = json.loads(json.dumps(cut_case))
+    child["case_id"] = "sigterm-window"
+    child["collapse"]["reconnect"] = wider.to_dict()
+    child_path = tmp_path / "window.json"
+    child_path.write_text(json.dumps(child))
+    record, mode = run_case.restart_admission(state, child, child_path, wider)
+    assert mode == run_case.CUT
+    assert record["parent_record"]["derived_keys"] == ["case_id",
+                                                       "collapse.reconnect.cap_window_factor"]
+    # the runner reports the cut before any output
+    out = tmp_path / "out"
+    proc = subprocess.run([sys.executable, str(ROOT / "simulationCases/run_faraday.py"), str(path),
+                           "--out", str(out), "--restart-from", str(state), "--check"],
+                          capture_output=True, text=True, timeout=120, check=False)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert json.loads(proc.stdout.strip().splitlines()[-1])["restart_mode"] == "cut"
+    assert not out.exists()
+    # without a reconnect block
+    plain = json.loads(json.dumps(cut_case))
+    plain["collapse"].pop("reconnect")
+    plain_path = tmp_path / "plain.json"
+    plain_path.write_text(json.dumps(plain))
+    with pytest.raises(SystemExit, match="precut state of a cut"):
+        run_case.restart_admission(state, plain, plain_path, None)
+    # a cut radius the precut neck does not admit, and a precut dump without its neck
+    far = ReconnectSettings.from_dict(dict(RECON.to_dict(), delta=2e-3))
+    with pytest.raises(SystemExit, match="times the neck radius"):
+        run_case.restart_admission(state, cut_case, path, far)
+    _write_meta(state, cut_stage="precut")
+    with pytest.raises(SystemExit, match="precut_<delta>.dump of a cut"):
+        run_case.restart_admission(state, cut_case, path, RECON)
+
+
+def test_the_status_of_a_refused_cut_names_its_precut_dump(tmp_path):
+    """A refusal from the plan on has written the precut dump: the run status names it, as it does
+    for a failure; a refusal at admission has none."""
+    precut = str(tmp_path / "states" / "precut_0.001.dump")
+
+    class Refused(RuntimeError):
+        def __init__(self, record, precut=None):
+            super().__init__("no plan")
+            self.record, self.precut = record, precut
+
+    planned = {"outcome": "refused", "failed_at": "plan", "precut_state": {"path": precut}}
+    assert run_case.cut_failure_status(Refused(planned)) == {
+        "outcome": "refused", "failed_at": "plan", "diagnostics": "cut_diagnostics.json",
+        "precut": precut}
+    assert run_case.cut_failure_status(Refused(planned, precut=precut))["precut"] == precut
+    admission = {"outcome": "refused", "failed_at": "admission"}
+    assert run_case.cut_failure_status(Refused(admission))["precut"] is None
+    failed = {"outcome": "failed", "failed_at": "postcut", "precut_state": {"path": precut}}
+    assert run_case.cut_failure_status(Refused(failed))["failed_at"] == "postcut"
 
 
 def test_runner_check_reports_a_cut_restart_and_refuses_a_foreign_delta(tmp_path):

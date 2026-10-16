@@ -74,6 +74,44 @@ def test_settings_admit_every_landing_state_a_run_keeps():
         rc.ReconnectSettings(delta=1e-4, **kw)
 
 
+def test_a_continuation_may_change_only_where_the_run_after_the_cut_ends():
+    import json
+
+    s = rc.ReconnectSettings(delta=1e-3, tau_end=4e-5)
+    recorded = json.loads(json.dumps(s.to_dict()))  # as the cut record holds it
+    assert rc.CONTINUATION_KEYS == ("tau_end",)
+    for tau_end in (4e-5, 1e-4, None):
+        assert rc.ReconnectSettings.from_dict(dict(recorded, tau_end=tau_end)).continues_cut(
+            recorded)
+    for change in ({"dt0": 2e-9}, {"delta": 1.1e-3}, {"cap_window_factor": 8.0},
+                   {"bubble_stop": 0.1}):
+        assert not rc.ReconnectSettings.from_dict(dict(recorded, **change)).continues_cut(recorded)
+    assert not s.continues_cut(None) and not s.continues_cut({})
+    # where the driver stops a run after a cut, to round-off
+    assert rc.tau_end_reached(4e-5, 4e-5) and rc.tau_end_reached(4e-5 * (1 - 1e-15), 4e-5)
+    assert not rc.tau_end_reached(3.9e-5, 4e-5) and not rc.tau_end_reached(1e3, math.inf)
+
+
+def test_cut_size_field_as_the_mesh_after_a_cut_builds_it():
+    """The finer of the tip sizing about every end on the axis and the bridge sizing along the
+    liquid span between the bubble's top and the cavity's tip, graded linearly."""
+    sizing = {"h_tip": 1e-3, "h_bridge": 2e-3, "curvature": 20, "grading": 0.3}
+    tips = [4.69, 4.28, 4.68]  # the cavity tip, the bubble's bottom and top, in any order
+    r = np.array([0.0, 0.0, 0.01, 0.1, 0.002])
+    z = np.array([4.69, 4.685, 4.69, 5.0, 4.0])
+    h = rc.cut_size_field(r, z, tips, sizing)
+    d = math.hypot(0.1, 0.31)
+    expected = [1e-3,  # at the cavity tip
+                min(1e-3 + 0.3 * 0.005, 2e-3),  # on the bridge, halfway between two tips
+                min(1e-3 + 0.3 * 0.01, 2e-3 + 0.3 * 0.01),  # beside the cavity tip
+                1e-3 + 0.3 * d,  # far above it: the tip sizing, the bridge's beyond it
+                1e-3 + 0.3 * math.hypot(0.002, 0.28)]  # below the bubble, no bridge there
+    assert h == pytest.approx(expected, rel=1e-12)
+    # before a cut (one end on the axis) there is no bridge
+    assert rc.cut_size_field([0.0, 0.3], [1.0, 1.4], [1.0], sizing) == pytest.approx(
+        [1e-3, 1e-3 + 0.3 * 0.5], rel=1e-12)
+
+
 def test_collapse_block_split_leaves_the_driver_block_unchanged():
     block = {"neck_stop": 3e-4, "h_floor": 2e-5}
     rest, recon, keep, landing = rc.split_collapse_block(block)

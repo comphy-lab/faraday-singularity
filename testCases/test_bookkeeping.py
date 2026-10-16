@@ -1681,6 +1681,7 @@ def test_pinch_time_from_the_neck_samples_of_a_landing_state(tmp_path):
 
 
 R_C = 3.8317059702075125
+CUT_GRADING = 0.3  # the grading of the cut's sizing, the mesh's
 
 
 class CutProblem(FakeProblem):
@@ -1738,7 +1739,9 @@ def _cut_driver(tmp_path, pb, recon, **kw):
     geom = cut_geometry(chains, 3.0, gas_before=1.0)
     pb.cut = {"delta": recon.delta, "rmin": recon.delta, "r_neck": 0.95e-3, "z_neck": 4.685,
               "t_cut": 0.0, "pinch": {"t_p": -1e-6}, "geometry": geom.to_dict(),
-              "sizing": {"h_tip": recon.tip_size * recon.delta},
+              "sizing": {"h_tip": recon.tip_size * recon.delta,
+                         "h_bridge": recon.bridge_size * recon.delta,
+                         "curvature": recon.curvature_sizing, "grading": CUT_GRADING},
               "settings": json.loads(json.dumps(recon.to_dict()))}
     drv.reset_after_cut(pb.cut)
     return drv
@@ -1866,3 +1869,166 @@ def test_a_post_cut_state_needs_the_reconnect_settings_of_its_cut(tmp_path):
         plain.reset_after_cut(pb.cut)
     with pytest.raises(RuntimeError, match="runs after a cut"):
         CollapseDriver(CutProblem(), _settings(), tmp_path / "e", reconnect=recon).run(1e-9)
+
+
+# --- after a cut: the spacing the remesh rule reads, the dumps, a continuation ------------------
+
+
+class CutSurfaceProblem(CutProblem):
+    """The bubble of ``CutProblem`` below an open chain that is a trough ``z = 4.69 + r^2/(2 R)`` on
+    the axis (apex radius ``R``) out to ``r = 0.2``, with nodes spaced as on a mesh after the cut:
+    half the finer of the cut's sizing, ``h_tip + CUT_GRADING d`` with ``d`` the distance to the tip
+    (and to the bridge below it), and the focus of the last rebuild. A rebuild cannot coarsen the
+    focus beyond ``coarsest``, as where the mesh also follows the curvature."""
+
+    def __init__(self, h_tip, focus_size, R=0.08, coarsest=math.inf, **kw):
+        super().__init__(**kw)
+        self.h_tip, self.R, self.coarsest = h_tip, R, coarsest
+        self.focus_size = focus_size  # as the cut's remesh left it
+
+    def force_remesh(self):
+        super().force_remesh()
+        self.focus_size = min(self.template.focus.size, self.coarsest)
+
+    def interface_segments(self):
+        bubble = super().interface_segments()[0]
+        pts = [(0.0, 4.69)]
+        while pts[-1][0] < 0.2:
+            r, z = pts[-1]
+            h = min(self.focus_size, self.h_tip + CUT_GRADING * math.hypot(r, z - 4.69))
+            r += 0.5 * h / math.sqrt(1.0 + (r / self.R) ** 2)  # half an element of arc length
+            pts.append((r, 4.69 + r * r / (2.0 * self.R)))
+        P = np.array(pts)
+        s = np.linspace(0.0, 1.0, 101)[1:]
+        P = np.vstack([P, np.column_stack([P[-1, 0] + (R_C - P[-1, 0]) * s, P[-1, 1] + s])])
+        return [bubble, self._chain("open", P[:, 0], P[:, 1], ("axis", "fixed"))]
+
+
+def _surface_cut(tmp_path, coarsest=math.inf, **kw):
+    """A run after a cut at delta = 0.01 on ``CutSurfaceProblem``: its tip is meshed at
+    h_tip = 6.25e-4, the cut's focus is as fine, and the trough asks for a focus of 0.01."""
+    from faraday_singularity.mesh import Focus
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-2, dt0=1e-6)
+    size = recon.focus_size * recon.delta
+    pb = CutSurfaceProblem(recon.tip_size * recon.delta, size, coarsest=coarsest)
+    pb.template.focus = Focus(size=size, radius=0.2, grading=0.2)
+    drv = _cut_driver(tmp_path, pb, recon, **kw)
+    out = drv.run(1e-9)
+    drv.close()
+    return drv.s, pb, out
+
+
+def test_after_a_cut_the_focus_coarsens_although_the_tips_keep_the_cut_sizing(tmp_path):
+    """Every mesh after a cut keeps the cut's sizing at the tips on the axis, so the tip of the
+    open chain stays meshed at h_tip whatever the focus. The remesh rule reads the spacing where
+    the focus sets it: each coarsening takes effect, by the bounded factor, and the rebuilds stop
+    once the focus has caught up with the target. (Read at the tip, the spacing stayed at h_tip and
+    the focus was rebuilt at every step without effect.)"""
+    s, pb, _ = _surface_cut(tmp_path, max_steps=12)
+    tab = _rows(tmp_path)
+    events = _read_events(tmp_path)
+    remesh = [e for e in events if e["event"] == "remesh"]
+    assert tab["h_focus"][0] == pytest.approx(0.01) and tab["h_near"][1] == pytest.approx(
+        6.25e-4, rel=1e-3)
+    assert [e["step"] for e in remesh] == [1, 2, 3]
+    for e in remesh:
+        assert e["focus_size"] == pytest.approx(s.max_coarsen_factor * e["h_near_before"])
+        assert e["h_near_after"] == pytest.approx(e["focus_size"], rel=5e-3)
+    assert not [e for e in events if e["event"] == "remesh-ineffective"]
+    assert np.all(tab["h_near"][4:] >= s.coarsen_ratio * tab["h_focus"][4:])
+    assert np.all(tab["remesh_count"][4:] == 3)
+    r, z, _, _ = pb.interface_arrays()  # the tip is still meshed at h_tip
+    assert 2 * math.hypot(r[1] - r[0], z[1] - z[0]) == pytest.approx(6.25e-4, rel=1e-3)
+
+
+def test_after_a_cut_a_coarsening_that_does_not_coarsen_waits(tmp_path, monkeypatch):
+    """A coarsening the mesh cannot follow (here beyond 1.25e-3) is not tried again on every step:
+    it waits remesh_backoff steps, as a refinement does, and the dumps after the cut keep that."""
+    s, _, _ = _surface_cut(tmp_path / "a", coarsest=1.25e-3, max_steps=50, state_dt=0.0,
+                           state_keep=1000)
+    events = _read_events(tmp_path / "a")
+    wait = s.remesh_backoff + s.min_steps_between_remesh
+    assert [e["step"] for e in events if e["event"] == "remesh"] == [1, 2, 2 + wait, 2 + 2 * wait]
+    ineffective = [e for e in events if e["event"] == "remesh-ineffective"]
+    assert [e["step"] for e in ineffective] == [2, 2 + wait, 2 + 2 * wait]
+    for e in ineffective:
+        assert e["direction"] == "coarsen" and e["coarsen_blocked_until"] == e["step"] + wait
+    meta = json.loads((tmp_path / "a" / "states" / "state_00000030.json").read_text())
+    assert meta["coarsen_blocked_until"] == 2 + 2 * wait
+    # a restart keeps the wait (restore_cut needs the finite-element problem; here it only puts the
+    # record back)
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
+        restore_cut=lambda problem, record: setattr(problem, "cut", record)))
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    pb = CutSurfaceProblem(6.25e-4, 1.25e-3, coarsest=1.25e-3)
+    pb.t = meta["time"]
+    drv = CollapseDriver(pb, s, tmp_path / "b",
+                         reconnect=ReconnectSettings.from_dict(meta["cut"]["settings"]))
+    drv.restore(meta)
+    assert drv.state.coarsen_blocked_until == 2 + 2 * wait
+    drv.close()
+
+
+def test_after_a_cut_dumps_follow_each_doubling_of_tau_and_the_end_state(tmp_path):
+    """The state_dt of a landing run (0.1 by default) can exceed the whole run after a cut. After
+    the cut the rotating dumps follow at least each time tau doubles, the first at the first step,
+    and the state the run ends on is dumped too; before a cut the cadence is state_dt alone."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    drv = _cut_driver(tmp_path / "a", CutProblem(), recon, max_steps=10, state_keep=100)
+    out = drv.run(1e-9)
+    drv.close()
+    assert drv.s.state_dt == 0.1
+    states = tmp_path / "a" / "states"
+    metas = [json.loads(p.read_text()) for p in sorted(states.glob("state_*.json"))]
+    assert [m["step"] for m in metas] == [1, 2, 4, 7, 10]
+    assert out["stop"] == {"reason": "max-steps", "end_state": str(states / "state_00000010.dump")}
+    tau = _chains_rows(tmp_path / "a")["tau"]
+    for a, b in zip(metas[:-2], metas[1:-1]):  # the first step at least that tau after a dump
+        assert tau[b["step"]] - a["tau"] >= a["tau"] > tau[b["step"] - 1] - a["tau"]
+    assert metas[-1]["tau"] == pytest.approx(tau[-1]) and "resume_at" not in metas[-1]
+    # before a cut: every state_dt only, and no dump of the end state
+    drv = PrescribedDriver(FakeProblem(), _settings(t_end=0.255, dt_max=0.01, state_keep=100),
+                           tmp_path / "b", lambda t: {})
+    out = drv.run(1e-9)
+    drv.close()
+    times = [json.loads(p.read_text())["time"]
+             for p in sorted((tmp_path / "b" / "states").glob("state_*.json"))]
+    assert len(times) == 3 and np.all(np.diff(times) >= 0.1 - 1e-12)
+    assert out["stop"] == {"reason": "end-time"} and times[-1] < 0.25
+
+
+def test_after_a_cut_a_run_that_ended_at_tau_end_continues_under_a_later_tau_end(tmp_path,
+                                                                               monkeypatch):
+    """The end state of a run that stopped at tau_end continues under the same reconnect settings
+    with a later tau_end (the bubble-collapse time that ends the acceptance window is not known in
+    advance); any other setting than the cut's is refused."""
+    import dataclasses
+
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6, dt_growth=2.0, tau_end=2.5e-6)
+    out = _cut_driver(tmp_path / "a", CutProblem(), recon, growth=2.0, max_steps=100).run(1e-9)
+    assert out["stop"]["reason"] == "tau-end"
+    meta = json.loads(Path(out["stop"]["end_state"]).with_suffix(".json").read_text())
+    assert meta["step"] == out["steps"] and meta["tau"] == pytest.approx(2.5e-6)
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
+        restore_cut=lambda problem, record: setattr(problem, "cut", record)))
+    settings = _settings(t_end=1.0, dt_max=1.0, growth=2.0, max_steps=100)
+    pb = CutProblem()
+    pb.t = meta["time"]
+    drv = CollapseDriver(pb, settings, tmp_path / "b",
+                         reconnect=dataclasses.replace(recon, tau_end=6e-6))
+    drv.restore(meta)
+    later = drv.run(1e-9)
+    drv.close()
+    assert later["stop"]["reason"] == "tau-end" and later["stop"]["tau"] == pytest.approx(6e-6)
+    assert later["steps"] > meta["step"] and later["cut"]["tau_end"] == 6e-6
+    assert _chains_rows(tmp_path / "b")["tau"][0] == pytest.approx(2.5e-6)
+    with pytest.raises(ValueError, match="differ from those of the cut"):
+        CollapseDriver(CutProblem(), settings, tmp_path / "c",
+                       reconnect=dataclasses.replace(recon, dt0=2e-6)).restore(meta)

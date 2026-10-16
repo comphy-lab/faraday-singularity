@@ -168,10 +168,20 @@ neck and fold stops and the step rule above apply to the open chain as to any su
   limits of the state (``dt_courant``, ``dt_capillary``), the profiles a ``_bubble`` file beside
   each one of the open chain, and every event, profile header and dump after the cut ``tau`` and
   ``tau_p``;
+* the remesh rule reads the spacing near the collapse (``h_near``) where the focus sets it: every
+  mesh after the cut keeps the cut's sizing at the tips on the axis and along the bridge, which no
+  focus can coarsen, so only edges where that sizing asks for at least ``CUT_SIZING_MARGIN`` focus
+  sizes count (:meth:`CollapseDriver._h_near_after_cut`); and a coarsening rebuild that did not
+  coarsen (the spacing grew by less than ``1/0.9``) waits ``remesh_backoff`` steps before the next,
+  as a refinement does (event ``remesh-ineffective``, ``direction`` ``coarsen``);
+* the rotating dumps follow at least each time the time after the cut doubles, besides every
+  ``state_dt`` (:meth:`CollapseDriver._state_interval`), and the state the run ends on is dumped
+  as well (``end_state`` in the stop record), whatever the stop;
 * landing states and the stop state are not kept (one cut per run).
 
 Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore` restores
-(``surgery.restore_cut``), only into a driver made with the same reconnect settings; the run then
+(``surgery.restore_cut``), only into a driver whose reconnect settings are those of the cut but for
+``tau_end`` (``reconnect.CONTINUATION_KEYS``), which a continuation may raise; the run then
 continues in the post-cut mode.
 """
 
@@ -189,8 +199,9 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
 from .mesh import Focus
-from .reconnect import (LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
-                        courant_limit, post_cut_record, post_cut_stops)
+from .reconnect import (AXIS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, LANDING_RATIO,
+                        MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings, courant_limit,
+                        cut_size_field, post_cut_record, post_cut_stops, tau_end_reached)
 from .selfcontact import InterfaceSelfIntersection, fold_gap
 from .singular import singular_time
 
@@ -403,6 +414,8 @@ class _State:
     last_remesh_step: int = -10**9
     refine_blocked_until: int = -10**9  # first step at which a refining rebuild may follow
     coarsen_held_until: float = -math.inf  # time before which the focus is not coarsened
+    # after a cut: first step at which a coarsening rebuild may follow one that did not coarsen
+    coarsen_blocked_until: int = -10**9
     last_snapshot_t: float = -math.inf
     last_snapshot_ell: float = math.nan
     snapshots: int = 0
@@ -517,6 +530,33 @@ class CollapseDriver:
             stop.update(self._taus(self._t()))
         return stop
 
+    def _h_near_after_cut(self, r, z, ds, near_edges, in_focus, h_near: float) -> float:
+        """The spacing near the collapse after a cut, where the focus sets it.
+
+        Every mesh after the cut keeps the cut's sizing at the tips on the axis and along the bridge
+        (``mesh.CutSizing``), so the open chain's tip is meshed at about ``h_tip`` whatever focus
+        the driver sets. Read there, the spacing could never rise above about ``h_tip`` and the
+        coarsening would rebuild the mesh at every step without effect, once the target focus
+        exceeds ``h_tip/coarsen_ratio``. It is therefore read only on edges whose two nodes the
+        cut's sizing leaves to the focus: where that sizing (``reconnect.cut_size_field``) asks for
+        at least ``CUT_SIZING_MARGIN`` times the focus size of the current mesh. Within the usual
+        window near the axis, else within the focus region, else, without any such edge, as before
+        the cut (``h_near``)."""
+        sizing = self._cut_record().get("sizing") or {}
+        if not all(k in sizing for k in ("h_tip", "h_bridge", "grading")):
+            return h_near
+        segs = self._post_cut_state()["segs"]
+        tips = [float(c["z"][k]) for c in segs for k, end in ((0, 0), (-1, 1))
+                if c["end_types"][end] == AXIS]
+        focus = self.pb.active_mesh_template().focus
+        size = focus.size if focus is not None else self.pb.mesh_settings.h_axis
+        free = cut_size_field(r, z, tips, sizing) >= CUT_SIZING_MARGIN * size
+        free_edges = free[:-1] & free[1:]
+        for edges in (near_edges & free_edges, (in_focus[:-1] | in_focus[1:]) & free_edges):
+            if edges.any():
+                return 2.0 * float(ds[edges].min())
+        return h_near
+
     def _write_chain_row(self, dt: float):
         pc = self._post_cut_state()
         obs = self.pb.cut_observables()
@@ -583,6 +623,8 @@ class CollapseDriver:
 
         focus_r = min(pb.nd.radius, s.focus_extent * ell)
         in_focus = r <= focus_r
+        if self._cut_record() is not None:
+            h_near = self._h_near_after_cut(r, z, ds, near_edges, in_focus, h_near)
         # Select the fold closest to its own stop limit, using each node's local spacing.
         fold = fold_gap(r, z, r_max=focus_r, ratio=s.fold_ratio,
                         stop=s.fold_stop, stop_elements=s.fold_stop_elements, search_factor=FOLD_SEARCH)
@@ -682,6 +724,7 @@ class CollapseDriver:
         s, st = self.s, self.state
         if st.step - st.last_remesh_step < s.min_steps_between_remesh:
             return False
+        after_cut = self._cut_record() is not None
         target = m["h_focus"]
         refining = m["h_near"] > s.refine_ratio * target
         if refining:
@@ -690,6 +733,8 @@ class CollapseDriver:
             size = max(target, m["h_near"] / s.max_refine_factor)
         elif m["h_near"] < s.coarsen_ratio * target:
             if m["time"] < st.coarsen_held_until:  # held in physical time, not in steps
+                return False
+            if after_cut and st.step < st.coarsen_blocked_until:
                 return False
             size = min(target, s.max_coarsen_factor * m["h_near"])
         else:
@@ -714,6 +759,12 @@ class CollapseDriver:
             # coarsen the focus once the hold has passed
             st.refine_blocked_until = st.step + s.remesh_backoff + s.min_steps_between_remesh
             self._event("remesh-ineffective", after, focus_size=size)
+        elif after_cut and not refining and after["h_near"] < m["h_near"] / 0.9:
+            # after a cut the mesh also follows the cut's sizing and from curvature, which a focus
+            # cannot coarsen: a rebuild that did not coarsen is not tried again on every step
+            st.coarsen_blocked_until = st.step + s.remesh_backoff + s.min_steps_between_remesh
+            self._event("remesh-ineffective", after, focus_size=size, direction="coarsen",
+                        coarsen_blocked_until=st.coarsen_blocked_until)
         return True
 
     def _singular(self, m: dict) -> tuple[float, float, int]:
@@ -807,7 +858,8 @@ class CollapseDriver:
         if cut is not None:
             meta["cut"] = cut
             if self.reconnect is not None:
-                meta.update(self._taus(meta["time"]))
+                meta.update(self._taus(meta["time"]),
+                            coarsen_blocked_until=st.coarsen_blocked_until)
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -815,6 +867,24 @@ class CollapseDriver:
         """A dump outside the rotation of ``state_keep`` (``path`` under ``states/``)."""
         self._write_state(Path(path), kept=True, **extra)
         return Path(path)
+
+    def _state_interval(self) -> float:
+        """The time from the last rotating dump to the next: ``state_dt``, and after a cut at most
+        the time after the cut of the last dump (none since the cut: zero), so that the dumps
+        follow at least each time the time after the cut doubles. The ``state_dt`` of a landing
+        run, sized for the collapse before it, can exceed the whole run after a cut."""
+        if self._cut_record() is None:
+            return self.s.state_dt
+        return min(self.s.state_dt, max(0.0, self.state.last_state_t - self._cut_times()[0]))
+
+    def _save_end_state(self) -> Path:
+        """After a cut: the rotating dump of the state the run ends on (as any dump, within its step
+        if it ends there), unless that step has just been dumped. A continuation starts from it."""
+        st = self.state
+        path = self.outdir / "states" / f"state_{st.step:08d}.dump"
+        if not st.states or st.states[-1] != path:
+            self.save_state()
+        return path
 
     def save_state(self):
         """Dump the pyoomph state and the driver state; keep the last ``state_keep`` dumps."""
@@ -865,12 +935,14 @@ class CollapseDriver:
             if self.reconnect is None:
                 raise RuntimeError("a state written after a cut is continued only by a driver made "
                                    "with the cut's reconnect settings (post-cut stops on both chains)")
-            if json.loads(json.dumps(self.reconnect.to_dict())) != meta["cut"].get("settings"):
+            if not self.reconnect.continues_cut(meta["cut"].get("settings")):
                 raise ValueError("the reconnect settings differ from those of the cut that wrote "
-                                 "the state")
+                                 "the state (a continuation may change only "
+                                 f"{', '.join(CONTINUATION_KEYS)})")
             from .surgery import restore_cut
 
             restore_cut(self.pb, meta["cut"])
+            st.coarsen_blocked_until = int(meta.get("coarsen_blocked_until", -10**9))
         ep = self.episodes
         resume = {"resume_at": RESUME_REMESH_CHECK} if self._checks_pending else {}
         self._event("restart", self.measure(), from_time=meta["time"],
@@ -901,7 +973,7 @@ class CollapseDriver:
         st.cavity_seen = True
         st.cycle += 1
         st.coarsen_held_until = -math.inf
-        st.refine_blocked_until = -10**9
+        st.refine_blocked_until = st.coarsen_blocked_until = -10**9
         self._checks_pending = False  # the cut rebuilt the mesh; the next step follows at once
         m = self.measure()
         geometry = record.get("geometry", {})
@@ -1065,7 +1137,7 @@ class CollapseDriver:
             t = self._t()
             if s.t_end - t <= max(1e-14, 8 * math.ulp(s.t_end)):
                 break
-            if r is not None and t - t_cut >= r.tau_end - max(1e-14, 8 * math.ulp(r.tau_end)):
+            if r is not None and tau_end_reached(t - t_cut, r.tau_end):
                 stop = {"reason": "tau-end", "tau_end": r.tau_end, **self._taus(t)}
                 break
             if st.step >= s.max_steps:
@@ -1156,8 +1228,10 @@ class CollapseDriver:
             if found is not None:
                 stop = found
                 break
-            if self._t() - st.last_state_t >= s.state_dt:
+            if self._t() - st.last_state_t >= self._state_interval():
                 self.save_state()
+        if r is not None:  # after a cut the state the run ends on is a dump too
+            stop["end_state"] = str(self._save_end_state())
         if self.keep_stop_state and stop.get("trigger") == "neck-radius":
             # the measured state of an accepted step: a landing state for a reconnection
             stop["kept_state"] = str(self.keep_state(
