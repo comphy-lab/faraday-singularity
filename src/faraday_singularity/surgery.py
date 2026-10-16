@@ -242,15 +242,21 @@ def former_gas_nodes(problem, old_open: Chain, reservoir_depth: float, tol: floa
     on_boundary = {(n.x(0), n.x(1)) for n in iface + axis}
     bulk = [n for n in problem.get_mesh("liquid").nodes() if (n.x(0), n.x(1)) not in on_boundary]
 
-    def count(nodes, test):
-        return [int(sum(1 for n in nodes if test(n.x(0), n.x(1)))), len(nodes)]
+    def xy(nodes):
+        return np.array([[n.x(0), n.x(1)] for n in nodes]).reshape(-1, 2)
 
+    B, S, A = xy(bulk), xy(iface), xy(axis)
     z_tip = float(old_open.points[0, 1])
-    return {"liquid": count(bulk, lambda x, y: bool(shapely.contains_xy(core, x, y))),
-            INTERFACE: count(iface, lambda x, y: bool(shapely.contains_xy(gas, x, y))
-                             and line.distance(shapely.Point(x, y)) > tol),
-            "liquid/axis": count(axis, lambda x, y: y > z_tip + tol),
-            "tolerance": tol}
+    in_bulk = shapely.contains_xy(core, B[:, 0], B[:, 1]) if len(B) else np.zeros(0, bool)
+    in_surf = np.zeros(len(S), bool)
+    if len(S):
+        in_surf = shapely.contains_xy(gas, S[:, 0], S[:, 1])
+        idx = np.flatnonzero(in_surf)
+        if len(idx):
+            far = shapely.distance(line, shapely.points(S[idx])) > tol
+            in_surf[idx] = far
+    return {"liquid": [int(in_bulk.sum()), len(B)], INTERFACE: [int(in_surf.sum()), len(S)],
+            "liquid/axis": [int(np.sum(A[:, 1] > z_tip + tol)), len(A)], "tolerance": tol}
 
 
 def zero_fill(problem, old_open: Chain, reservoir_depth: float, centre: tuple[float, float],
