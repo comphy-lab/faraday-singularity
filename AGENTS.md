@@ -131,23 +131,51 @@ add a second top-level `cases/` tree.
   mirrored; `r_j`, `z_b`, `Q_j`, `V_j`, `We_j` and `jet_born` of all three tips in `chains.txt`,
   `Q_j` and `V_j` positive along each jet), the local scale is the smallest over both chains (on
   the bubble its jets, neck and length, not the radii of curvature of its tips, which depend on the
-  mesh at a chain's end), the focus is floored at the cut's focus size (not at the landing run's
-  `h_floor`, which is no length of the cut) and the mesh follows each feature of both chains in its
-  own region (`reconnect.feature_regions`): the tips the cut made at the cut's focus size within
-  `focus_radius` cut radii and over their jets, the bubble's bottom at its jet's size but never
-  coarser than at the landing, each neck at its own scale; a rebuild refines or coarsens each region
-  by the bounded factors when its longest element exceeds `refine_ratio`, or its shortest lies
-  below `coarsen_ratio`, times its target, a rebuild that changed none of the regions that asked
-  waits `remesh_backoff` steps, and a rebuild for distortion keeps every region's size
-  (`h_<tip>`, `size_<tip>` in `chains.txt`, the regions in the `remesh` events); the stops before
-  a second change of topology apply on both chains (`reconnect.post_cut_stops`, a spline that
-  contacts itself included) and at `tau_end`, the step also follows every
-  node of both chains (`reconnect.courant_limit`) and the capillary time of the sharpest tip, no
-  Newton failure ends the run cleanly, rotating dumps follow at least each time `tau` doubles and
-  the end state is dumped, and every output carries `tau = t - t_cut` and `tau_p = t - t_p`
-  (`collapse.txt`, `chains.txt`, profiles of both chains, events, dumps). Loading a state written
-  after the cut
-  restores the cut's mesh sizing (`surgery.restore_cut`). One cut per run. A reconnected result
+  mesh at a chain's end) and the radius of curvature at the base of each jet, the apex of the gas
+  groove around it (`R_apex`: circles fitted through vertices only, the smaller over 2 and 4 on
+  either side); the focus is floored at `h_floor`, and the mesh follows each feature of both chains
+  in its own region at its own scale (`reconnect.feature_regions`): the tips the cut made at
+  `clip(ell_tip/elements_per_scale, h_floor, h_cut)` (`ell_tip` the smaller of the tip's radius of
+  curvature and its jet's radius; `h_cut`, the cut's focus size, is the coarsest size allowed, not
+  a fixed one) within `focus_extent ell_tip`, the rest of the cut's region (`focus_radius` cut radii
+  and the jet) kept at `h_cut` (`<tip>_cut`); the base of each jet (`jet_base_<tip>`) at
+  `clip(R_pred/elements_per_scale, h_floor, h_cut)` within `max(apex_extent R_apex, 4 target)`,
+  `R_pred` the apex radius `apex_lookahead` steps ahead (at least half the reading; at the bubble's
+  bottom capped at that bottom's own size, and none where the cap is reached); the bubble's bottom
+  at its jet's size but never coarser than at the landing; each neck at its own scale; and a
+  `kink_<chain>` region where the interface guard asks for one (`reconnect.kink_regions`). A rebuild
+  refines or coarsens each region by the bounded factors when its longest element exceeds
+  `refine_ratio`, or its shortest (outside the finer regions within it) lies below `coarsen_ratio`,
+  times its target, a rebuild that changed none of the regions that asked waits `remesh_backoff`
+  steps, and a rebuild for distortion keeps every region's size (`h_<tip>`, `size_<tip>` in
+  `chains.txt`, the regions in the `remesh` events). The interface is read on its quadratic
+  elements after every accepted step and on the input of every rebuild (`reconnect.p2_edges`,
+  `interface_guard`): a tangent turning by more than `edge_turn_refine` (30) degrees across an
+  element, or a midside node more than `midside_refine` (0.1) chords off mid-chord, asks for a
+  refinement; beyond `edge_turn_stop_fresh` (90) on a freshly built mesh or `edge_turn_stop` (120) on
+  any, beyond `midside_stop` (0.2), or where the element is at `h_floor` already, the run stops
+  cleanly (`interface-unresolved`, trigger `edge-turn`, `edge-midside` or `feature-below-floor`). A
+  rebuilt mesh is accepted only if the Bezier lower bound of the scaled Jacobian of every curved
+  element reaches `jacobian_min` (0.2; trigger `curved-jacobian`, `reconnect.p2_jacobian_bounds`),
+  gmsh's high-order optimiser is asked for `high_order_threshold` (0.3), an element below the
+  absolute quality `quality_floor` (0.15) asks for a distortion rebuild, and pyoomph's net for an
+  element turned inside out within a step is armed (`inverted_element_remesh`). The stops before
+  a second change of topology apply on both chains (`reconnect.post_cut_stops`: the fold stop on
+  both chains, a fold pair that straddles the base of a jet being the `annular-contact-approach`,
+  trigger `fold-gap`, with the jet, its apex and `R_apex`; a spline that contacts itself; the guard
+  last) and at `tau_end`; the step also follows every node of both chains (`reconnect.courant_limit`)
+  and the capillary time of the sharpest tip or jet base; no Newton failure ends the run cleanly,
+  and the profiles of the state the failing step started from are written first
+  (`profile_<step>_lastgood{,_bubble}.txt`), as is a profile at every step while an element turns
+  beyond `edge_turn_refine`; rotating dumps follow at least each time `tau` doubles and the end
+  state is dumped; and every output carries `tau = t - t_cut` and `tau_p = t - t_p` (`collapse.txt`,
+  `chains.txt` with `R_apex_<tip>`, `groove_gap_<tip>`, `groove_angle_<tip>`, `edge_turn_<chain>`
+  and `edge_midside_<chain>`, profiles of both chains, events, dumps). `rebuild_spline` `vertices`
+  (off by default) splines the rebuilds through the vertices only, for sensitivity tests; smoothing
+  the default would hide the very feature under test. All these settings are cut keys: a
+  continuation keeps them, and a state cut before they existed is cut again, not continued.
+  Loading a state written after the cut restores the cut's mesh sizing, with gmsh's threshold for
+  curved elements and the nodes of the rebuild's spline (`surgery.restore_cut`). One cut per run. A reconnected result
   counts only if the jets at a fixed time after the pinch time `t_p` do not depend on `delta`;
   compare the cuts of a study at one common `t_p` (each cut records its own fit and window,
   `pinch`), and report the result with that `delta` study. `simulationCases/reconnect_prototype.py`

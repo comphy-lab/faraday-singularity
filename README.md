@@ -303,29 +303,60 @@ the flux through the base, the mean jet speed and `We_j` (`r_j_<tip>`, `z_b_<tip
 and `bubble_top`, and `Q_j` and `V_j` positive along each jet), so that the jets of a study in
 `delta` can be compared. The local scale that sets the step is the smallest over both chains (on
 the bubble its jets, its neck and its length, `ell_bubble`; the radii of curvature of its tips,
-which depend on the mesh at the end of a chain, bound the step instead). The mesh follows each
-feature of both chains in a region of its own, so that every feature resolved before the cut
-stays resolved after it: the two tips the cut made, the cavity's and the bubble's top, are meshed
-at the cut's focus size within `focus_radius` cut radii of the tip and over the jet on it, neither
-finer (the focus after a cut is floored at the cut's focus size, not at the `h_floor` of the run
-that wrote the landing state) nor coarser; the bubble's bottom at the size its jet asks for, but
-never coarser than at the landing; each neck at its own scale. A rebuild refines or coarsens a
-region by bounded factors when its longest element exceeds `refine_ratio`, or its shortest lies
-below `coarsen_ratio`, times its target, and a rebuild that changed none of the regions that asked
-for it waits before the next; a rebuild for element distortion keeps every region's size.
+which depend on the mesh at the end of a chain, bound the step instead) and the radius of
+curvature at the base of each jet, the apex of the gas groove around it (`R_apex`, from circles
+fitted through the vertices of the elements only). The mesh follows each feature of both chains in
+a region of its own, sized by the feature's own scale, so that no feature is met by only one or
+two elements: the two tips the cut made, the cavity's and the bubble's top, at their own scale
+(the smaller of the tip's radius of curvature and the radius of the jet on it) over
+`elements_per_scale`, between the `h_floor` of the run and the cut's focus size, which is the
+coarsest size allowed near the cut, not a fixed one, the rest of the cut's region staying at the
+cut's focus size; the base of each jet at its apex radius over `elements_per_scale`, predicted
+`apex_lookahead` steps ahead from its rate of change, within `apex_extent` apex radii of the base;
+the bubble's bottom at the size its jet asks for, but never coarser than at the landing; each
+neck at its own scale. A rebuild refines or coarsens a region by bounded factors when its longest
+element exceeds `refine_ratio`, or its shortest (outside the finer regions within it) lies below
+`coarsen_ratio`, times its target, and a rebuild that changed none of the regions that asked for
+it waits before the next; a rebuild for element distortion keeps every region's size.
 `chains.txt` gives at each tip the longest element of its region and the size the mesh has there
-(`h_<tip>`, `size_<tip>`), and the `remesh` events every region. The driver in addition stops
-before a second change of topology: the bridge closing, the chains approaching each other, the
-bubble's two tips meeting, a new neck narrower than `delta` on either chain, a closing fold on the
-bubble, a spline through the nodes of either chain that contacts itself (`self-contact-approach`
-with `trigger` `spline-contact`), the bubble draining away, or `tau_end` after the cut. These stops
-are checked before every rebuild, those for element distortion included, with the rebuild's own
-test of the spline, so that no rebuild meets a self-intersecting spline; a self-contact stop says
-whether its two sides lie at least four elements apart along the surface, a fold of the resolved
-surface (`contact` `fold`), or closer, a kink at the scale of the mesh (`kink`). The step also
-follows every node of both chains (a Courant limit `courant h/|u|` over each node's element
-length), the capillary time of the sharpest of the three tips on the axis and the cut's
-`dt_growth`. After a cut, no Newton failure ends a run cleanly.
+(`h_<tip>`, `size_<tip>`), at the base of each jet the apex radius, the gap of the closest fold
+pair across the groove and the groove's opening angle (`R_apex_<tip>`, `groove_gap_<tip>`,
+`groove_angle_<tip>`), and the `remesh` events every region.
+
+The interface is also read on its quadratic elements, after every accepted step and on the input
+of every rebuild: an element whose tangent turns by more than `edge_turn_refine` (30) degrees
+across it, or whose midside node lies more than `midside_refine` (0.1) chords from mid-chord, is
+refined in a region of its own (`kink_<chain>`, a quarter of its chord); beyond
+`edge_turn_stop_fresh` (90) degrees on a freshly built mesh or `edge_turn_stop` (120) on any, beyond
+`midside_stop` (0.2) chords, or where the element is already at `h_floor`, the run stops cleanly as
+`interface-unresolved` (`trigger` `edge-turn`, `edge-midside` or `feature-below-floor`), since a
+mesh that does not represent the interface admits no meaningful step. `chains.txt` records the
+largest turn and midside offset of each chain (`edge_turn_<chain>`, `edge_midside_<chain>`). A
+rebuilt mesh is accepted only if the lower bound of the scaled Jacobian of every curved element,
+from the Bezier coefficients of its Jacobian determinant, is at least `jacobian_min` (0.2;
+`trigger` `curved-jacobian`); gmsh's optimiser of curved elements is asked for
+`high_order_threshold` (0.3); an element whose quality falls below `quality_floor` (0.15) asks for
+a rebuild; and pyoomph's net for an element that turns inside out within a step is armed. The
+driver in addition stops before a second change of topology: the bridge closing, the chains
+approaching each other, the bubble's two tips meeting, a new neck narrower than `delta` on either
+chain, a closing fold on either chain, a spline through the nodes of either chain that contacts
+itself (`self-contact-approach` with `trigger` `spline-contact`), the bubble draining away, or
+`tau_end` after the cut. A closing fold whose pair of nodes straddles the base of a jet, the
+annular groove around the jet closing, is the `annular-contact-approach` (`trigger` `fold-gap`,
+with the jet, its apex and `R_apex`); any other is a `self-contact-approach`. These stops are
+checked before every rebuild, those for element distortion included, with the rebuild's own test
+of the spline, so that no rebuild meets a self-intersecting spline; a self-contact stop says whether
+its two sides lie at least four elements apart along the surface, a fold of the resolved surface
+(`contact` `fold`), or closer, a kink at the scale of the mesh (`kink`). The step also follows every
+node of both chains (a Courant limit `courant h/|u|` over each node's element length), the
+capillary time of the sharpest of the three tips on the axis and of the bases of their jets, and
+the cut's `dt_growth`. After a cut, no Newton failure ends a run cleanly; the profiles of the
+state the failing step started from are written first (`profile_<step>_lastgood.txt` and its
+`_bubble` beside it), and a profile is written at every step while an element of either chain
+turns by more than `edge_turn_refine`. For sensitivity tests only, `rebuild_spline` `vertices`
+splines each rebuild through the vertices of the elements rather than every node; it is off by
+default, since smoothing would alter, and hide, the very feature under test. All these settings
+belong to the cut: a continuation keeps them.
 Every output after the cut carries the time after the cut `tau = t - t_cut` and after the pinch
 `tau_p = t - t_p`: the columns `tau` and `tau_p` of `collapse.txt`, `chains.txt` (both chains per
 step: the three tips with their speeds, radii of curvature and jets, the bridge, the bubble, the
