@@ -21,7 +21,9 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
 4. **Remesh at once**, with nothing in between that could solve, move a node or remesh: the plan
    refers to the current interface nodes exactly. pyoomph transfers the fields; nodes in the former
    gas thread and on the bridge are not located in the old mesh and get its two-nearest-node blend.
-   Any failure clears the plan; the caller restores the ``precut`` state.
+   Any failure clears the plan. A failure from the remesh on can leave the problem half rebuilt, so
+   the ``precut`` state is never loaded back into it: the run ends, and a new process starts from
+   the ``precut`` dump if wanted.
 5. **Fill**: keep the blend, or zero the velocity at the nodes inside the former gas, the nodes on
    the axis of the bridge included. Nodes on the free surface are never zeroed: the fresh caps take
    the velocity of the nearest point of the old neck surface (pyoomph's transfer projects them onto
@@ -44,7 +46,9 @@ The sequence (:func:`cut`), for a :class:`~faraday_singularity.problem.FaradayPr
 A refused or failed cut also writes ``cut_diagnostics.json``: the record as far as it got (plan
 attempts, caps, geometry, transfer counts, axis spans, budgets, projection residuals and the energy
 identity), with ``outcome`` ``refused`` or ``failed``, the stage reached (``failed_at``) and the
-error. The record also gives the cut geometry in cut radii (``in_cut_radii``: the splice radii, arc
+error. An interruption (``KeyboardInterrupt``, ``SystemExit`` or any other exception that is not an
+``Exception``) is no outcome of the cut: it propagates unchanged, after the plan is dropped and the
+partial record is written with ``outcome`` ``interrupted``. The record also gives the cut geometry in cut radii (``in_cut_radii``: the splice radii, arc
 radii, bridge and removed gas, the number of survivors each cap dropped, and whether the planner's
 window or ``cap_splice_factor`` set the splices; see ``reconnect.py``).
 
@@ -99,8 +103,9 @@ class CutRefused(RuntimeError):
 
 
 class CutFailed(RuntimeError):
-    """The cut failed after the problem was changed; the ``precut`` state (``precut``) holds the
-    state before it. ``record`` as for :class:`CutRefused`."""
+    """The cut failed after the problem was changed, which may be half rebuilt: end the run and do
+    not load anything back into it. The ``precut`` dump (``precut``) holds the state before the
+    cut, for a new process. ``record`` as for :class:`CutRefused`."""
 
     def __init__(self, message: str, precut: str | None = None, record: dict | None = None):
         super().__init__(message)
@@ -448,17 +453,21 @@ def cut(problem, settings: ReconnectSettings, outdir: Path, *, driver=None, tag:
     restarts the bookkeeping for the new tips; without it the dumps hold the pyoomph state only and
     the pinch time is unknown. Returns the cut record, also written to ``cut_diagnostics.json``.
     Raises :class:`CutRefused` when no cut was made, :class:`CutFailed` when the problem was changed
-    and must be restored from the ``precut`` dump. Either way ``cut_diagnostics.json`` then holds
-    the partial record, with ``outcome`` (``refused`` or ``failed``), the stage reached
-    (``failed_at``) and the error, and the exception carries it as ``record``. Any other exception
-    also writes the file (``outcome`` ``failed``) and is re-raised as it is."""
+    (the run must end; a new process may start from the ``precut`` dump). Either way
+    ``cut_diagnostics.json`` then holds the partial record, with ``outcome`` (``refused`` or
+    ``failed``), the stage reached (``failed_at``) and the error, and the exception carries it as
+    ``record``. Any other ``Exception`` also writes the file (``outcome`` ``failed``) and is
+    re-raised as it is. An interruption (``KeyboardInterrupt``, ``SystemExit``, ...) is never turned
+    into an outcome of the cut: the file records ``outcome`` ``interrupted`` and the interruption
+    propagates unchanged."""
     out = Path(outdir)
     record: dict = {"delta": settings.delta}
     progress = {"stage": "admission"}
     try:
         return _cut(problem, settings, out, record, progress, driver=driver, tag=tag, log=log)
     except BaseException as e:
-        outcome = "refused" if isinstance(e, CutRefused) else "failed"
+        outcome = ("refused" if isinstance(e, CutRefused) else
+                   "failed" if isinstance(e, Exception) else "interrupted")
         failed = _jsonable({**record, "outcome": outcome, "failed_at": progress["stage"],
                             "error": f"{type(e).__name__}: {e}"})
         if isinstance(e, (CutRefused, CutFailed)):
@@ -526,6 +535,9 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
         except RuntimeError as e:
             clear_plan(pb)
             outcome, message = "refused", str(e)
+        except BaseException:  # an interruption: drop a half-made plan and propagate
+            clear_plan(pb)
+            raise
         attempts.append({"rmin": rmin, "outcome": outcome, "message": message})
         if outcome == "plan":
             break
@@ -582,6 +594,8 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
     except BaseException as e:
         clear_plan(pb)
         template.cut_sizing = None
+        if not isinstance(e, Exception):  # an interruption is no outcome of the cut
+            raise
         if not remeshing:  # nothing has changed but the plan, now dropped
             raise CutRefused(f"the plan could not be built ({type(e).__name__}: {e})") from e
         raise CutFailed(f"the cut remesh failed ({type(e).__name__}: {e})",
@@ -635,7 +649,7 @@ def _cut(pb, s: ReconnectSettings, out: Path, record: dict, progress: dict, *, d
     except CutFailed as e:
         e.precut = record["precut_state"]["path"]
         raise
-    except BaseException as e:
+    except Exception as e:  # an interruption propagates unchanged
         raise CutFailed(f"after the cut remesh: {type(e).__name__}: {e}",
                         record["precut_state"]["path"]) from e
     stage("postcut")

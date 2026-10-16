@@ -45,6 +45,7 @@ from faraday_singularity.problem import FaradayProblem  # noqa: E402
 from faraday_singularity.reconnect import Chain, ReconnectSettings, neck_radius  # noqa: E402
 
 R_N = 0.02  # neck radius of the synthetic cavity
+FAST_CUT = {"delta": 1.05 * R_N, "dt0": 1e-5}  # the cut of the synthetic cavity in most tests
 
 
 # --- private names ------------------------------------------------------------------------------
@@ -620,6 +621,31 @@ def test_a_failed_cut_writes_its_diagnostics(tmp_path, monkeypatch):
     assert pr["newton_residuals"] and abs(pr["energy_identity_error"]) <= 1e-10 * pr["before"][
         "kinetic_energy"]
     assert "postcut_state" not in rec and "volumes" not in rec
+
+
+@pytest.mark.parametrize("stage, target", [("caps", "replace_caps"),
+                                           ("chart", "orient_interface_chart")])
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+def test_an_interruption_is_no_outcome_of_the_cut(tmp_path, monkeypatch, stage, target,
+                                                   interruption):
+    """An interruption before the remesh (the caps) or after it (the chart) propagates unchanged:
+    it is neither refused nor failed. The plan is dropped, and the partial record says
+    ``interrupted`` with the stage reached."""
+    def interrupt(*_args, **_kw):
+        raise interruption("stop now")
+
+    monkeypatch.setattr(surgery, target, interrupt)
+    s = ReconnectSettings(**FAST_CUT)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        impose_closing_flow(pb)
+        with pytest.raises(interruption) as raised:
+            surgery.cut(pb, s, tmp_path)
+        assert type(raised.value) is interruption
+        assert pb.cut is None and not pb.get_mesh("liquid")._templatemesh.has_pending_surgery_plan()
+    rec = json.loads((tmp_path / "cut_diagnostics.json").read_text())
+    assert rec["outcome"] == "interrupted" and rec["failed_at"] == stage
+    assert rec["error"].startswith(interruption.__name__)
 
 
 def test_cut_is_refused_too_close_to_the_neck(tmp_path):
