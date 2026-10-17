@@ -156,9 +156,22 @@ class ReconnectSettings:
     dt0: float = 1e-9  # first step after the cut
     dt_growth: float = 1.25  # growth of the step after the cut
     courant: float = 0.2  # and at most courant * (smallest tip element) / (largest surface speed)
+    # the step after the cut also obeys the collapse's rule, courant h_focus / U (the finest focus
+    # size over the largest surface speed anywhere); off, only every node's own Courant limit
+    # (courant_limit) and the capillary time of the sharpest tip or jet base bound it
+    focus_courant: bool = True
+    # each step after the cut makes at least this many Newton iterations, whatever its tolerance:
+    # at the steps after a cut (dt about 1e-9) the tolerance newton_floor/dt passes the first
+    # iterate, whose error is systematic and accumulates into noise at the scale of the elements
+    newton_min_iterations: int = 2
     tau_end: float = math.inf  # time after the cut at which the continuation ends
     max_events: int = 1
     bridge_stop: float = 0.1  # stop once the bridge is shorter than this * its length at the cut
+    # a new neck on either chain stops the run (secondary-pinch-approach) only where it is narrower
+    # than the cut radius and at least this fraction narrower than the lower of the widest points on
+    # either side of it along the chain, or narrower than the mesh can follow (neck_elements h_min):
+    # a ripple on a jet thinner than the cut radius is no neck
+    neck_depth: float = 0.25
     bubble_stop: float = 0.01  # or the bubble has shrunk below this fraction of its volume at the cut
     # The interface after the cut, read on its quadratic elements (p2_edges, interface_guard) after
     # every accepted step and on the input of every rebuild: a rebuild refines where the tangent of
@@ -260,11 +273,17 @@ class ReconnectSettings:
                               ("bubble_model", BUBBLE_MODELS)):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"reconnect.{name} must be one of {allowed}")
-        for name in ("projection", "restore_pressure", "inverted_element_remesh"):
+        for name in ("projection", "restore_pressure", "inverted_element_remesh", "focus_courant"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"reconnect.{name} must be true or false")
         if not (self.tau_end > 0):
             raise ValueError("reconnect.tau_end must be positive")
+        if isinstance(self.newton_min_iterations, bool) or not isinstance(
+                self.newton_min_iterations, int) or self.newton_min_iterations < 1:
+            raise ValueError("reconnect.newton_min_iterations must be a positive integer")
+        if isinstance(self.neck_depth, bool) or not isinstance(self.neck_depth, (int, float)) \
+                or not 0.0 <= self.neck_depth < 1.0:
+            raise ValueError("reconnect.neck_depth must lie in [0, 1)")
         if not self.min_cap_angle < 90.0:
             raise ValueError("reconnect.min_cap_angle must be below 90 degrees")
         for name in ("tip_size", "bridge_size"):
@@ -365,6 +384,27 @@ def chain_neck(points, end_types, skip: int = 2) -> tuple[float, float, int]:
     last = len(P) - 1 - (skip if end_types[1] == AXIS else 0)
     nk = [x for x in necks(Profile(P[:, 0], P[:, 1]), skip=skip) if x[2] <= last]
     return nk[0] if nk else (math.nan, math.nan, -1)
+
+
+def chain_necks(points, end_types, skip: int = 2) -> list[dict]:
+    """Every interior local minimum of ``r`` along one chain (as :func:`chain_neck`), narrowest
+    first, with its depth: ``shoulder``, the lower of the largest ``r`` on either side of it along
+    the chain, and ``depth = 1 - r/shoulder``;
+    ``side`` is ``gas`` where the gas lies at smaller ``r`` (the chain runs upwards there, with the
+    liquid on its right, as every chain is ordered) and ``liquid`` on a jet or thread of liquid."""
+    P = np.asarray(points, dtype=float)
+    r = P[:, 0]
+    last = len(P) - 1 - (skip if end_types[1] == AXIS else 0)
+    out = []
+    for r_n, z_n, i in necks(Profile(r, P[:, 1]), skip=skip):
+        if i > last:
+            continue
+        shoulder = min(float(r[:i].max()), float(r[i + 1:].max()))  # 1 <= i <= len - 2
+        dz = float(P[min(i + 1, len(P) - 1), 1] - P[i - 1, 1])
+        out.append({"r": r_n, "z": z_n, "index": i, "shoulder": shoulder,
+                    "depth": 1.0 - r_n / shoulder if shoulder > 0.0 else 0.0,
+                    "side": "gas" if dz > 0.0 else "liquid"})
+    return out
 
 
 # --- chains -------------------------------------------------------------------------------------
@@ -842,7 +882,9 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     cavity tips, on different chains, meeting across it), the chains touching elsewhere, the
     bubble's two tips meeting (it would become a ring), a new neck on either chain narrower than
     ``max(delta, neck_elements h_min)`` (``secondary-pinch-approach``: the thread behind a fresh cap
-    can pinch again), a closing fold on either chain (with the driver's fold limits: ``fold_gap``
+    can pinch again; a neck counts only where it is ``neck_depth`` below the lower of the widest
+    points on either side of it along the chain, or narrower than ``neck_elements h_min`` whatever
+    its depth: :func:`chain_necks`), a closing fold on either chain (with the driver's fold limits: ``fold_gap``
     with ``fold_ratio``, and a gap below ``max(fold_stop, fold_stop_elements h_elem)``): the
     ``annular-contact-approach`` (trigger ``fold-gap``) when the fold pair straddles the base of a
     jet, the apex of the groove around it (``apexes``: per chain, ``{"tip", "index", ...}`` with
@@ -893,10 +935,13 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     neck_limit = max(settings.delta, neck_elements * h_min)
     named = (("bubble", bubble), ("open", cavity))
     for name, c in named:
-        r_n, z_n, _ = chain_neck(c.points, c.end_types)
-        if math.isfinite(r_n) and r_n < neck_limit:
-            return {"reason": "secondary-pinch-approach", "trigger": "neck-radius", "chain": name,
-                    "r_neck": r_n, "z_neck": z_n, "neck_limit": neck_limit}
+        for nk in chain_necks(c.points, c.end_types):
+            if nk["r"] < neck_limit and (nk["depth"] >= settings.neck_depth
+                                          or nk["r"] < neck_elements * h_min):
+                return {"reason": "secondary-pinch-approach", "trigger": "neck-radius",
+                        "chain": name, "r_neck": nk["r"], "z_neck": nk["z"],
+                        "neck_limit": neck_limit, "neck_shoulder": nk["shoulder"],
+                        "neck_depth": nk["depth"], "neck_side": nk["side"]}
     folds = []
     for name, c in named:
         fold = fold_gap(c.points[:, 0], c.points[:, 1], ratio=fold_ratio, stop=fold_stop,

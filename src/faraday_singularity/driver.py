@@ -274,6 +274,7 @@ continues in the post-cut mode.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import time
@@ -1009,14 +1010,17 @@ class CollapseDriver:
         finite = [float(x) for x in scales if math.isfinite(x) and x > 0.0]
         return bubble, tips, min(finite) if finite else math.inf
 
-    def _complete_tip_jet(self, name: str, tj: dict, h_focus: float):
+    def _complete_tip_jet(self, name: str, tj: dict, h_focus: float,
+                          probe: tuple[list[float], bool] | None = None):
         """Complete the jet of one of the bubble's tips (:meth:`_bubble_features`) in place, as
         :meth:`measure` does the open chain's: whether its axis end is the lowest point of the end
         again (``axis_lowest``), whether a jet stands there (``jet_born``: one did at the last step
         and the end is not lowest again, or it passes the test of a born jet now), and, while one
         stands, the flux ``Q_j`` through the disc of radius ``r_j`` at the base, the mean speed
         ``V_j = Q_j/(pi r_j^2)`` and ``We_j = V_j^2 r_j``. ``Q_j`` and ``V_j`` are positive along
-        the jet, into the bubble: downwards from the bubble's top."""
+        the jet, into the bubble: downwards from the bubble's top. Without ``probe`` (the axial
+        velocity at :meth:`_tip_probe_points`, which :meth:`measure` locates with the others) it
+        reads the velocity itself."""
         s = self.s
         flat = tj["index"] > 0 and tj["rise"] <= s.flat_aspect * max(tj["r_j"], h_focus)
         tj["axis_lowest"] = bool(tj["index"] == 0 or flat)
@@ -1024,13 +1028,36 @@ class CollapseDriver:
                               or tj["jet"])
         tj.update(Q_j=math.nan, V_j=math.nan, We_j=math.nan, flux_found=True)
         if tj["jet_born"] and tj["r_j"] > 0.0:
-            rr, ww = gauss_disc_points(tj["r_j"], s.probe_points)
-            w, found = self.pb.axial_velocity_at([(x, tj["z_b"]) for x in rr])
+            _, ww = gauss_disc_points(tj["r_j"], s.probe_points)
+            w, found = probe if probe is not None else self.pb.axial_velocity_at(
+                self._tip_probe_points(tj))
             tj["flux_found"] = found
             if found:
                 Q = BUBBLE_TIP_SIGNS[name] * float(np.dot(ww, w))
                 V = Q / (math.pi * tj["r_j"] ** 2)
                 tj.update(Q_j=Q, V_j=V, We_j=V**2 * tj["r_j"])
+
+    def _probe(self, sets) -> list[tuple[list[float], bool]]:
+        """The axial velocity at each set of points: one location of them all where the problem
+        offers it (``FaradayProblem.axial_velocity_sets``), else one call per set."""
+        many = getattr(self.pb, "axial_velocity_sets", None)
+        if many is not None:
+            return many(sets)
+        return [self.pb.axial_velocity_at(pts) for pts in sets]
+
+    def _tip_probe_points(self, tj: dict) -> list[tuple[float, float]]:
+        """The points of the disc at the base of a tip's jet at which :meth:`_complete_tip_jet`
+        reads the axial velocity."""
+        rr, _ = gauss_disc_points(tj["r_j"], self.s.probe_points)
+        return [(x, tj["z_b"]) for x in rr]
+
+    def _tip_jet_probed(self, name: str, tj: dict, h_focus: float) -> bool:
+        """Whether :meth:`_complete_tip_jet` will read a velocity for this tip (a jet stands)."""
+        s = self.s
+        flat = tj["index"] > 0 and tj["rise"] <= s.flat_aspect * max(tj["r_j"], h_focus)
+        lowest = bool(tj["index"] == 0 or flat)
+        born = bool((self.state.tip_born.get(name, False) and not lowest) or tj["jet"])
+        return born and tj["r_j"] > 0.0
 
     def _track_tips(self, m: dict, snapshot: bool = True):
         """After a cut: record the jets of the bubble's tips that the measured state ``m`` finds
@@ -1089,15 +1116,23 @@ class CollapseDriver:
 
         Q = V = We = math.nan
         found = True
+        # the discs at the base of every jet that stands, located in one call
+        sets = {}
         if born and r_j > 0.0:
             rr, ww = gauss_disc_points(r_j, s.probe_points)
-            w, found = pb.axial_velocity_at([(x, jb.z_b) for x in rr])
+            sets[None] = [(x, jb.z_b) for x in rr]
+        for name, tj in tips.items():
+            if self._tip_jet_probed(name, tj, h_focus):
+                sets[name] = self._tip_probe_points(tj)
+        probes = dict(zip(sets, self._probe(list(sets.values()))))
+        if None in probes:
+            w, found = probes[None]
             if found:
                 Q = float(np.dot(ww, w))
                 V = Q / (math.pi * r_j**2)
                 We = V**2 * r_j
         for name, tj in tips.items():
-            self._complete_tip_jet(name, tj, h_focus)
+            self._complete_tip_jet(name, tj, h_focus, probes.get(name))
 
         near_r = max(2.0 * ell, 4.0 * h_focus)
         near = r <= near_r
@@ -1796,7 +1831,9 @@ class CollapseDriver:
             if st.step >= s.max_steps:
                 stop = {"reason": "max-steps"}
                 break
-            dt = min(s.dt_max, s.courant * m["h_focus"] / m["U"],
+            # after a cut the rule of the focus applies only with reconnect.focus_courant
+            focus_courant = r is None or r.focus_courant
+            dt = min(s.dt_max, s.courant * m["h_focus"] / m["U"] if focus_courant else math.inf,
                      s.capillary * math.sqrt(m["ell"] ** 3), s.t_end - t)
             if r is not None:  # both chains: every node's Courant limit and the tips' capillary time
                 pc = self._post_cut_state()
@@ -1820,8 +1857,9 @@ class CollapseDriver:
             defer = self._defers_distortion()
             rebuilds = pb.remesh_count
             try:
-                pb.run(t + dt, timestep=dt, maxstep=dt, outstep=False, temporal_error=1.0,
-                       newton_solver_tolerance=tol)
+                with self._post_cut_solve():
+                    pb.run(t + dt, timestep=dt, maxstep=dt, outstep=False, temporal_error=1.0,
+                           newton_solver_tolerance=tol)
             except RuntimeError as exc:
                 # the problem now holds a rejected iterate: stop on the last measured state ``m``,
                 # but only if oomph-lib gave up below its smallest step
@@ -1937,6 +1975,27 @@ class CollapseDriver:
                           "inverted_element_remeshes": self._inversion_remeshes,
                           "axis_midside_repairs": getattr(pb, "axis_repairs_total", 0)}
         return out
+
+    @contextlib.contextmanager
+    def _post_cut_solve(self):
+        """Around each step after a cut: at least ``reconnect.newton_min_iterations`` Newton
+        iterations per solve (``FaradayProblem.min_newton_iterations``), and the snapshot that
+        pyoomph's net for an inverted element takes before the step (``_snapshot_state``, through
+        ``save_state`` into memory) uncompressed: zlib took about 8% of a step, and the snapshot
+        is lossless either way. The dumps the driver writes keep their compression."""
+        pb, r = self.pb, self.reconnect
+        if r is None or not hasattr(pb, "release_newton_tolerance"):  # a FaradayProblem only
+            yield
+            return
+        level = pb.states_compression_level
+        pb.min_newton_iterations = r.newton_min_iterations
+        pb.states_compression_level = None
+        try:
+            yield
+        finally:
+            pb.min_newton_iterations = 1
+            pb.release_newton_tolerance()
+            pb.states_compression_level = level
 
     # --- after a cut: the nets and the forensics ----------------------------------------------
 

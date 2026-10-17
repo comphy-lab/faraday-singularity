@@ -344,7 +344,10 @@ at the mean of its edge's vertices, in position and velocity at the current and 
 and leaves every other node alone (`axis_repair` in the `remesh` event). The driver in addition
 stops before a second change of topology: the bridge closing, the chains
 approaching each other, the bubble's two tips meeting, a new neck narrower than `delta` on either
-chain, a closing fold on either chain, a spline through the nodes of either chain that contacts
+chain (only a neck at least `neck_depth`, 0.25, narrower than the lower of the widest points on
+either side of it along the chain, or narrower than three of the smallest elements whatever its
+depth: a ripple on a jet thinner than `delta` is no neck; the stop says whether the gas or the
+liquid lies inside the neck), a closing fold on either chain, a spline through the nodes of either chain that contacts
 itself (`self-contact-approach` with `trigger` `spline-contact`), the bubble draining away, or
 `tau_end` after the cut. A closing fold whose pair of nodes straddles the base of a jet, the
 annular groove around the jet closing, is the `annular-contact-approach` (`trigger` `fold-gap`,
@@ -355,7 +358,11 @@ its two sides lie at least four elements apart along the surface, a fold of the 
 (`contact` `fold`), or closer, a kink at the scale of the mesh (`kink`). The step also follows every
 node of both chains (a Courant limit `courant h/|u|` over each node's element length), the
 capillary time of the sharpest of the three tips on the axis and of the bases of their jets, and
-the cut's `dt_growth`. After a cut, no Newton failure ends a run cleanly; the profiles of the
+the cut's `dt_growth`; with `focus_courant` (the default) also the collapse's rule, the finest focus
+size over the largest surface speed anywhere. Each step after the cut makes at least
+`newton_min_iterations` (2) Newton iterations whatever its tolerance: at the small steps after a
+cut the tolerance `newton_floor/dt` passes the first iterate, whose systematic error grows into
+noise at the scale of the elements. After a cut, no Newton failure ends a run cleanly; the profiles of the
 state the failing step started from are written first (`profile_<step>_lastgood.txt` and its
 `_bubble` beside it), and a profile is written at every step while an element of either chain
 turns by more than `edge_turn_refine`. For sensitivity tests only, `rebuild_spline` `vertices`

@@ -168,7 +168,13 @@ add a second top-level `cases/` tree.
   both chains, a fold pair that straddles the base of a jet being the `annular-contact-approach`,
   trigger `fold-gap`, with the jet, its apex and `R_apex`; a spline that contacts itself; the guard
   last) and at `tau_end`; the step also follows every node of both chains (`reconnect.courant_limit`)
-  and the capillary time of the sharpest tip or jet base; no Newton failure ends the run cleanly,
+  and the capillary time of the sharpest tip or jet base, and, with `focus_courant` (default),
+  the collapse's rule `courant h_focus/U`; each step makes at least `newton_min_iterations` (2)
+  Newton iterations whatever its tolerance (`FaradayProblem.min_newton_iterations`, set by the
+  driver around each step: the tolerance is held at zero up to the test after the last required
+  iteration); a new neck stops the run (`secondary-pinch-approach`) only `neck_depth` (0.25)
+  below the lower of the widest points on either side of it along its chain, or below
+  `neck_elements h_min` (`reconnect.chain_necks`; `neck_side` gas or liquid); no Newton failure ends the run cleanly,
   and the profiles of the state the failing step started from are written first
   (`profile_<step>_lastgood{,_bubble}.txt`), as is a profile at every step while an element turns
   beyond `edge_turn_refine`; rotating dumps follow at least each time `tau` doubles and the end
@@ -205,6 +211,10 @@ add a second top-level `cases/` tree.
   cut and post-cut restarts, the prototype). A run without such a rebuild in the refined phase is
   the same to the byte as at 148340e (`testCases/test_distortion_remesh.py`); in one with it, the
   `diagnostics.txt` row of that step precedes the rebuild, as for the driver's other rebuilds.
+- Each integral of `FaradayProblem.observables()` is evaluated once per state (`_integrals`: the
+  time, the rebuild and a hash of the dofs and pinned values), the driver locates the probe discs
+  of every jet in one call (`axial_velocity_sets`), and after a cut pyoomph's snapshot before each
+  step is written uncompressed: none of these changes a value written.
 - Runs of one case in fresh processes differ by about 1e-14 relative unless MKL runs on one thread
   (`MKL_NUM_THREADS=1`; `OMP_NUM_THREADS` alone does not do it); compare runs to round-off, or set
   it when a comparison must be exact.

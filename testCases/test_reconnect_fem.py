@@ -29,6 +29,7 @@ Each problem compiles in seconds; the module takes a little over three minutes.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -2046,3 +2047,149 @@ def test_ordinary_meshes_steps_and_dumps_are_unchanged(tmp_path):
             assert np.array_equal(np.concatenate(pb.interface_arrays()), runs[src]["vec"])
             _step(pb, 0.02)  # and continues
             assert len(pb.interface_segments()) == 1
+
+
+def test_after_a_cut_each_step_makes_two_newton_iterations_whatever_its_tolerance(tmp_path):
+    """At the steps after a cut (dt about 1e-9) the driver's tolerance, newton_floor/dt, passed the
+    first Newton iterate, whose systematic error grew into noise at the scale of the elements. Around
+    each step after a cut the driver asks for ``reconnect.newton_min_iterations`` (2) iterations:
+    with a tolerance that the first iterate passes, a step then makes two and lands next to the
+    converged solve. The tolerance, the iteration rule and the compression of the dumps are given
+    back after the step; the snapshot pyoomph keeps before it is uncompressed, and lossless."""
+    s = ReconnectSettings(**FAST_CUT)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        impose_closing_flow(pb)
+        rec = surgery.cut(pb, s, tmp_path)
+        post = str(rec["postcut_state"]["path"])
+        driver = types.SimpleNamespace(pb=pb, reconnect=s)
+        tol0, level0 = pb.newton_solver_tolerance, pb.states_compression_level
+
+        def step(tol, rule):
+            pb.load_state(post)
+            t = pb.get_current_time(dimensional=False, as_float=True)
+            with CollapseDriver._post_cut_solve(driver) if rule else contextlib.nullcontext():
+                if rule:
+                    assert pb.min_newton_iterations == 2 and pb.states_compression_level is None
+                pb.run(t + 1e-5, timestep=1e-5, maxstep=1e-5, outstep=False, temporal_error=1.0,
+                       newton_solver_tolerance=tol)
+            return len(pb.get_last_residual_convergence()) - 1, _state_vector(pb)
+
+        one, x_one = step(1e2, rule=False)
+        two, x_two = step(1e2, rule=True)
+        converged, x_conv = step(1e-11, rule=False)
+        assert (one, two) == (1, 2) and converged >= 2
+        assert pb.min_newton_iterations == 1 and pb._held_tolerance is None
+        assert pb.newton_solver_tolerance == tol0 and pb.states_compression_level == level0
+        scale = np.max(np.abs(x_conv))
+        err_one = np.max(np.abs(x_one - x_conv)) / scale
+        err_two = np.max(np.abs(x_two - x_conv)) / scale
+        assert err_two < 1e-2 * err_one, (err_one, err_two)  # quadratic: about err_one ** 2
+        # a tolerance the first iterate does not pass: the rule adds no iteration
+        assert step(1e-11, rule=True)[0] == converged
+        # the snapshot of the state, uncompressed and compressed, holds the same state
+        pb.load_state(post)
+        x0 = _state_vector(pb)
+        packed = pb._snapshot_state()
+        pb.states_compression_level = None
+        plain = pb._snapshot_state()
+        pb.states_compression_level = level0
+        assert len(plain) > len(packed)
+        for snap in (plain, packed):
+            pb._restore_state(snap)
+            assert np.array_equal(_state_vector(pb), x0)
+
+
+def test_the_jets_are_probed_in_one_location_and_each_integral_once_per_state(tmp_path,
+                                                                              monkeypatch):
+    """pyoomph builds a locator over the whole liquid mesh at each call of evaluate_at_points: the
+    driver locates the discs of every jet in one call, with the same values as one call per disc.
+    The integrals that depend on the current state only are evaluated once for it, whichever of a
+    step's diagnostics, the driver's row and the budgets after a cut asks first; a step, a rebuild
+    or a reload evaluates them again."""
+    s = ReconnectSettings(**FAST_CUT)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        impose_closing_flow(pb)
+        rec = surgery.cut(pb, s, tmp_path)
+        geo = rec["geometry"]
+        z_mid = 0.5 * (geo["z_bubble_top"] + geo["z_cavity_tip"])
+        sets = [[(x, z) for x in np.linspace(0.0, 0.01, 7)]
+                for z in (z_mid, geo["z_bubble_top"] - 0.05, geo["z_cavity_tip"] - 0.2)]
+        sets.append([(0.0, 50.0)])  # outside the liquid
+        batched = pb.axial_velocity_sets(sets)
+        single = [pb.axial_velocity_at(p) for p in sets]
+        assert [f for _, f in batched] == [f for _, f in single]
+        for (w, _), (w1, _) in zip(batched, single):
+            np.testing.assert_array_equal(w, w1)  # to the bit, NaN where a point is not found
+        assert batched[0][1] and not batched[-1][1]  # the bridge; and outside the liquid
+        assert pb.axial_velocity_sets([]) == []
+
+        calls = []
+        real = pb.get_mesh
+
+        class Counting:
+            def __init__(self, mesh):
+                self._mesh = mesh
+
+            def evaluate_observable(self, name):
+                calls.append(name)
+                return self._mesh.evaluate_observable(name)
+
+        def counting(name):
+            return Counting(real(name)) if name in ("liquid", "liquid/interface") else real(name)
+
+        def evaluate_all():
+            monkeypatch.setattr(pb, "get_mesh", counting)
+            try:
+                return pb.observables(), pb.observables(), pb.cut_observables()
+            finally:
+                monkeypatch.setattr(pb, "get_mesh", real)
+
+        pb._integral_cache = None  # the cut's budgets have evaluated some for this state
+        first, again, budgets = evaluate_all()
+        assert first == again and calls == ["volume", "kinetic_energy", "dissipation", "area",
+                                            "amp", "momentum_z", "divergence_sq",
+                                            "projection_change", "pressure_sq"]
+        for mesh, name in (("liquid", "volume"), ("liquid", "kinetic_energy"),
+                           ("liquid", "dissipation"), ("liquid/interface", "area")):
+            assert first[name] == float(real(mesh).evaluate_observable(name))
+        assert budgets["volume"] == first["volume"] and budgets["area"] == first["area"]
+        for change in (lambda: _step(pb, 1e-5), pb.force_remesh,
+                       lambda: pb.load_state(str(rec["postcut_state"]["path"]))):
+            calls.clear()
+            change()
+            now = evaluate_all()[0]
+            assert calls[:5] == ["volume", "kinetic_energy", "dissipation", "area", "amp"]
+            assert now["kinetic_energy"] == float(real("liquid").evaluate_observable(
+                "kinetic_energy"))
+
+
+def test_after_a_cut_the_step_can_leave_the_rule_of_the_focus_to_every_node(tmp_path):
+    """``reconnect.focus_courant`` off: the step after the cut is bounded by every node's own
+    Courant limit (and the capillary time of the sharpest feature), not by the finest focus size
+    over the largest speed anywhere; the default keeps both."""
+    steps = {}
+    for flag in (True, False):
+        out = tmp_path / str(flag)
+        out.mkdir()
+        s = ReconnectSettings(**dict(FAST_CUT, focus_courant=flag, dt_growth=4.0))
+        # the focus's rule made strict (the collapse's courant), the nodes' own as before
+        settings = CollapseSettings(t_end=10.0, dt_max=0.01, max_steps=4, growth=4.0,
+                                    courant=0.02)
+        with neck_problem(out, s) as pb:
+            pb.initialise()
+            impose_closing_flow(pb)
+            driver = CollapseDriver(pb, settings, out, reconnect=s)
+            surgery.cut(pb, s, out, driver=driver, log=lambda *_: None)
+            result = driver.run(1e-8)
+            driver.close()
+        assert result["stop"]["reason"] == "max-steps"
+        table = _columns(out / "collapse.txt")
+        chains = _columns(out / "chains.txt")
+        steps[flag] = (table, chains)
+    on, off = steps[True], steps[False]
+    # the first step, from the state of the first row (later rows precede a rebuild of the step)
+    assert on[0]["dt"][1] <= settings.courant * on[0]["h_focus"][0] / on[0]["U"][0] * (1 + 1e-12)
+    assert off[0]["dt"][1] <= off[1]["dt_courant"][0] * (1 + 1e-12)
+    assert off[0]["dt"][1:].sum() > on[0]["dt"][1:].sum()

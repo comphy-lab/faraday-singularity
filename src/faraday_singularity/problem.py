@@ -33,6 +33,7 @@ of either kind of problem load into the other. Without ``reconnect`` the problem
 
 from __future__ import annotations
 
+import hashlib
 import math
 from pathlib import Path
 
@@ -58,6 +59,11 @@ from .reconnect import ReconnectSettings, orient_chain
 # a midside node of the axis further than this many edge lengths off the middle of its edge has been
 # misplaced by the transfer to a rebuilt mesh (FaradayProblem.repair_axis_midsides)
 AXIS_MIDSIDE_LIMIT = 0.1
+# the integrals of observables() depend on the current values and positions only: they are kept for
+# the state they were evaluated on (FaradayProblem._integrals), which the diagnostics of a step and the
+# driver's row of it both read
+CACHED_INTEGRALS = {"liquid": ("volume", "kinetic_energy", "dissipation"),
+                    "liquid/interface": ("area", "amp")}
 
 
 class FaradayProblem(Problem):
@@ -88,6 +94,13 @@ class FaradayProblem(Problem):
         # repaired since the problem was made
         self.axis_repair: dict | None = None
         self.axis_repairs_total = 0
+        # each Newton solve makes at least this many iterations (the collapse driver sets it around
+        # a step after a cut: reconnect.newton_min_iterations); 1 leaves oomph-lib's test alone
+        self.min_newton_iterations = 1
+        self._newton_checks = 0
+        self._held_tolerance: float | None = None
+        # (fingerprint of the state, {(mesh, name): value}) of the integrals last evaluated
+        self._integral_cache: tuple | None = None
 
     def initial_elevation(self, r):
         return self.nd.a0 * j0(r)
@@ -164,12 +177,38 @@ class FaradayProblem(Problem):
         iw = self.get_mesh("liquid").get_nodal_field_indices()["velocity_y"]
         return float(node.x(1)), float(node.value(iw))
 
+    def _fingerprint(self) -> tuple:
+        """What identifies the state an integral was evaluated on: the time, the rebuild, and the
+        values of every degree of freedom and pinned value, the nodal positions included."""
+        dofs, _ = self.get_current_dofs()
+        h = hashlib.blake2b(np.ascontiguousarray(dofs).tobytes(), digest_size=16)
+        h.update(np.ascontiguousarray(self.get_current_pinned_values(True)).tobytes())
+        return (self.get_current_time(dimensional=False, as_float=True), self.remesh_count,
+                len(dofs), h.hexdigest())
+
+    def _integrals(self, mesh: str, names) -> dict[str, float]:
+        """``evaluate_observable`` of ``names`` on ``mesh``; those of ``CACHED_INTEGRALS`` once per
+        state (:meth:`_fingerprint`), so that a step's diagnostics, the driver's row of it and the
+        budgets after a cut evaluate each integral once. The others (history or pressure) are
+        always evaluated."""
+        key = self._fingerprint()
+        if self._integral_cache is None or self._integral_cache[0] != key:
+            self._integral_cache = (key, {})
+        cache = self._integral_cache[1]
+        m = self.get_mesh(mesh)
+        out = {}
+        for name in names:
+            if name not in CACHED_INTEGRALS.get(mesh, ()):
+                out[name] = float(m.evaluate_observable(name))
+                continue
+            if (mesh, name) not in cache:
+                cache[(mesh, name)] = float(m.evaluate_observable(name))
+            out[name] = cache[(mesh, name)]
+        return out
+
     def observables(self) -> dict[str, float]:
-        bulk = self.get_mesh("liquid")
-        surf = self.get_mesh("liquid/interface")
-        out = {name: float(bulk.evaluate_observable(name))
-               for name in ("volume", "kinetic_energy", "dissipation")}
-        out.update({name: float(surf.evaluate_observable(name)) for name in ("area", "amp")})
+        out = self._integrals("liquid", ("volume", "kinetic_energy", "dissipation"))
+        out.update(self._integrals("liquid/interface", ("area", "amp")))
         return out
 
     DIAG_COLUMNS = ("time", "z_axis", "w_axis", "amp", "volume", "area", "kinetic_energy",
@@ -250,23 +289,34 @@ class FaradayProblem(Problem):
         """The budgets a cut reports: bulk integrals, on the free surface its area and the integral
         of the squared pressure, and the integral of the pressure over the bottom (the pressure
         impulse, right after the projection)."""
-        bulk = self.get_mesh("liquid")
-        surf = self.get_mesh("liquid/interface")
-        out = {name: float(bulk.evaluate_observable(name))
-               for name in ("volume", "kinetic_energy", "momentum_z", "divergence_sq",
-                            "projection_change")}
-        out.update({name: float(surf.evaluate_observable(name)) for name in ("area", "pressure_sq")})
+        out = self._integrals("liquid", ("volume", "kinetic_energy", "momentum_z",
+                                         "divergence_sq", "projection_change"))
+        out.update(self._integrals("liquid/interface", ("area", "pressure_sq")))
         out["pressure_bottom"] = float(self.get_mesh("liquid/bottom").evaluate_observable(
             "pressure_bottom"))
         return out
 
     def axial_velocity_at(self, points) -> tuple[list[float], bool]:
         """``u_z`` at ``(r, z)`` points inside the liquid; the flag is False if any is not found."""
+        return self.axial_velocity_sets([points])[0]
+
+    def axial_velocity_sets(self, sets) -> list[tuple[list[float], bool]]:
+        """:meth:`axial_velocity_at` of each set of points, all located in one call: pyoomph builds
+        a locator over the whole liquid mesh for each call, which dominates its cost."""
+        sets = [list(pts) for pts in sets]
+        flat = [[float(r), float(z)] for pts in sets for r, z in pts]
+        if not flat:
+            return [([], True) for _ in sets]
         bulk = self.get_mesh("liquid")
         col = 1 + bulk.get_nodal_field_indices()["velocity_y"]
-        rows = bulk.evaluate_at_points([[float(r), float(z)] for r, z in points], lagrangian=False)
-        found = all(row[0] == 1.0 for row in rows)
-        return [float(row[col]) if row[0] == 1.0 else float("nan") for row in rows], found
+        rows = bulk.evaluate_at_points(flat, lagrangian=False)
+        out, k = [], 0
+        for pts in sets:
+            part = rows[k:k + len(pts)]
+            k += len(pts)
+            out.append(([float(row[col]) if row[0] == 1.0 else float("nan") for row in part],
+                        all(row[0] == 1.0 for row in part)))
+        return out
 
     def oomph_log_tail(self, size: int = 1 << 16) -> str:
         """The last ``size`` bytes of the problem's log file, or ``""`` without one.
@@ -455,6 +505,38 @@ class FaradayProblem(Problem):
         if out["repaired"]:
             self.reapply_boundary_conditions()
         return out
+
+    # --- at least min_newton_iterations Newton iterations per solve ------------------------------
+
+    def actions_before_newton_solve(self):
+        self.release_newton_tolerance()  # a solve that failed while it was held
+        super().actions_before_newton_solve()
+        self._newton_checks = 0
+
+    def actions_before_newton_convergence_check(self):
+        super().actions_before_newton_convergence_check()
+        if self.min_newton_iterations <= 1:
+            return
+        # oomph-lib calls this before the residual it tests at the start of a solve and after each
+        # Newton step, so call k + 1 precedes the test after step k: below min_newton_iterations
+        # steps no residual passes the zero tolerance held, after them the tolerance comes back
+        self._newton_checks += 1
+        if self._newton_checks <= self.min_newton_iterations:
+            if self._held_tolerance is None:
+                self._held_tolerance = self.newton_solver_tolerance
+            self.newton_solver_tolerance = 0.0
+        else:
+            self.release_newton_tolerance()
+
+    def actions_after_newton_solve(self):
+        self.release_newton_tolerance()
+        super().actions_after_newton_solve()
+
+    def release_newton_tolerance(self):
+        """Give back the Newton tolerance that a solve held at zero for its first iterations."""
+        if self._held_tolerance is not None:
+            self.newton_solver_tolerance = self._held_tolerance
+            self._held_tolerance = None
 
     def actions_after_remeshing(self):
         super().actions_after_remeshing()

@@ -1319,3 +1319,68 @@ def test_the_resolution_after_the_cut_is_a_cut_key_that_defaults_to_the_collapse
     recorded = json.loads(json.dumps(s.to_dict()))
     assert not rc.ReconnectSettings(delta=1e-3, elements_per_scale=8).continues_cut(recorded)
     assert s.continues_cut(recorded)
+
+
+def test_the_solve_and_step_settings_after_the_cut_are_checked_and_are_cut_keys():
+    s = rc.ReconnectSettings(delta=1e-3)
+    assert (s.newton_min_iterations, s.neck_depth, s.focus_courant) == (2, 0.25, True)
+    for bad in ({"newton_min_iterations": 0}, {"newton_min_iterations": 1.5},
+                {"newton_min_iterations": True}, {"neck_depth": 1.0}, {"neck_depth": -0.1},
+                {"neck_depth": True}, {"focus_courant": 1}):
+        with pytest.raises(ValueError):
+            rc.ReconnectSettings.from_dict({"delta": 1e-3, **bad})
+    recorded = json.loads(json.dumps(s.to_dict()))
+    for key, value in (("newton_min_iterations", 1), ("neck_depth", 0.5),
+                       ("focus_courant", False)):
+        assert not rc.ReconnectSettings(delta=1e-3, **{key: value}).continues_cut(recorded), key
+    # a cut recorded before them (every cut before the two-iteration rule) is cut again
+    old = {k: v for k, v in recorded.items()
+           if k not in ("newton_min_iterations", "neck_depth", "focus_courant")}
+    assert not s.continues_cut(old)
+
+
+def _bubble_with_jet(dent=0.0, n_jet=401):
+    """A bubble whose top is a jet of liquid of radius 5e-4, thinner than delta = 1e-3, coming
+    down into it: the chain runs from the bubble's bottom on the axis up its wall, inwards over
+    the apex of the groove around the jet, down the jet and round its tip to the axis. ``dent``
+    narrows the jet at mid-length by that fraction over a few nodes."""
+    s = np.linspace(0.0, 1.0, 401)
+    wall = np.column_stack([0.01 * np.sin(0.5 * math.pi * s), 4.6 + 0.08 * s])
+    groove = np.column_stack([np.linspace(0.01, 6e-4, 41)[1:], np.linspace(4.68, 4.69, 41)[1:]])
+    z = np.linspace(4.6895, 4.65, n_jet)
+    k = np.arange(n_jet)
+    jet = np.column_stack([5e-4 * (1.0 - dent * np.exp(-(((k - n_jet // 2) / 3.0) ** 2))), z])
+    a = np.linspace(0.0, 0.5 * math.pi, 17)[1:]
+    tip = np.column_stack([5e-4 * np.cos(a), 4.65 - 5e-4 * np.sin(a)])
+    tip[-1, 0] = 0.0
+    return rc.Chain(np.vstack([wall, groove, jet, tip]), ("axis", "axis"))
+
+
+def test_a_ripple_on_a_jet_thinner_than_delta_is_no_second_pinch():
+    """After the cut at delta = 1e-3 a run stopped on a "neck" of 5e-4 at the top of the bubble:
+    the jet coming down into it, thinner than delta, with a ripple of 2.8e-9 on it. A neck counts
+    only ``neck_depth`` below the lower of the widest points on either side of it along the chain,
+    or below ``neck_elements h_min``; it says on which side the gas is."""
+    s = rc.ReconnectSettings(delta=1e-3)
+    cavity = _cavity(z_tip=4.70)
+    smooth = _bubble_with_jet()
+    cut = rc.cut_geometry([smooth, cavity], 3.0, gas_before=1.0)
+    assert rc.post_cut_stops([smooth, cavity], cut, s, h_min=1e-6) is None
+    rippled = _bubble_with_jet(dent=5.6e-6)  # 2.8e-9 on 5e-4
+    nk = rc.chain_necks(rippled.points, rippled.end_types)[0]  # narrowest first
+    assert nk["r"] == pytest.approx(5e-4 * (1 - 5.6e-6), rel=1e-12) and nk["side"] == "liquid"
+    assert nk["shoulder"] == pytest.approx(5e-4) and nk["depth"] == pytest.approx(5.6e-6, rel=1e-6)
+    assert rc.chain_neck(rippled.points, rippled.end_types)[0] < s.delta  # the old stop fired
+    assert rc.post_cut_stops([rippled, cavity], cut, s, h_min=1e-6) is None
+    # a neck forming on the jet is a second pinch-off, on the liquid side
+    stop = rc.post_cut_stops([_bubble_with_jet(dent=0.6), cavity], cut, s, h_min=1e-6)
+    assert stop["reason"] == "secondary-pinch-approach" and stop["chain"] == "bubble"
+    assert stop["neck_side"] == "liquid" and stop["neck_depth"] == pytest.approx(0.6, rel=1e-6)
+    assert stop["neck_shoulder"] == pytest.approx(5e-4) and stop["r_neck"] == pytest.approx(2e-4)
+    # however shallow, a neck the mesh cannot follow stops the run
+    stop = rc.post_cut_stops([rippled, cavity], cut, s, h_min=2e-4)
+    assert stop["reason"] == "secondary-pinch-approach" and stop["neck_depth"] < 1e-5
+    # a waist of the bubble's wall is on the gas side
+    stop = rc.post_cut_stops([_bubble(waist=0.95), _cavity()],
+                             rc.cut_geometry([_bubble(), _cavity()], 3.0, gas_before=1.0), s, 1e-5)
+    assert stop["neck_side"] == "gas" and stop["neck_depth"] > 0.9
