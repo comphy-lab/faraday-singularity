@@ -55,6 +55,10 @@ from .mesh import FaradayCylinderMesh, MeshSettings
 from .parameters import Dimensionless
 from .reconnect import ReconnectSettings, orient_chain
 
+# a midside node of the axis further than this many edge lengths off the middle of its edge has been
+# misplaced by the transfer to a rebuilt mesh (FaradayProblem.repair_axis_midsides)
+AXIS_MIDSIDE_LIMIT = 0.1
+
 
 class FaradayProblem(Problem):
     mesh_class = FaradayCylinderMesh
@@ -80,6 +84,10 @@ class FaradayProblem(Problem):
         # what RemeshWhen flagged on the accepted steps since the last take_distortion_flags(),
         # while pyoomph leaves the rebuild to the driver (do_call_remeshing_when_necessary off)
         self._distortion_flags: list[dict] = []
+        # after a cut: what repair_axis_midsides() did at the last rebuild, and the nodes it has
+        # repaired since the problem was made
+        self.axis_repair: dict | None = None
+        self.axis_repairs_total = 0
 
     def initial_elevation(self, r):
         return self.nd.a0 * j0(r)
@@ -400,9 +408,60 @@ class FaradayProblem(Problem):
         self._domains_to_remesh.clear()
         return flags
 
+    def repair_axis_midsides(self, limit: float = AXIS_MIDSIDE_LIMIT) -> dict:
+        """Put back on its edge every midside node of the axis that lies more than ``limit`` edge
+        lengths off the middle of its edge, at any time level.
+
+        pyoomph's transfer of the solution to a rebuilt mesh interpolates the node positions, the
+        current ones and their history, as well as the values. After a cut it has placed a midside
+        node of the axis far from its edge: at the bubble's top, 2.8e-4 off the middle of an edge of
+        6.9e-6, while the mesh gmsh wrote had it in place. That turned its curved element inside out
+        (``curved-jacobian``). The axis is straight at every time, so such a node takes, at every
+        time level, the mean of its edge's two vertices in position and in velocity, the values of
+        the axis at a midside node. A node within ``limit`` is left alone, so that a mesh with no
+        such node is unchanged. The levels read and set are the current one and the history the
+        time stepper uses. Returns the nodes repaired, the axis edges read and the largest offset
+        found, in edge lengths (``max_offset``), with where it was (``r``, ``z``)."""
+        bulk = self.get_mesh("liquid")
+        fields = bulk.get_nodal_field_indices()
+        velocity = [fields[k] for k in ("velocity_x", "velocity_y") if k in fields]
+        # the current level and the history the time stepper reads (two for BDF2); its further
+        # storage holds other data (the predictor and pyoomph's continuation slots), not positions
+        n_levels = self.timestepper.nprev_values() + 1
+        out = {"repaired": 0, "edges": 0, "max_offset": 0.0, "r": math.nan, "z": math.nan}
+        for e in self.get_mesh("liquid/axis").elements():
+            if e.nnode() != 3:  # a straight edge has no midside node to misplace
+                continue
+            a, mid, b = (e.node_pt(k) for k in range(3))
+            out["edges"] += 1
+            levels = range(min(n_levels, mid.ntstorage()))
+            offset = 0.0
+            for t in levels:
+                length = math.hypot(b.x_at_t(t, 0) - a.x_at_t(t, 0), b.x_at_t(t, 1) - a.x_at_t(t, 1))
+                gap = math.hypot(mid.x_at_t(t, 0) - 0.5 * (a.x_at_t(t, 0) + b.x_at_t(t, 0)),
+                                 mid.x_at_t(t, 1) - 0.5 * (a.x_at_t(t, 1) + b.x_at_t(t, 1)))
+                if length > 0.0:
+                    offset = max(offset, gap / length)
+            if offset > out["max_offset"]:
+                out.update(max_offset=offset, r=mid.x(0), z=mid.x(1))
+            if offset <= limit:
+                continue
+            for t in levels:
+                for i in range(2):
+                    mid.set_x_at_t(t, i, 0.5 * (a.x_at_t(t, i) + b.x_at_t(t, i)))
+                for k in velocity:
+                    mid.set_value_at_t(t, k, 0.5 * (a.value_at_t(t, k) + b.value_at_t(t, k)))
+            out["repaired"] += 1
+        if out["repaired"]:
+            self.reapply_boundary_conditions()
+        return out
+
     def actions_after_remeshing(self):
         super().actions_after_remeshing()
         self.remesh_count += 1
+        if self.cut is not None:  # after a cut (surgery.cut, surgery.restore_cut)
+            self.axis_repair = self.repair_axis_midsides()
+            self.axis_repairs_total += self.axis_repair["repaired"]
 
     def actions_after_transient_solve(self):
         super().actions_after_transient_solve()

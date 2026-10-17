@@ -159,7 +159,11 @@ add a second top-level `cases/` tree.
   element reaches `jacobian_min` (0.2; trigger `curved-jacobian`, `reconnect.p2_jacobian_bounds`),
   gmsh's high-order optimiser is asked for `high_order_threshold` (0.3), an element below the
   absolute quality `quality_floor` (0.15) asks for a distortion rebuild, and pyoomph's net for an
-  element turned inside out within a step is armed (`inverted_element_remesh`). The stops before
+  element turned inside out within a step is armed (`inverted_element_remesh`). Before that check,
+  every rebuild after a cut puts back on its edge any midside node of the axis that the transfer of
+  the solution (which interpolates node positions too) left more than 0.1 edge lengths off its
+  middle, at the current and history levels (`FaradayProblem.repair_axis_midsides`; `axis_repair`
+  in the `remesh` event, `axis_midside_repairs` in the run result). The stops before
   a second change of topology apply on both chains (`reconnect.post_cut_stops`: the fold stop on
   both chains, a fold pair that straddles the base of a jet being the `annular-contact-approach`,
   trigger `fold-gap`, with the jet, its apex and `R_apex`; a spline that contacts itself; the guard

@@ -1258,7 +1258,7 @@ class CollapseDriver:
             hold["coarsen_held_until"] = st.coarsen_held_until
         after = self.measure()
         self._event("remesh", m, focus_size=size, h_near_before=m["h_near"],
-                    h_near_after=after["h_near"], **hold)
+                    h_near_after=after["h_near"], **hold, **self._axis_repair_note())
         if refining and after["h_near"] > 0.9 * m["h_near"]:
             # the rebuild did not refine: do not try again on every step; a growing scale may
             # coarsen the focus once the hold has passed
@@ -1312,7 +1312,8 @@ class CollapseDriver:
         self._event("remesh", m, focus_size=focus.size, focus_radius=focus.radius,
                     h_near_before=m["h_near"], h_near_after=after["h_near"],
                     asked_by=[g["name"] for g in asked],
-                    regions=self._region_record(regions, focus), **hold)
+                    regions=self._region_record(regions, focus), **hold,
+                    **self._axis_repair_note())
         done = {g["name"]: g for g in after.get("regions", [])}
         if refining and not any(done.get(g["name"], {}).get("h_max", math.inf) <= 0.9 * g["h_max"]
                                 for g in asked):
@@ -1389,8 +1390,15 @@ class CollapseDriver:
         self._event("remesh", m, reason="distortion", **flags[0], flagged_substeps=len(flags),
                     focus_size=new.size, focus_radius=new.radius, focus_size_before=old.size,
                     focus_radius_before=old.radius, h_near_before=m["h_near"],
-                    h_near_after=after["h_near"], **extra)
+                    h_near_after=after["h_near"], **extra, **self._axis_repair_note())
         return after
+
+    def _axis_repair_note(self) -> dict:
+        """For the ``remesh`` event of a rebuild after a cut that put misplaced midside nodes of the
+        axis back on their edges (``FaradayProblem.repair_axis_midsides``): ``axis_repair``, with
+        the nodes repaired and the largest offset found; nothing otherwise."""
+        repair = getattr(self.pb, "axis_repair", None)
+        return {"axis_repair": dict(repair)} if repair and repair.get("repaired") else {}
 
     def _singular(self, m: dict) -> tuple[float, float, int]:
         """Add ``m`` to the singular-time samples; return ``(t0_est, alpha_est, t0_source)``."""
@@ -1926,7 +1934,8 @@ class CollapseDriver:
             t_cut, t_p = self._cut_times()
             out["cut"] = {"t_cut": t_cut, "t_p": t_p, "tau_end": r.tau_end, **self._taus(self._t()),
                           "inverted_element_remesh": self._nets_armed,
-                          "inverted_element_remeshes": self._inversion_remeshes}
+                          "inverted_element_remeshes": self._inversion_remeshes,
+                          "axis_midside_repairs": getattr(pb, "axis_repairs_total", 0)}
         return out
 
     # --- after a cut: the nets and the forensics ----------------------------------------------

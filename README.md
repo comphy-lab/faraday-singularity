@@ -337,7 +337,12 @@ from the Bezier coefficients of its Jacobian determinant, is at least `jacobian_
 `trigger` `curved-jacobian`); gmsh's optimiser of curved elements is asked for
 `high_order_threshold` (0.3); an element whose quality falls below `quality_floor` (0.15) asks for
 a rebuild; and pyoomph's net for an element that turns inside out within a step is armed. The
-driver in addition stops before a second change of topology: the bridge closing, the chains
+transfer of the solution to a rebuilt mesh interpolates the node positions as well, and it has left
+a midside node of the axis far off its edge, turning its element inside out; so every rebuild after
+a cut first puts such a node (more than 0.1 edge lengths off the middle of its straight edge) back
+at the mean of its edge's vertices, in position and velocity at the current and history levels,
+and leaves every other node alone (`axis_repair` in the `remesh` event). The driver in addition
+stops before a second change of topology: the bridge closing, the chains
 approaching each other, the bubble's two tips meeting, a new neck narrower than `delta` on either
 chain, a closing fold on either chain, a spline through the nodes of either chain that contacts
 itself (`self-contact-approach` with `trigger` `spline-contact`), the bubble draining away, or

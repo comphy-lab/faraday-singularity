@@ -1010,6 +1010,59 @@ def test_after_a_cut_every_mesh_has_valid_curved_elements(post_cut_features):
         assert bounds[k] <= _jacobian_sampled(X).min() / lin + 1e-9
 
 
+def test_after_a_cut_a_rebuild_puts_a_misplaced_midside_node_of_the_axis_back(tmp_path):
+    """The transfer to a rebuilt mesh interpolates the node positions; after a cut it has put a
+    midside node of the axis 40 edge lengths off its edge (at the bubble's top, in a cut at delta
+    5e-4), which turned its curved element inside out. Every rebuild after a cut runs
+    ``repair_axis_midsides``, which puts such a node back at the mean of its edge's vertices at every
+    time level, in position and velocity; it finds nothing to do on a sound mesh and leaves it as it
+    is, and it does not run before a cut."""
+    s = ReconnectSettings(**FAST_CUT)
+    with neck_problem(tmp_path, s) as pb:
+        pb.initialise()
+        impose_closing_flow(pb)
+        pb.force_remesh()  # before the cut: no repair
+        assert pb.axis_repair is None and pb.axis_repairs_total == 0
+        surgery.cut(pb, s, tmp_path)
+        _step(pb, 1e-5)
+        pb.force_remesh()
+        sound = pb.axis_repair
+        assert sound["repaired"] == 0 and sound["edges"] > 10 and sound["max_offset"] < 1e-3
+        before = mesh_signature(pb)
+        assert pb.repair_axis_midsides()["repaired"] == 0
+        assert mesh_signature(pb) == before
+        # misplace a midside node of the bridge at every time level, as the transfer did
+        segs = pb.interface_segments()
+        z_cavity = float(next(c for c in segs if c["open"])["z"][0])
+        z_bubble = float(next(c for c in segs if not c["open"])["z"][-1])
+        iv = pb.get_mesh("liquid").get_nodal_field_indices()["velocity_y"]
+        edge = next(e for e in pb.get_mesh("liquid/axis").elements() if e.nnode() == 3
+                    and all(z_bubble < e.node_pt(k).x(1) < z_cavity for k in range(3)))
+        a, mid, b = (edge.node_pt(k) for k in range(3))
+        length = abs(b.x(1) - a.x(1))
+        assert abs(mid.x(1) - 0.5 * (a.x(1) + b.x(1))) < 1e-3 * length  # the middle node
+        levels = range(pb.timestepper.nprev_values() + 1)  # the current level and the history
+        assert len(levels) == 3  # BDF2
+        for t in levels:
+            mid.set_x_at_t(t, 1, mid.x_at_t(t, 1) + 40 * length)
+            mid.set_value_at_t(t, iv, 1e3)
+        pb._jacobian_cache = None
+        assert pb.curved_jacobian_bound(0.2)["min"] < 0.0
+        rec = pb.repair_axis_midsides()
+        assert rec["repaired"] == 1 and rec["max_offset"] == pytest.approx(40.0, rel=1e-2)
+        assert rec["z"] == pytest.approx(0.5 * (a.x(1) + b.x(1)) + 40 * length)
+        for t in levels:
+            for i in range(2):
+                assert mid.x_at_t(t, i) == pytest.approx(0.5 * (a.x_at_t(t, i) + b.x_at_t(t, i)),
+                                                         rel=0, abs=1e-14)
+            assert mid.value_at_t(t, iv) == pytest.approx(
+                0.5 * (a.value_at_t(t, iv) + b.value_at_t(t, iv)), rel=0, abs=1e-12)
+        pb._jacobian_cache = None
+        assert pb.curved_jacobian_bound(0.2)["min"] >= 0.2
+        _step(pb, 1.25e-5)  # and the problem steps on
+        assert len(pb.interface_segments()) == 2
+
+
 def _jacobian_sampled(X, n=40):
     """``det(dx/ds)`` of a quadratic triangle (oomph-lib's order of nodes) sampled over its
     reference triangle, from the derivatives of its Lagrange shape functions."""
