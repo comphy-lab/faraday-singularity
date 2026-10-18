@@ -148,6 +148,7 @@ python run_case.py <collapse-case>.json --outdir <new-run-directory> \
 python postProcess/collapse_table.py <run-directory> [...] --per-episode --out <table>.csv
 python postProcess/collapse_analysis.py <run-directory> --out <analysis-directory> \
     [--rj-window <lo> <hi>]
+python postProcess/event_table.py <run-directory> [...] --out <events>.csv --runs <runs>.csv
 ```
 
 Its run directory also receives:
@@ -543,6 +544,17 @@ verdicts, the ghosts' recontacts, the dumps and meshes deleted and the event the
 and `window_end` (the end of the window the run stopped at, the bubble emptying); a run that failed
 in a liquid cut records that event (`event`: its number, kind, class, outcome, the stage it failed
 at, its record and the dump of the state before it).
+
+`postProcess/event_table.py` tabulates the events of such runs, one row per event and one per run
+(`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event in units of the cut
+radius and of `T = t_p - t_cut` (the neck at its landing, the removed head, the interval since the
+event before at its tip, the jet's base before the cut and its ratio to the neck, the neck's
+distance from the base, the closures, the ghost's recontacts); each run with its events per tip and
+the cascade's verdicts, the drift of its liquid with and without the removals, and a report on the
+base of one jet (`--tip`, the upward jet into the cavity by default) from its `--after-events`-th
+event on: the slopes of `ln r_j` against `ln t'` and of `Q_j` against `t'`, `t' = t - t_p`, with the
+verdict `widens` when both are positive, `narrows` when the first is negative, `mixed` otherwise,
+and the base against the root neck of its chain. The report decides nothing about the run.
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus

@@ -359,6 +359,11 @@ add a second top-level `cases/` tree.
   against `r_j`); `β` comes from the profile at inception over the fixed window it records, not
   from the per-step `beta_fit`. `t0_fit` is the origin of a fitted law; keep "singular time" for
   the apex-based estimate.
+- `postProcess/event_table.py` tabulates the events of runs after a cut with the block (a row per
+  event, in units of `delta` and `T = t_p - t_cut`, from `events/event_<k>.json`; a row per run with
+  `budget.txt`'s drifts and the test of the base of one jet's widening after the events, the slope
+  of `ln r_j` against `ln t'` and of `Q_j` against `t'` over `chains.txt` from the
+  `--after-events`-th event on). It reports and decides nothing.
 - Run outputs, run manifests and environment receipts live outside this repository.
 - Figures follow the `publication-plots` conventions.
 - README, `docs/` and figure captions are public-candidate: no private paths, hosts or
