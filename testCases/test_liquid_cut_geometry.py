@@ -41,7 +41,7 @@ def _neck(named, chain):
     return next(x for x in _necks(named) if x["chain"] == chain)
 
 
-# --- the cap ----------------------------------------------------------------------------------------
+# --- the cap --------------------------------------------------------------------------------------
 
 
 def test_the_cap_is_a_half_spheroid_tangent_to_the_neck_and_square_to_the_axis():
@@ -68,8 +68,9 @@ def test_the_cap_is_a_half_spheroid_tangent_to_the_neck_and_square_to_the_axis()
 
 
 def test_the_points_of_a_cap_grow_from_the_spacing_of_the_neck_to_its_own():
-    """From the neck's node spacing the intervals grow (or shrink) by at most CAP_GROWTH per point to
-    the cap's own spacing; the last is between half and one and a half times the one before it."""
+    """From the neck's node spacing the intervals grow (or shrink) by at most CAP_GROWTH per point
+    to the cap's own spacing; the last is between half and one and a half times the one before
+    it."""
     L, h = 1.0, 0.05
     for h0 in (0.002, 0.05, 0.2):
         u = ev.cap_spacing(L, h0, h)
@@ -84,7 +85,7 @@ def test_the_points_of_a_cap_grow_from_the_spacing_of_the_neck_to_its_own():
         ev.cap_spacing(L, 0.0, h)
 
 
-# --- the cut of either chain ------------------------------------------------------------------------
+# --- the cut of either chain ----------------------------------------------------------------------
 
 
 def test_a_liquid_cut_removes_the_head_of_either_chain_and_keeps_the_neck_as_the_splice():
@@ -136,8 +137,8 @@ def test_a_liquid_cut_removes_the_head_of_either_chain_and_keeps_the_neck_as_the
 
 def _sphere_on_cylinder(*, s, H, t, r_n, z_n=0.8, below=0.3, n=4000):
     """An open chain whose head is a hemisphere of radius ``s`` on a cylinder of radius ``s`` and
-    height ``H`` on a cone frustum narrowing over ``t`` to the neck ``r_n`` at ``z_n``; below the neck
-    a frustum widens to ``r = 0.05`` at ``z_n - below``, then a flat surface runs to the wall.
+    height ``H`` on a cone frustum narrowing over ``t`` to the neck ``r_n`` at ``z_n``; below the
+    neck a frustum widens to ``r = 0.05`` at ``z_n - below``, then a flat surface runs to the wall.
     Returns the chain and the index of the neck."""
     z1 = z_n + t
     z2 = z1 + H
@@ -164,8 +165,8 @@ def _hand_neck(chain, i):
 
 def test_the_removed_volume_and_areas_are_those_of_a_sphere_on_a_cylinder():
     """The removed region of a head that is a hemisphere on a cylinder on a frustum: its volume is
-    the head's above the neck's plane less the half-spheroid that closes the stump, and its areas are
-    the head's surface and the cap's, to the polylines' accuracy."""
+    the head's above the neck's plane less the half-spheroid that closes the stump, and its areas
+    are the head's surface and the cap's, to the polylines' accuracy."""
     s, H, t, r_n = 0.05, 0.08, 0.03, 0.01
     chain, i = _sphere_on_cylinder(s=s, H=H, t=t, r_n=r_n)
     head = (math.pi * t / 3.0 * (r_n**2 + r_n * s + s**2) + math.pi * s**2 * H
@@ -244,7 +245,7 @@ def test_the_cut_of_a_neck_is_the_same_in_units_of_delta_at_every_delta():
         assert got == pytest.approx(ref, rel=1e-6), (k, got, ref)
 
 
-# --- the stop states of runs after a cut ------------------------------------------------------------
+# --- the stop states of runs after a cut ----------------------------------------------------------
 
 
 @stops.runs
