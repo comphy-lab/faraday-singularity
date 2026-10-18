@@ -88,10 +88,10 @@ production radii), and as the change of the gas volume within a box around the c
 
 Only private names of the pinned pyoomph release make step 2 possible; ``testCases`` pins them.
 
-**The cut of a liquid neck** after the gas cut (:func:`liquid_cut`; the driver does not make it
-yet) removes the head of a neck the events branch lands (``events.post_cut_events``) and closes the
-stump at the neck by a half-spheroid (``events.truncate_chain``). pyoomph's planner sees only the
-necks of the gas, so the plan of the new chains is the project's (``events.build_liquid_plan``),
+**The cut of a liquid neck** after the gas cut (:func:`liquid_cut`, which the driver makes within
+the run) removes the head of a neck the events branch lands (``events.post_cut_events``) and closes
+the stump at the neck by a half-spheroid (``events.truncate_chain``). pyoomph's planner sees only
+the necks of the gas, so the plan of the new chains is the project's (``events.build_liquid_plan``),
 parked as pyoomph parks its own (:func:`park_plan`): the remesh builds it and the transfer carries
 the fields across through its chart. The transfer is checked against the geometry
 (:func:`transfer_problems`): pyoomph's count of the interface nodes it leaves unlocated lies within
@@ -1257,9 +1257,10 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        mean axial speed ``U``, its equivalent radius, the retraction speed of its rear
        ``r_n^(-1/2)``, its two ends and the speed of the stump's tip relative to it) and the totals
        of the removals since the gas cut (``removed_total``); the record is appended to
-       ``problem.events`` and ``on_made`` is called with it, the driver's bookkeeping, which also
-       adds to ``trigger`` what the driver measured of the state before the cut (the base of the
-       jet, ``r_j``, ``z_b`` and ``r_j_over_r_n``) before ``postcut_e<k>`` is kept and the file
+       ``problem.events`` and ``on_made`` is called with it, the driver's bookkeeping
+       (``driver.CollapseDriver._on_event_made``), which also adds to ``trigger`` what the driver
+       measured of the state before the cut (the base of the jet, ``r_j``, ``z_b``,
+       ``r_j_over_r_n``, ``neck_to_base_over_r_j``) before ``postcut_e<k>`` is kept and the file
        written.
 
     The record (schema ``faraday-event/2``: ``trigger``, ``cap`` with its ``fill``, ``removed``,

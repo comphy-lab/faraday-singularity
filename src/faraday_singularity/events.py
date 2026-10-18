@@ -32,9 +32,11 @@ refused_changes`). Lengths and times are in the solver's units (length ``1/k``, 
 
 With the block the stops of a state after the cut are those of :func:`post_cut_events`, in three
 ranks: a state that is not valid stops the run; the bubble emptying ends the window; every change of
-topology is an event, returned as a request for its handler (``event-request``). No handler exists
-yet: the driver stops on each event, resumably (``event-unhandled``, with the dump of the state
-before it, ``precut_e<k>``), so that a run continues from it once its handler exists. A liquid neck
+topology is an event, returned as a request for its handler (``event-request``). The driver
+makes the cut of a landed liquid neck within the run (:data:`IMPLEMENTED_HANDLERS`,
+``driver.CollapseDriver._meet_event``) and stops on every other event, resumably
+(``event-unhandled``, with the dump of the state before it, ``precut_e<k>``), so that a run
+continues from it once its handler exists. A liquid neck
 is followed from ``liquid.track_depth`` on (:func:`liquid_necks`, :func:`head_sides`) and lands at
 ``r_n <= liquid.eps_d s``, ``s`` the largest radius of its head; a fold of either chain closes at
 ``max(gap.kappa_g delta, fold_stop_elements h_elem)``, and one that reaches the head of a tracked
@@ -434,7 +436,7 @@ def split_events_block(collapse: dict) -> tuple[dict, dict | None]:
 # --- the events after the cut, as the stops find them ---------------------------------------------
 
 # what reconnect.post_cut_stops returns, with the block, for an event: the driver meets it with its
-# handler, and stops on one that has none yet, resumably (EVENT_UNHANDLED)
+# handler, and stops on one whose handler it does not make, resumably (EVENT_UNHANDLED)
 EVENT_REQUEST = "event-request"
 EVENT_UNHANDLED = "event-unhandled"
 EVENT_SCHEMA = "faraday-event/2"  # the schema of an event's record (events/event_<k>.json)
