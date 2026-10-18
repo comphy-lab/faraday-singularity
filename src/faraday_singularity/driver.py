@@ -1875,8 +1875,8 @@ class CollapseDriver:
         defaults), oomph-lib's smallest step it sets (``minimum_dt``, :meth:`_lower_minimum_dt`;
         ``minimum_dt_ulps``, that step over the spacing of doubles at the leg's time), the limits
         and floors it runs with (``limits``, :meth:`_leg_limits`), and, from the state before an
-        event, that event (``from_event_state``) and, where the keys
-        of its class change, the event from which they apply anew (``event_keys_changed_at``)."""
+        event, that event (``from_event_state``) and, where keys of a class of events change, the
+        event from which they apply anew (``event_keys_changed_at``)."""
         st = self.state
         minimum_dt = self._lower_minimum_dt()
         leg = {"leg": len(st.legs), "start": start, "step": st.step, "time": m["time"],

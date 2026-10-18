@@ -35,7 +35,8 @@ before it, ``precut_e<k>``), so that a run continues from it once its handler ex
 is followed from ``liquid.track_depth`` on (:func:`liquid_necks`, :func:`head_sides`) and lands at
 ``r_n <= liquid.eps_d s``, ``s`` the largest radius of its head; a fold of either chain closes at
 ``max(gap.kappa_g delta, fold_stop_elements h_elem)``, and one that reaches the head of a tracked
-neck lands that neck once ``r_n <= liquid.eps_max s`` (:func:`head_of_fold`).
+neck lands that neck once ``r_n <= liquid.eps_max s`` (:func:`head_of_fold`), before any groove,
+the fold of each head searched apart from that of its chain (:func:`head_fold`).
 """
 
 from __future__ import annotations
