@@ -421,6 +421,19 @@ def test_each_cut_removes_its_head_and_rebuilds_the_mesh_as_planned(jets):
     assert named["bubble"].points[-1, 1] == pytest.approx(r2["cap"]["z_tip_new"], abs=1e-12)
     assert jets["spans2"][1] == pytest.approx([r2["cap"]["z_tip_new"], r1["cap"]["z_tip_new"]],
                                               abs=1e-12)
+    # the removed heads as ghosts to follow, moving away from their stumps, and the totals
+    for rec, sign in ((r1, 1.0), (r2, -1.0)):
+        g, rem = rec["ghost"], rec["removed"]
+        assert g["status"] == "free" and g["direction"] == sign and sign * g["U"] > 0.0
+        assert (g["V"], g["Pz"], g["KE"], g["U"]) == (rem["V"], rem["Pz"], rem["KE"], rem["U"])
+        assert g["a"] == pytest.approx((0.75 * rem["V"] / math.pi) ** (1.0 / 3.0))
+        assert g["v_ret"] == pytest.approx(rec["cap"]["r_n"] ** -0.5)
+        assert (g["z_front0"], g["z_rear0"]) == (rec["cap"]["z_tip_old"], rec["cap"]["z_tip_new"])
+        assert math.isfinite(g["du_stump"]) and g["t0"] == rec["t"]
+    assert r1["removed_total"] == {"events": 1, **{x: r1["removed"][x] for x in ("V", "Pz", "KE")}}
+    assert r2["removed_total"]["events"] == 2
+    for x in ("V", "Pz", "KE"):
+        assert r2["removed_total"][x] == pytest.approx(r1["removed"][x] + r2["removed"][x])
     # the events made, as the dumps keep them, the polygon of the removed head in the file only
     assert [e["k"] for e in jets["events"]] == [1, 2]
     assert ev.events_done(jets["events"]) == {"liquid": 2, "gap": 0}

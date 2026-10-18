@@ -468,13 +468,15 @@ the polylines clipped to it, the axial momentum and the kinetic energy on a pola
 and of the removed head, before the cut, after the transfer and after the projection, and the
 identity of a smooth cutoff `phi` of the box in the projection's weak form, `int (u+ - u~)_z phi dV
 = int Pi dphi/dz dV`. The volume and the axial momentum of the removed head must close against the
-change of the box's, and the projection may change the box's momentum by at most a twentieth of the
-head's; the kinetic energy, the area and the identity are recorded against their limits
-(`closures`). The record (`events/event_<k>.json`, schema `faraday-event/2`) holds the trigger
-with the neck's Reynolds and Weber numbers, the cap, the removed head (volume, axial momentum,
-kinetic energy, areas, reach and its polygon), the transfer, the fill, the projection and the
-budgets, and the states before and after the cut are kept (`states/precut_e<k>.dump`,
-`states/postcut_e<k>.dump`). A refusal leaves the problem unchanged; a failure after the remesh
+change of the box's, to a hundredth of the head's volume and a twentieth of its momentum, and the
+projection may change the box's momentum by at most a twentieth of the head's; the kinetic energy,
+the area and the identity are recorded against their limits (`closures`). The record
+(`events/event_<k>.json`, schema `faraday-event/2`) holds the trigger with the neck's Reynolds and
+Weber numbers, the cap, the removed head (volume, axial momentum, kinetic energy, areas, reach and
+its polygon), the head as the ghost a run is to follow (its mean axial speed, equivalent radius,
+the retraction speed `r_n^(-1/2)` of its rear and its two ends), the totals of the removals since
+the gas cut (`removed_total`), the transfer, the fill, the projection and the budgets, and the
+states before and after the cut are kept (`states/precut_e<k>.dump`, `states/postcut_e<k>.dump`). A refusal leaves the problem unchanged; a failure after the remesh
 ends the run. The tests make it on a synthetic state with a jet on each chain
 (`testCases/test_liquid_cut_fem.py`).
 

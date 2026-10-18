@@ -1176,8 +1176,12 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        (``dt_prev``) as the history's, the time unchanged; within the box, what it changed and the
        identity of the box's cutoff (``projection.box``).
     7. **Budgets after** and the closures (:func:`_closures`), of which the volume and the momentum
-       of the removal are hard checks; the record is appended to ``problem.events``, ``on_made`` is
-       called with it (the driver's bookkeeping) and ``postcut_e<k>`` kept.
+       of the removal are hard checks; the removed head as the ghost the run is to follow
+       (``ghost``: its volume, momentum and kinetic energy, its mean axial speed ``U``, its
+       equivalent radius, the retraction speed of its rear ``r_n^(-1/2)``, its two ends and the
+       speed of the stump's tip relative to it) and the totals of the removals since the gas cut
+       (``removed_total``); the record is appended to ``problem.events``, ``on_made`` is called
+       with it (the driver's bookkeeping) and ``postcut_e<k>`` kept.
 
     The record (schema ``faraday-event/2``) is written to ``events/event_<k>.json`` whatever the
     outcome (``made``, ``refused``, ``failed`` or ``interrupted``, with ``failed_at``), as
@@ -1437,6 +1441,21 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     if closures["hard"]:
         raise CutFailed(f"the budget of the liquid cut does not close: {closures['hard']} beyond "
                         f"their limits ({ {x: closures[x] for x in closures['hard']} })")
+    # the removed head as the run is to follow it: moving rigidly at its mean axial speed, its rear
+    # (the cap's side) retracting towards it at the capillary speed of the end of a thread
+    _, segs_after = _named_chains(pb)
+    u_tip = float(segs_after[lc.chain]["u_z"][0 if lc.end == 0 else -1])
+    record["ghost"] = {"V": lc.V_rem, "Pz": removed["Pz"], "KE": removed["KE"],
+                       "U": removed["U"], "a": (0.75 * lc.V_rem / math.pi) ** (1.0 / 3.0),
+                       "v_ret": lc.r_n ** -0.5, "direction": lc.direction, "t0": t_now,
+                       "z_front0": lc.z_tip_old, "z_rear0": lc.z_tip_new,
+                       "du_stump": u_tip - removed["U"], "status": "free"}
+    # what the removals have taken from the liquid since the gas cut, this one included
+    before = [e for e in (getattr(pb, "events", None) or [])
+              if e.get("kind") in EVENT_CLASSES["liquid"]]
+    record["removed_total"] = {"events": len(before) + 1, **{
+        key: sum(float((e.get("removed") or {}).get(key, 0.0)) for e in before) + removed[key]
+        for key in ("V", "Pz", "KE")}}
     record["outcome"] = "made"
     record["wall_seconds"] = time.time() - wall0
     made = _jsonable(record)
