@@ -23,7 +23,8 @@ radial inflow that is not solenoidal.
   their places, without it (``cap_fill`` ``transfer``) the old surface's near the neck;
 * the hard checks: a projection that changes the momentum in the box by more than its limit fails
   the cut (the non-solenoidal flow), and the identity of the cutoff holds there with a large
-  pressure impulse; requests without a single head, of a class without this handler, pairing a
+  pressure impulse; a transfer that leaves more interface nodes unlocated than the slack of the
+  prediction allows fails it after its remesh; requests without a single head, of a class without this handler, pairing a
   kind with another's class, or whose neck does not land under the cut's own keys are refused at
   admission, and a cap, a plan or its parking refused after the state before the cut is kept: each
   refusal leaves the problem unchanged.
@@ -424,6 +425,22 @@ def jets(tmp_path_factory):
         res["closing"] = err.value.record
         res["closing_file"] = json.loads((out / "closing" / "events" / "event_001.json")
                                          .read_text())
+        # a transfer that leaves more interface nodes unlocated than predicted, beyond the slack
+        _reload(pb, initial, record)
+        real = surgery.transfer_warnings
+
+        def miscounted(text):
+            got = real(text)
+            n, total = got["unlocated"].get(surgery.INTERFACE, [0, 0])
+            got["unlocated"][surgery.INTERFACE] = [n + surgery.UNLOCATED_SLACK + 1, total]
+            return got
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(surgery, "transfer_warnings", miscounted)
+            with pytest.raises(surgery.CutFailed) as err:
+                surgery.liquid_cut(pb, EVENTS, RECON, out / "miscounted", request(pb), k=1,
+                                   **CUT_KW)
+        res["miscounted"] = err.value.record
     return res
 
 
@@ -537,6 +554,16 @@ def test_the_transfer_leaves_unlocated_only_the_cap_it_predicts(jets):
         fill = rec["cap_fill"]
         assert fill["mode"] == "sample" and fill["nodes"] == tr["cap_nodes"]
         assert fill["samples_found"] == fill["samples"]
+
+
+def test_a_transfer_not_as_predicted_fails_the_cut_after_its_remesh(jets):
+    """pyoomph's count of unlocated interface nodes beyond the slack of the prediction fails the
+    cut at the check of its mesh, after the remesh, before the fill and the projection."""
+    rec = jets["miscounted"]
+    assert rec["outcome"] == "failed" and rec["failed_at"] == "mesh-check"
+    assert "interface nodes unlocated" in rec["error"] and "projection" not in rec
+    tr = rec["transfer"]
+    assert tr["reported_unlocated"] == tr["predicted_unlocated"] + surgery.UNLOCATED_SLACK + 1
 
 
 def test_the_budgets_of_each_cut_close(jets):

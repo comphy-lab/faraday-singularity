@@ -1,6 +1,7 @@
 """Contract tests of the geometry of the cut of a liquid neck (``events.truncate_chain``): the head
 removed, the stump closed by a half-spheroid at the neck, the hard checks of the cap, and the
-removed region. No finite-element problem is built.
+removed region; the plan, the prediction of the nodes the transfer cannot locate, the budgets of the
+box and the checks of the transfer on a cut's record. No finite-element problem is built.
 
 The synthetic states are those of ``test_events_stops``: a jet hanging from the bubble's top and
 one rising from the cavity's tip, each with a neck at its root and a bulb (its head) whose tip is
@@ -424,6 +425,41 @@ def test_the_polyline_budgets_of_a_box_are_those_of_a_sphere_and_a_plane():
         assert b["V_gas"] == pytest.approx(gas, rel=1e-4)
         assert b["A"] == pytest.approx(area, rel=1e-4)
         assert b["V_liquid"] == pytest.approx(b["V_disc"] - b["V_gas"])
+
+
+def test_the_checks_of_the_transfer_find_each_departure_from_the_plan():
+    """The transfer of a cut is as planned when pyoomph's count of unlocated interface nodes lies
+    within UNLOCATED_SLACK of the predicted count, no predicted node lies off the cap, the cap has
+    nodes, no node of the bulk or the axis is unlocated and at most one node, on the axis of the
+    interface, has no value; each departure is found on its own."""
+    pytest.importorskip("pyoomph")
+    from faraday_singularity import surgery
+
+    face, corner = surgery.INTERFACE, surgery.INTERFACE + "/axis"
+    planned = {"unlocated": {face: [20, 900]}, "no_value": {corner: [1, 3]},
+               "reported_unlocated": 20, "predicted_unlocated": 20, "predicted_off_cap": 0,
+               "cap_nodes": 30}
+    assert surgery.transfer_problems(planned) == []
+    slack = surgery.UNLOCATED_SLACK
+    assert slack == 2
+    for change, found in (
+            ({"reported_unlocated": 20 + slack}, None),
+            ({"reported_unlocated": 20 - slack}, None),
+            ({"reported_unlocated": 21 + slack}, "interface nodes unlocated"),
+            ({"reported_unlocated": 19 - slack}, "interface nodes unlocated"),
+            ({"predicted_off_cap": 1}, "off the cap"),
+            ({"cap_nodes": 0}, "no interface node on the planned cap"),
+            ({"unlocated": {face: [20, 900], "liquid": [1, 5000]}}, "of the bulk or the axis"),
+            ({"unlocated": {face: [20, 900], "liquid/axis": [1, 40]}}, "of the bulk or the axis"),
+            ({"unlocated": {face: [20, 900], "liquid": [0, 5000]}}, None),
+            ({"no_value": {}}, None),
+            ({"no_value": {corner: [2, 3]}}, "without a value"),
+            ({"no_value": {corner: [1, 3], "liquid": [1, 5000]}}, "without a value")):
+        got = surgery.transfer_problems(dict(planned, **change))
+        if found is None:
+            assert got == [], change
+        else:
+            assert len(got) == 1 and found in got[0], (change, got)
 
 
 def test_the_neck_a_request_lands_is_the_tracked_one_and_its_head_is_cut():

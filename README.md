@@ -457,29 +457,31 @@ refused, and tried once more at half the height. pyoomph's planner sees only the
 so the plan of the new chains is built in the project (`events.build_liquid_plan`) and parked as
 pyoomph parks its own (`surgery.park_plan`): the nodes kept keep their place on the old chart and
 the cap takes the chart just beyond the neck, so that the remesh carries the fields across as
-through a pinch pyoomph planned. The transfer is checked against the geometry: it must leave
-unlocated exactly the interface nodes farther than half an element from every old element, all of
-them on the cap, no node of the bulk or the axis, and only the stump's tip on the axis without a
-value. pyoomph gives the unlocated nodes the velocity of the old surface near the neck, so the cap's
-nodes are given the old bulk velocity at their places, sampled along the planned cap before the
-remesh. The pressure-impulse projection follows, with the impulse zero on every free surface, the
-cap's included, the step before the cut as the history's and the time unchanged. The budgets are
-taken within the box of `liquid.box_radius`: the liquid volume and the area of the interface from
-the polylines clipped to it, the axial momentum and the kinetic energy on a polar grid, of the box
-and of the removed head, before the cut, after the transfer and after the projection, and the
-identity of a smooth cutoff `phi` of the box in the projection's weak form, `int (u+ - u~)_z phi dV
-= int Pi dphi/dz dV`. The volume and the axial momentum of the removed head must close against the
-change of the box's, to a hundredth of the head's volume and a twentieth of its momentum, and the
-projection may change the box's momentum by at most a twentieth of the head's; the kinetic energy,
-the area and the identity are recorded against their limits (`closures`). The record
+through a pinch pyoomph planned. The transfer is checked against the geometry
+(`surgery.transfer_problems`): pyoomph reports counts, not nodes, so its count of unlocated
+interface nodes must lie within two of the count of those farther than half an element from every
+old element its locator tries (`events.predict_unlocated`), every predicted one on the cap, which
+must have nodes, with no node of the bulk or the axis unlocated and at most the stump's tip on the
+axis without a value. pyoomph gives the unlocated nodes the velocity of the old surface near the
+neck, so the cap's nodes are given the old bulk velocity at their places, sampled along the planned
+cap before the remesh. The pressure-impulse projection follows, with the impulse zero on every free
+surface, the cap's included, the step before the cut as the history's and the time unchanged. The
+budgets are taken within the box of `liquid.box_radius`: the liquid volume and the area of the
+interface from the polylines clipped to it, the axial momentum and the kinetic energy on a polar
+grid, of the box and of the removed head, before the cut, after the transfer and after the
+projection, and the identity of a smooth cutoff `phi` of the box in the projection's weak form, `int
+(u+ - u~)_z phi dV = int Pi dphi/dz dV`. The volume and the axial momentum of the removed head must
+close against the change of the box's, to a hundredth of the head's volume and a twentieth of its
+momentum, and the projection may change the box's momentum by at most a twentieth of the head's; the
+kinetic energy, the area and the identity are recorded against their limits (`closures`). The record
 (`events/event_<k>.json`, schema `faraday-event/2`) holds the trigger with the neck's Reynolds and
 Weber numbers, the cap, the removed head (volume, axial momentum, kinetic energy, areas, reach and
-its polygon), the head as the ghost a run is to follow (its mean axial speed, equivalent radius,
-the retraction speed `r_n^(-1/2)` of its rear and its two ends), the totals of the removals since
-the gas cut (`removed_total`), the transfer, the fill, the projection and the budgets, and the
-states before and after the cut are kept (`states/precut_e<k>.dump`, `states/postcut_e<k>.dump`).
-A refusal leaves the problem unchanged; a failure after the remesh ends the run. The tests make it
-on a synthetic state with a jet on each chain (`testCases/test_liquid_cut_fem.py`).
+its polygon), the head as the ghost a run is to follow (its mean axial speed, equivalent radius, the
+retraction speed `r_n^(-1/2)` of its rear and its two ends), the totals of the removals since the
+gas cut (`removed_total`), the transfer, the fill, the projection and the budgets, and the states
+before and after the cut are kept (`states/precut_e<k>.dump`, `states/postcut_e<k>.dump`). A refusal
+leaves the problem unchanged; a failure after the remesh ends the run. The tests make it on a
+synthetic state with a jet on each chain (`testCases/test_liquid_cut_fem.py`).
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus

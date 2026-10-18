@@ -245,9 +245,10 @@ add a second top-level `cases/` tree.
   rest of `liquid`): the head removed and the stump capped at the neck (`events.truncate_chain`,
   refused unless its hard checks hold), the mesh rebuilt from a plan
   built in the project (`events.build_liquid_plan`, parked as pyoomph parks its own,
-  `surgery.park_plan`), the transfer checked against the geometry (`events.predict_unlocated`: the
-  unlocated interface nodes exactly those predicted, all on the cap, none of the bulk or the axis,
-  only the stump's tip without a value), the cap's nodes given the old bulk velocity, the
+  `surgery.park_plan`), the transfer checked against the geometry (`surgery.transfer_problems`:
+  pyoomph's count of unlocated interface nodes within two of the count `events.predict_unlocated`
+  predicts, every predicted one on the cap, none of the bulk or the axis, at most the stump's tip
+  without a value), the cap's nodes given the old bulk velocity, the
   projection, and the budgets within the box (`surgery.box_polyline_budgets`, `box_integrals`, the
   cutoff's identity in `project(..., box=)`), the volume and the momentum of the removal hard
   checks (`surgery.HARD_CLOSURES`); its record is `events/event_<k>.json`, its dumps

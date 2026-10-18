@@ -93,19 +93,20 @@ yet) removes the head of a neck the events branch lands (``events.post_cut_event
 stump at the neck by a half-spheroid (``events.truncate_chain``). pyoomph's planner sees only the
 necks of the gas, so the plan of the new chains is the project's (``events.build_liquid_plan``),
 parked as pyoomph parks its own (:func:`park_plan`): the remesh builds it and the transfer carries
-the fields across through its chart. The transfer is checked against the geometry: it leaves
-unlocated exactly the interface nodes farther than half an element from every old element
-(``events.predict_unlocated``), all of them on the cap, and only the stump's tip on the axis
-without a value. pyoomph gives the unlocated nodes the velocity of the old surface near the neck,
-so the cap's nodes are given the old bulk velocity at their places, sampled along the planned cap
-before the remesh (``cap_fill`` ``sample``). The projection follows, with the step before the cut
-as the history's and the time unchanged. The budgets are taken within a box about the neck: the
-liquid volume and the area of the interface from the polylines clipped to it
+the fields across through its chart. The transfer is checked against the geometry
+(:func:`transfer_problems`): pyoomph's count of the interface nodes it leaves unlocated lies within
+``UNLOCATED_SLACK`` of the count of those farther than half an element from every old element its
+locator tries (``events.predict_unlocated``), every predicted one on the cap, and at most the
+stump's tip on the axis has no value. pyoomph gives the unlocated nodes the velocity of the old
+surface near the neck, so the cap's nodes are given the old bulk velocity at their places, sampled
+along the planned cap before the remesh (``cap_fill`` ``sample``). The projection follows, with the
+step before the cut as the history's and the time unchanged. The budgets are taken within a box
+about the neck: the liquid volume and the area of the interface from the polylines clipped to it
 (:func:`box_polyline_budgets`), the axial momentum and the kinetic energy on a polar grid
 (:func:`box_grid`, :func:`box_integrals`) of the box and of the removed head, before the cut, after
-the transfer and the fill, and after the projection (:func:`project` with ``box``, which also
-reads the identity of the box's cutoff in its weak form). The removed volume and momentum must
-close against the box's change, and the projection may change the momentum there by little
+the transfer and the fill, and after the projection (:func:`project` with ``box``, which also reads
+the identity of the box's cutoff in its weak form). The removed volume and momentum must close
+against the box's change, and the projection may change the momentum there by little
 (``HARD_CLOSURES``); the energy, the area and the identity are recorded against their limits.
 """
 
@@ -1114,6 +1115,31 @@ def _fill_cap(problem, lc, samples: dict, chain: dict, *, apply: bool) -> dict:
     return out
 
 
+def transfer_problems(transfer: dict) -> list[str]:
+    """What the checks of a liquid cut's transfer find wrong in its record (``transfer``: pyoomph's
+    counts, ``unlocated`` and ``no_value`` by mesh, and the prediction), nothing where it is as
+    planned: the count of the interface nodes reported unlocated within ``UNLOCATED_SLACK`` of the
+    count predicted (``events.predict_unlocated``; pyoomph reports counts, not the nodes), no
+    predicted one off the planned cap, a cap with nodes, no node of the bulk or the axis unlocated,
+    and no node without a value but at most one on the axis of the interface, the stump's new tip
+    (its own field ``_kin_bc``, Newton's start only)."""
+    problems = []
+    reported, predicted = transfer["reported_unlocated"], transfer["predicted_unlocated"]
+    if abs(reported - predicted) > UNLOCATED_SLACK:
+        problems.append(f"{reported} interface nodes unlocated, {predicted} predicted")
+    if transfer["predicted_off_cap"]:
+        problems.append(f"{transfer['predicted_off_cap']} unlocated interface nodes off the cap")
+    if not transfer["cap_nodes"] > 0:
+        problems.append("no interface node on the planned cap")
+    others = {name: v for name, v in transfer["unlocated"].items() if name != INTERFACE}
+    if any(v[0] > 0 for v in others.values()):
+        problems.append(f"unlocated nodes of the bulk or the axis: {others}")
+    no_value, corner = transfer["no_value"], INTERFACE + "/axis"
+    if set(no_value) - {corner} or no_value.get(corner, [0])[0] > 1:
+        problems.append(f"nodes without a value beyond the stump's tip: {no_value}")
+    return problems
+
+
 def _closures(removed: dict, poly: dict, box: dict) -> dict:
     """The budgets of a liquid cut within its box (``poly``: the polyline volumes and areas before
     and after the transfer; ``box``: the grid's momentum and kinetic energy before it, after the
@@ -1168,11 +1194,11 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
     4. **Remesh at once** from the plan (:func:`park_plan`, ``rmin`` the neck radius), the focus the
        driver's with the region ``event_cap`` at the cap's tip, meshed at ``clip(r_n/
        elements_per_scale, h_floor, h_cut)``, ``h_cut`` the gas cut's focus size. From here a
-       failure is :class:`CutFailed`. The transfer is checked: the interface nodes it leaves
-       unlocated are those predicted from the geometry (``events.predict_unlocated``, within
-       ``UNLOCATED_SLACK``), all on the cap, none of the bulk or the axis, and no node but the
-       stump's tip on the axis without a value; the chains, their ends and the axis spans as
-       planned.
+       failure is :class:`CutFailed`. The transfer is checked (:func:`transfer_problems`): the
+       count of the interface nodes it leaves unlocated within ``UNLOCATED_SLACK`` of the count
+       predicted from the geometry (``events.predict_unlocated``), every predicted one on the cap,
+       none of the bulk or the axis, and at most the stump's tip on the axis without a value; the
+       chains, their ends and the axis spans as planned.
     5. **Cap fill** (``liquid.cap_fill`` ``sample``): the cap's nodes take the old bulk velocity at
        their places, not the nearest old surface's that pyoomph's transfer gives them.
     6. **Projection** (:func:`project`, with ``liquid.projection`` and ``liquid.restart`` or the gas
@@ -1395,23 +1421,12 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     predicted = predict_unlocated(X, old_chains)
     on_cap = _on_cap(lc, X, new_segs[lc.chain])
     reported = transfer["unlocated"].get(INTERFACE, [0, 0])[0]
-    others = {name: v for name, v in transfer["unlocated"].items() if name != INTERFACE}
-    no_value = transfer["no_value"]
     transfer.update(predicted_unlocated=int(predicted.sum()), reported_unlocated=int(reported),
                     predicted_off_cap=int(np.sum(predicted & ~on_cap)),
                     cap_nodes=int(on_cap.sum()),
                     corner_fields=sorted(pb.get_mesh(INTERFACE + "/axis")
                                          .get_nodal_field_indices()))
-    problems = []
-    if abs(reported - int(predicted.sum())) > UNLOCATED_SLACK:
-        problems.append(f"{reported} interface nodes unlocated, {int(predicted.sum())} predicted")
-    if transfer["predicted_off_cap"]:
-        problems.append(f"{transfer['predicted_off_cap']} unlocated interface nodes off the cap")
-    if any(v[0] > 0 for v in others.values()):
-        problems.append(f"unlocated nodes of the bulk or the axis: {others}")
-    corner = INTERFACE + "/axis"
-    if set(no_value) - {corner} or no_value.get(corner, [0])[0] > 1:
-        problems.append(f"nodes without a value beyond the stump's tip: {no_value}")
+    problems = transfer_problems(transfer)
     if problems:
         raise CutFailed("the transfer of the liquid cut is not as planned: " + "; ".join(problems))
     global_transfer = pb.cut_observables()
