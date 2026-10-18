@@ -62,7 +62,7 @@ def test_an_event_without_a_handler_stops_the_run_resumably(tmp_path, monkeypatc
     step, at 0.09 delta with a head 0.5 delta wide); the event has no handler yet: the run stops on
     it (``event-unhandled``, event 1, kind ``liquid-neck``) and keeps the state before it,
     ``precut_e001`` (``cut_stage`` ``precut-event``), besides the end state. A continuation from
-    that dump is admitted after the cut, may change the keys of the event's class, and meets the
+    that dump is admitted after the cut, may change the keys of every class, and meets the
     event again at once while it has no handler."""
     recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
     events = ev.EventSettings.from_dict(LIQUID)

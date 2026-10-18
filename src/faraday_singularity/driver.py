@@ -797,8 +797,8 @@ class CollapseDriver:
     def _keep_event_state(self, stop: dict) -> Path:
         """The dump of the state before an unhandled event (``precut_e<k>``, outside the rotation,
         ``cut_stage`` ``precut-event``, with the event as the stop found it): a continuation from
-        it meets the event again, with its handler once one exists, and may change the keys of the
-        event's class from it (``events.EventSettings.refused_changes``)."""
+        it meets the event again, with its handler once one exists, and the keys of every class
+        of events apply anew from it (``events.EventSettings.refused_changes``)."""
         k = int(stop["k"])
         event = {key: v for key, v in stop.items() if key != "reason"}
         return self.keep_state(self.outdir / "states" / f"precut_e{k:03d}.dump",

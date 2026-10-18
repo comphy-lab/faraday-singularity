@@ -241,7 +241,8 @@ add a second top-level `cases/` tree.
   `events.head_sides`, `liquid_necks`, `head_of_fold`. The driver has no handler yet, so every event
   is a resumable stop (`event-unhandled`, event number `k`) with the dump of the state before it
   (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`) besides the end
-  state; a continuation from it is a post-cut restart that may change the event's class keys. The
+  state; a continuation from it is a post-cut restart from which the keys of every class apply
+  anew (`events.EventSettings.refused_changes`), the events before it staying as made. The
   tests of the branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names
   their run directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k`
   cover it by default. After the cut the driver reads its limits through accessors that return the
