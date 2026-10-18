@@ -37,6 +37,16 @@ is followed from ``liquid.track_depth`` on (:func:`liquid_necks`, :func:`head_si
 ``max(gap.kappa_g delta, fold_stop_elements h_elem)``, and one that reaches the head of a tracked
 neck lands that neck once ``r_n <= liquid.eps_max s`` (:func:`head_of_fold`), before any groove,
 the fold of each head searched apart from that of its chain (:func:`head_fold`).
+
+The geometry of the cut of a liquid neck (:func:`truncate_chain`): the head is removed and the stump
+closed at the neck by a half-spheroid ``r = r_n cos t``, ``z = z_n + direction eta r_n sin t``
+(:func:`hemispheroid_cap`), which leaves the neck tangentially and lies inside the old liquid. Its
+points start at the node spacing of the neck and grow by at most ``CAP_GROWTH`` per point to its
+own spacing (:func:`cap_spacing`), so that the spline a rebuild draws through them has no jump in
+spacing at the splice. Hard checks refuse a cap that leaves the old liquid, folds back, makes a
+knife-edge angle at the splice, removes no simple region, or leaves chains a mesh cannot be built on
+(:class:`CapRefused`); the removed region ``Q`` (the head, the axis and the cap) gives the volume and
+the areas the cut takes away.
 """
 
 from __future__ import annotations
@@ -669,3 +679,281 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
         # rebuilds the mesh)
         return guarded()
     return None
+
+
+# --- the cut of a liquid neck: the head removed, the stump closed by a cap -------------------------
+
+CAP_MIN_POINTS = 16  # points of a cap, at least
+# the cap points within this many of its intervals (r_n / elements_per_scale of arc) of the neck,
+# which leave the neck tangentially, need not clear it; with the spacing of the neck itself, the
+# three nearest the neck
+CAP_SKIP = 3
+CAP_CLEARANCE = 1e-3  # every other cap point lies at least this times r_n inside the old liquid
+CAP_BACKTRACK = 1e-9  # a cap may come back towards its tip by at most this times r_n
+CAP_ANGLE_NODES = 4  # interior angles are read over the splice and this many nodes on either side
+CAP_RETRY_HEIGHT = 0.5  # the height of the cap of the one retry of a refused cap, in neck radii
+# from the neck the spacing of the cap's points grows (or shrinks) by at most this factor per point
+# from the neck's node spacing to its own: the uniform Catmull-Rom spline a mesh is built on loops
+# where the spacing of its points jumps (on the stop states of the runs after a cut the nodes at
+# the neck lie 0.010-0.014 r_n apart, ten times closer than a cap at r_n/8)
+CAP_GROWTH = 1.25
+
+
+class CapRefused(RuntimeError):
+    """The cap of a liquid cut fails a hard check before anything has changed: ``checks`` holds what
+    was read, with the checks that failed under ``failed``."""
+
+    def __init__(self, message: str, checks: dict | None = None):
+        super().__init__(message)
+        self.checks = dict(checks or {})
+
+
+def _quarter_ellipse(r_n: float, eta: float, m: int = 4097) -> tuple[np.ndarray, np.ndarray]:
+    """The parameter ``t`` of ``r = r_n cos t``, ``z = eta r_n sin t`` on ``[0, pi/2]`` and the
+    arclength from ``t = 0`` (the neck) at it."""
+    t = np.linspace(0.0, 0.5 * math.pi, m)
+    d = np.hypot(np.diff(r_n * np.cos(t)), np.diff(eta * r_n * np.sin(t)))
+    return t, np.concatenate([[0.0], np.cumsum(d)])
+
+
+def cap_arc_length(r_n: float, eta: float) -> float:
+    """Arclength of the cap of :func:`hemispheroid_cap`, a quarter of the ellipse ``r = r_n cos t``,
+    ``z = eta r_n sin t``: ``pi r_n / 2`` for ``eta = 1``."""
+    return float(_quarter_ellipse(r_n, eta)[1][-1])
+
+
+def cap_point_count(r_n: float, eta: float, elements_per_scale: float) -> int:
+    """The intervals of a cap of radius ``r_n`` at its own spacing: one per ``r_n /
+    elements_per_scale`` of its arc, the size the mesh gives the tip it makes, and at least
+    ``CAP_MIN_POINTS``."""
+    return max(CAP_MIN_POINTS,
+               int(math.ceil(cap_arc_length(r_n, eta) / (r_n / elements_per_scale))))
+
+
+def cap_at(r_n: float, z_n: float, direction: float, eta: float, u) -> np.ndarray:
+    """The points of the cap at the arclengths ``u`` from the neck ``(r_n, z_n)`` along it: ``r =
+    r_n cos t``, ``z = z_n + direction eta r_n sin t``, the point at the cap's whole arclength put
+    on the axis exactly."""
+    t, s = _quarter_ellipse(r_n, eta)
+    u = np.asarray(u, dtype=float)
+    theta = np.interp(u, s, t)
+    cap = np.column_stack([r_n * np.cos(theta), z_n + direction * eta * r_n * np.sin(theta)])
+    cap[u >= s[-1]] = (0.0, z_n + direction * eta * r_n)
+    return cap
+
+
+def hemispheroid_cap(r_n: float, z_n: float, direction: float, eta: float, n: int) -> np.ndarray:
+    """The cap that closes the stump of a cut liquid neck, at ``n`` points evenly spaced along it:
+    ``r = r_n cos t``, ``z = z_n + direction eta r_n sin t``, from next to the neck ``(r_n, z_n)``
+    (excluded) to the tip on the axis (included, on ``r = 0`` exactly). With ``eta = 1`` a half
+    sphere centred on the axis at the neck's height: it leaves the neck tangentially, where the
+    surface of a neck, a minimum of ``r``, is parallel to the axis, and it lies within the neck's
+    radius of its centre, inside the old liquid as long as the head reaches beyond it; ``eta``
+    below one flattens it. A cut spaces the points from the neck's spacing (:func:`cap_spacing`)."""
+    return cap_at(r_n, z_n, direction, eta, cap_arc_length(r_n, eta) * np.arange(1, n + 1) / n)
+
+
+def cap_spacing(length: float, h_start: float, h_cap: float,
+                growth: float = CAP_GROWTH) -> np.ndarray:
+    """The arclengths of a cap's points from the neck (excluded) to its tip at ``length``
+    (included): the first ``h_start`` from the neck (its node spacing there), each interval
+    ``growth`` times longer or shorter than the one before it until it is ``h_cap``, the cap's own
+    spacing, then ``h_cap``; the last between half and one and a half times the one before it.
+    Raises ``ValueError`` unless ``h_start`` and ``h_cap`` are positive."""
+    if not (h_start > 0.0 and h_cap > 0.0 and length > 0.0):
+        raise ValueError(f"a cap needs a positive length and spacings, not {length!r}, "
+                         f"{h_start!r} and {h_cap!r}")
+    u, h = [0.0], float(h_start)
+    while length - u[-1] > 1.5 * h:
+        u.append(u[-1] + h)
+        h = min(h * growth, h_cap) if h < h_cap else max(h / growth, h_cap)
+    u.append(float(length))
+    return np.asarray(u[1:])
+
+
+def revolved_area(points) -> float:
+    """Area of the surface of revolution of a polyline about the axis, each segment a frustum."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    if len(P) < 2:
+        return 0.0
+    d = np.diff(P, axis=0)
+    return float(np.sum(math.pi * (P[:-1, 0] + P[1:, 0]) * np.hypot(d[:, 0], d[:, 1])))
+
+
+def gas_sections(chains, reservoir_depth: float) -> list[np.ndarray]:
+    """The half-sections of the gas the chains bound (``reconnect.closed_section``: a closed chain
+    closed along the axis, the open chain through the gas above the free surface)."""
+    from .reconnect import closed_section
+
+    return [closed_section(c.points, c.end_types, reservoir_depth) for c in chains]
+
+
+def liquid_clearance(points, sections) -> np.ndarray:
+    """The signed distance of each point from the gas the ``sections`` bound (:func:`gas_sections`):
+    positive in the liquid, outside every section, negative inside one."""
+    import shapely
+    from shapely.geometry import Polygon
+
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    pts = shapely.points(P)
+    out = np.full(len(P), np.inf)
+    for section in sections:
+        poly = Polygon(section)
+        d = np.asarray(shapely.distance(poly.boundary, pts), dtype=float)
+        inside = np.asarray(shapely.contains_xy(poly, P[:, 0], P[:, 1]), dtype=bool)
+        out = np.minimum(out, np.where(inside, -d, d))
+    return out
+
+
+TIP_OF_END = {("bubble", 0): "bubble_bottom", ("bubble", -1): "bubble_top",
+              ("open", 0): "cavity_tip"}  # the tip on the axis a head ends on (reconnect.JET_TIPS)
+
+
+@dataclass
+class LiquidCut:
+    """The chain of a liquid cut (:func:`truncate_chain`): the head beyond the neck removed and the
+    stump closed by a cap. ``points`` is the new chain in the order of the old one, ``origin`` the
+    old node each point is (``-1`` on the cap), ``cap`` the cap from next to the neck to its tip
+    on the axis, ``removed`` the half-section of the liquid removed (``Q``: the head from the neck
+    to its tip on the axis, the axis up to the cap's tip, the cap back to the neck), of volume
+    ``V_rem``; ``A_rem`` the area of the head's surface, ``A_cap`` that of the cap, ``L_rem`` the
+    reach of ``Q`` along the axis from the neck's height; ``checks`` the hard checks as read."""
+    chain: str
+    index: int
+    end: int  # 0 or -1: the end of the chain where the head was, and the cap is
+    tip: str  # the tip on the axis of that end (reconnect.JET_TIPS)
+    direction: float  # sign(z_tip - z_n)
+    r_n: float
+    z_n: float
+    s: float
+    eta: float
+    points: np.ndarray
+    origin: np.ndarray
+    cap: np.ndarray
+    removed: np.ndarray
+    V_rem: float
+    A_rem: float
+    A_cap: float
+    L_rem: float
+    z_tip_old: float
+    z_tip_new: float
+    checks: dict
+
+    def summary(self) -> dict:
+        """What a record keeps of the cut, without its point arrays: ``tip_shift`` is how far the
+        chain's tip on the axis moved towards the neck, the piece of the axis the gas gains."""
+        return {"chain": self.chain, "index": self.index, "end": self.end, "tip": self.tip,
+                "direction": self.direction, "r_n": self.r_n, "z_n": self.z_n, "s": self.s,
+                "eta": self.eta, "cap_points": len(self.cap), "V_rem": self.V_rem,
+                "A_rem": self.A_rem, "A_cap": self.A_cap, "L_rem": self.L_rem,
+                "z_tip_old": self.z_tip_old, "z_tip_new": self.z_tip_new,
+                "tip_shift": abs(self.z_tip_old - self.z_tip_new), "checks": dict(self.checks)}
+
+
+def truncate_chain(named, neck: dict, *, eta: float, elements_per_scale: float,
+                   min_angle: float, reservoir_depth: float) -> LiquidCut:
+    """The chain of a liquid cut at a tracked neck with a single head (:func:`liquid_necks`, status
+    ``head``) of the ``(name, chain)`` pairs ``named``: the head side removed, the neck node kept as
+    the splice, and the stump closed by the cap of :func:`hemispheroid_cap` of height ``eta``, its
+    own spacing one :func:`cap_point_count` interval (``elements_per_scale`` elements per neck
+    radius) reached from the neck's node spacing by :func:`cap_spacing`. Raises
+    :class:`CapRefused` unless the hard checks hold: (i) every cap point but those within
+    ``CAP_SKIP`` of its own intervals of the neck lies in the old liquid at least ``CAP_CLEARANCE
+    r_n`` from the gas (:func:`liquid_clearance`); (ii) the cap, from its tip through the neck and
+    two nodes beyond, comes back towards its tip by at most ``CAP_BACKTRACK r_n``
+    (``reconnect.cap_backtrack``); (iii) the interior angles over the neck and ``CAP_ANGLE_NODES``
+    nodes on either side are at least ``min_angle``; (iv) the removed half-section is a simple
+    polygon of positive volume; (v) the new chains pass ``reconnect.check_chains`` (simple,
+    disjoint, one open, their splines too). The chart, the last check, is the plan's
+    (:func:`build_liquid_plan`)."""
+    from shapely.geometry import LinearRing
+
+    from .reconnect import Chain, cap_backtrack, check_chains, interior_angles, revolved_volume
+
+    chains = dict(named)
+    name = neck.get("chain")
+    if name not in chains:
+        raise CapRefused(f"no chain {name!r} to cut")
+    if neck.get("status") != "head" or neck.get("head") is None:
+        raise CapRefused(f"the neck has no single head to remove (status {neck.get('status')!r})")
+    c = chains[name]
+    P = np.asarray(c.points, dtype=float)
+    n, i = len(P), int(neck["index"])
+    r_n, z_n, s = float(neck["r_n"]), float(neck["z_n"]), float(neck["s"])
+    if not (0 < i < n - 1) or abs(P[i, 0] - r_n) > 1e-12 * max(abs(r_n), 1e-300) \
+            or abs(P[i, 1] - z_n) > 1e-12 * max(abs(z_n), 1.0):
+        raise CapRefused("the neck is not a node of the chain it names")
+    lo, hi = (int(x) for x in neck["head"])
+    if (lo, hi) == (i, n - 1) and c.end_types[1] == "axis":
+        end = -1
+    elif (lo, hi) == (0, i) and c.end_types[0] == "axis":
+        end = 0
+    else:
+        raise CapRefused(f"the head [{lo}, {hi}] of the neck at node {i} does not end on the axis")
+    direction = float(np.sign(P[end, 1] - z_n))
+    if direction == 0.0 or direction != float(neck.get("direction", direction)):
+        raise CapRefused("the head's direction from the neck is not the neck's")
+    body = P[:i + 1][::-1] if end == -1 else P[i:]  # from the neck away from the head
+    head_path = P[i:] if end == -1 else P[i::-1]  # from the neck to the head's tip on the axis
+    length = cap_arc_length(r_n, eta)
+    h_cap = length / cap_point_count(r_n, eta, elements_per_scale)
+    u = cap_spacing(length, float(np.hypot(*(body[1] - body[0]))), h_cap)
+    cap = cap_at(r_n, z_n, direction, eta, u)
+    n_cap = len(cap)
+    if end == -1:
+        points = np.vstack([P[:i + 1], cap])
+        origin = np.concatenate([np.arange(i + 1), np.full(n_cap, -1)])
+    else:
+        points = np.vstack([cap[::-1], P[i:]])
+        origin = np.concatenate([np.full(n_cap, -1), np.arange(i, n)])
+    removed = np.vstack([head_path, cap[::-1]])
+    z_tip_old, z_tip_new = float(head_path[-1, 1]), float(cap[-1, 1])
+    checks = {"eta": eta, "points": n_cap, "spacing": h_cap, "first_spacing": float(u[0]),
+              "skip_arc": CAP_SKIP * h_cap, "failed": []}
+    failed = checks["failed"]
+    if not direction * (z_tip_old - z_tip_new) > 0.0:
+        failed.append("tip")  # the head ends within the cap
+    # (i) the cap inside the old liquid, but where it leaves the neck tangentially
+    clearance = liquid_clearance(cap, gas_sections([ch for _, ch in named], reservoir_depth))
+    near = u <= checks["skip_arc"] * (1.0 + 1e-12)
+    checks.update(clearance=float(clearance[~near].min()) if (~near).any() else math.inf,
+                  clearance_limit=CAP_CLEARANCE * r_n,
+                  skipped=int(near.sum()),
+                  clearance_skipped=float(clearance[near].min()) if near.any() else math.nan)
+    if not checks["clearance"] >= checks["clearance_limit"]:
+        failed.append("inside")
+    # (ii) monotone from its tip, through the neck and two nodes beyond it
+    checks["backtrack"] = cap_backtrack(np.vstack([cap[::-1], body[:3]]))
+    checks["backtrack_limit"] = CAP_BACKTRACK * r_n
+    if not checks["backtrack"] <= checks["backtrack_limit"]:
+        failed.append("backtrack")
+    # (iii) no knife-edge angle about the splice
+    around = np.vstack([body[CAP_ANGLE_NODES:0:-1], body[:1], cap[:CAP_ANGLE_NODES]])
+    angles = interior_angles(around)
+    checks.update(min_angle=float(angles.min()) if len(angles) else math.nan,
+                  min_angle_limit=min_angle)
+    if not checks["min_angle"] >= min_angle:
+        failed.append("angle")
+    # (iv) the removed half-section
+    V_rem = revolved_volume(removed)
+    checks["removed_simple"] = bool(LinearRing(removed).is_simple)
+    if not (checks["removed_simple"] and V_rem > 0.0):
+        failed.append("removed")
+    # (v) the new chains, as a mesh is built on them
+    new = [(k, Chain(points, c.end_types) if k == name else ch) for k, ch in named]
+    try:
+        check_chains([ch for _, ch in new])
+        checks["chains"] = "ok"
+    except RuntimeError as e:  # InterfaceSelfIntersection is one
+        checks["chains"] = f"{type(e).__name__}: {e}"
+        failed.append("chains")
+    if failed:
+        raise CapRefused(f"the cap of the liquid cut fails its checks: {', '.join(failed)}",
+                         checks)
+    return LiquidCut(chain=name, index=i, end=end, tip=TIP_OF_END.get((name, end), name),
+                     direction=direction, r_n=r_n, z_n=z_n, s=s, eta=eta, points=points,
+                     origin=origin, cap=cap, removed=removed, V_rem=V_rem,
+                     A_rem=revolved_area(head_path), A_cap=revolved_area(np.vstack([P[i:i + 1],
+                                                                                   cap])),
+                     L_rem=float(np.max(np.abs(removed[:, 1] - z_n))), z_tip_old=z_tip_old,
+                     z_tip_new=z_tip_new, checks=checks)
