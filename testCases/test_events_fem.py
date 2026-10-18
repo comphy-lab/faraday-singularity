@@ -7,7 +7,8 @@
   run by the source of this commit and by that of 1b65916 in fresh processes with MKL on one thread:
   the same files with the same bytes, but for the wall times;
 * with the block the same run goes through the stops of the events branch, and oomph-lib's
-  smallest step is lowered after the cut (``post.minimum_dt``), but not before it;
+  smallest step is lowered after the cut (``post.minimum_dt``), but not before it; a restart from
+  its postcut dump checks the loaded mesh as a fresh one and takes its steps;
 * oomph-lib's smallest step (``DTSF_minimum_dt``) on a one-unknown problem: at its default of
   1e-12 an accepted step of 1e-13 ends the solve (its next candidate, four times the step, lies
   below it), and so does a step of 1e-12 that fails, which is not halved; lowered, the first is
@@ -208,6 +209,14 @@ def test_with_the_block_the_run_after_a_cut_lowers_oomph_libs_smallest_step(tmp_
     assert "events_settings" not in meta  # the state before the cut carries no block
     plain = _run(ROOT / "src", tmp_path / "plain", dict(spec, events=None))
     assert json.loads((plain / "result.json").read_text())["minimum_dt"] == 1e-12
+    # a restart in a new process from the postcut dump, whose mesh no step has run on: checked as
+    # a fresh mesh (the curved elements of the loaded mesh included), it takes its steps
+    (postcut,) = (out / "states").glob("postcut_*.dump")
+    assert json.loads(postcut.with_suffix(".json").read_text())["mesh_fresh"] is True
+    again = _run(ROOT / "src", tmp_path / "again", dict(spec, restart=str(postcut)))
+    result = json.loads((again / "result.json").read_text())
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 3
+    assert result["minimum_dt"] == 1e-16
 
 
 ODE_RUN = """
