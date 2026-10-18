@@ -389,6 +389,20 @@ def test_the_unlocated_nodes_of_a_transfer_are_those_off_every_old_element():
     assert np.all(far[got] > 0.5 * 0.7 * h) and np.all(far[~got] <= 0.5 * h)
 
 
+def test_the_prediction_of_unlocated_nodes_widens_its_search_as_pyoomphs_locator_does():
+    """A point 0.4 element sizes off a long quadratic element, but nearer to a hundred nodes of a
+    fine chain than to any node of that element, is placed on it by pyoomph's locator, which widens
+    its search to the elements of the 256 old nodes nearest a point none of the nearer ones takes:
+    so the prediction places it too, and a search of the elements of the 16 nearest alone would not.
+    A point 0.6 sizes off it is unlocated however wide the search."""
+    long = np.array([[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]])  # one element of size 1
+    fine = np.column_stack([np.linspace(0.3, 0.7, 101), np.full(101, 0.75)])  # elements of 0.008
+    near, far = [0.5, 0.4], [0.5, -0.6]
+    assert ev.LOCATOR_NEIGHBOURS == 256
+    assert list(ev.predict_unlocated([near, far], [long, fine])) == [False, True]
+    assert list(ev.predict_unlocated([near, far], [long, fine], neighbours=16)) == [True, True]
+
+
 def test_the_polyline_budgets_of_a_box_are_those_of_a_sphere_and_a_plane():
     """Within the half-disc of radius R about a point of the axis: a bubble that is a sphere of
     radius a inside it holds 4/3 pi a^3 of gas and 4 pi a^2 of interface; a flat open surface

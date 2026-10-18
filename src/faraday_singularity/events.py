@@ -1131,49 +1131,75 @@ def build_liquid_plan(named, cut: LiquidCut, reservoir_depth: float) -> LiquidPl
 # its bounding box; pointlocator max_projection_offset_factor); farther from every old element it
 # blends the two nearest old nodes instead
 PROJECTION_OFFSET = 0.5
+# the elements pyoomph's locator tries for a point: those of the old node nearest it and, where none
+# takes it, those of the k old nodes nearest it, k doubling from 8 up to this many (its search
+# passes); a point none of them takes is not located, however near a farther element lies
+LOCATOR_NEIGHBOURS = 256
+LOCATOR_FIRST = 8  # the old nodes whose elements the prediction tries first, for every new node
 
 
 def predict_unlocated(nodes, old_chains, *, factor: float = PROJECTION_OFFSET,
-                      neighbours: int = 16) -> np.ndarray:
+                      neighbours: int = LOCATOR_NEIGHBOURS) -> np.ndarray:
     """Which of the new interface nodes ``nodes`` (``(M, 2)``) pyoomph's transfer will not place on
     the old interface (``old_chains``: the old chains' nodes, each a chain of quadratic elements,
     vertex, midside node, vertex): those farther than ``factor`` times its size from every old
-    element (the distance to its two chords; the size the larger extent of the bounding box of its
-    three nodes), among the elements of the ``neighbours`` old nodes nearest each node."""
+    element it tries (the distance to its two chords; the size the larger extent of the bounding
+    box of its three nodes), the elements of the ``neighbours`` old nodes nearest each node, as far
+    as pyoomph's locator widens its search (:data:`LOCATOR_NEIGHBOURS`). The elements of the
+    ``LOCATOR_FIRST`` nearest are tried first, the rest only for the nodes none of those takes."""
     from scipy.spatial import cKDTree
 
     X = np.asarray(nodes, dtype=float).reshape(-1, 2)
-    elems = []
+    elems, conn, points, base = [], [], [], 0
     for P in old_chains:
         P = np.asarray(P, dtype=float).reshape(-1, 2)
-        if len(P) < 2:
+        n = len(P)
+        if n < 2:
             continue
-        idx = 2 * np.arange((len(P) - 1) // 2)
+        idx = 2 * np.arange((n - 1) // 2)
         if len(idx):
             elems.append(np.stack([P[idx], P[idx + 1], P[idx + 2]], axis=1))
-        if (len(P) - 1) % 2:  # an even count: the last segment as an element of its own
+            conn.append(base + np.stack([idx, idx + 1, idx + 2], axis=1))
+        if (n - 1) % 2:  # an even count: the last segment as an element of its own
             elems.append(np.stack([P[-2:-1], 0.5 * (P[-2:-1] + P[-1:]), P[-1:]], axis=1))
+            conn.append(base + np.array([[n - 2, n - 1, n - 1]]))
+        points.append(P)
+        base += n
     if not elems or not len(X):
         return np.zeros(len(X), dtype=bool)
     E = np.concatenate(elems)  # (n_e, 3, 2)
     size = np.max(np.ptp(E, axis=1), axis=1)
-    nodes_of = E.reshape(-1, 2)  # node 3e + j of element e
-    tree = cKDTree(nodes_of)
-    k = min(neighbours, len(nodes_of))
-    _, near = tree.query(X, k=k)
-    near = np.asarray(near).reshape(len(X), k)
-    cand = near // 3  # the element of each near node
-    located = np.zeros(len(X), dtype=bool)
-    for col in range(k):
-        e = cand[:, col]
-        best = np.full(len(X), np.inf)
-        for a, b in ((0, 1), (1, 2)):
-            A, B = E[e, a], E[e, b]
-            d = B - A
-            L2 = np.maximum(np.einsum("ij,ij->i", d, d), 1e-300)
-            t = np.clip(np.einsum("ij,ij->i", X - A, d) / L2, 0.0, 1.0)
-            best = np.minimum(best, np.hypot(*(X - A - t[:, None] * d).T))
-        located |= best <= factor * size[e]
+    old = np.concatenate(points)  # every old node once
+    # the elements of each old node (its star), -1 where it has fewer than the most
+    pairs = np.unique(np.column_stack([np.concatenate(conn).ravel(),
+                                       np.repeat(np.arange(len(E)), 3)]), axis=0)
+    counts = np.bincount(pairs[:, 0], minlength=len(old))
+    star = np.full((len(old), int(counts.max())), -1)
+    first = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    star[pairs[:, 0], np.arange(len(pairs)) - first[pairs[:, 0]]] = pairs[:, 1]
+    tree = cKDTree(old)
+
+    def taken(Y, k):  # whether an element of the k old nodes nearest each point takes it
+        k = min(k, len(old))
+        _, near = tree.query(Y, k=k)
+        cand = star[np.asarray(near).reshape(len(Y), k)].reshape(len(Y), -1)
+        out = np.zeros(len(Y), dtype=bool)
+        for col in range(cand.shape[1]):
+            e = np.maximum(cand[:, col], 0)
+            best = np.full(len(Y), np.inf)
+            for a, b in ((0, 1), (1, 2)):
+                A, B = E[e, a], E[e, b]
+                d = B - A
+                L2 = np.maximum(np.einsum("ij,ij->i", d, d), 1e-300)
+                t = np.clip(np.einsum("ij,ij->i", Y - A, d) / L2, 0.0, 1.0)
+                best = np.minimum(best, np.hypot(*(Y - A - t[:, None] * d).T))
+            out |= (cand[:, col] >= 0) & (best <= factor * size[e])
+        return out
+
+    located = taken(X, min(LOCATOR_FIRST, neighbours))
+    rest = np.flatnonzero(~located)
+    if len(rest) and neighbours > LOCATOR_FIRST:
+        located[rest] = taken(X[rest], neighbours)
     return ~located
 
 
