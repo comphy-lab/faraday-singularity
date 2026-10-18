@@ -433,7 +433,12 @@ without it, so that a neck can be followed below the cut radius) and `neck_eleme
 (`reconnect.elements_per_scale` without it). The fold limit after the cut, also that of the groove
 gaps `chains.txt` reports, is `gap.kappa_g delta`. With `post.open_neck_stop` false the open chain's
 own neck stop (`collapse.neck_stop`) is off after the cut, as liquid events need: its liquid neck is
-then followed as an event.
+then followed as an event. At the cut and at every restart after it the block also sets oomph-lib's
+smallest step (`DTSF_minimum_dt`, 1e-12 by default) to `post.minimum_dt`, or 1e-3 times the
+step-size floor without it, and records it in the leg: oomph-lib gives up on a step below it, and
+also after an accepted step whose next candidate, four times the step, would fall below it, so that
+at the steps a small cut radius needs the default would end the run on a converged step. Before the
+cut it keeps the default, on which the classification of a failure before a cut relies.
 
 `simulationCases/reconnect_prototype.py` is a development tool beside this: it cuts a landing state
 at `--delta` or `--delta-ratio` times its neck radius, with options that override the case's

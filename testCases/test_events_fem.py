@@ -6,8 +6,14 @@
   rebuilds and a dump at every step, and a restart in a new process from one of those dumps, each
   run by the source of this commit and by that of 1b65916 in fresh processes with MKL on one thread:
   the same files with the same bytes, but for the wall times;
+* with the block the same run goes through the stops of the events branch, and oomph-lib's
+  smallest step is lowered after the cut (``post.minimum_dt``), but not before it;
+* oomph-lib's smallest step (``DTSF_minimum_dt``) on a one-unknown problem: at its default of
+  1e-12 an accepted step of 1e-13 ends the solve (its next candidate, four times the step, lies
+  below it), and so does a step of 1e-12 that fails, which is not halved; lowered, the first is
+  accepted and the second rescued by halving.
 
-Each run compiles its problem in seconds; the module takes about two minutes.
+Each run compiles its problem in seconds; the module takes about four minutes.
 """
 
 from __future__ import annotations
@@ -81,6 +87,7 @@ with pb:
     result = driver.run(1e-8)
     driver.close()
     pb.close_diagnostics()
+    result["minimum_dt"] = pb.DTSF_minimum_dt
 (out / "result.json").write_text(json.dumps(result))
 """
 
@@ -181,3 +188,105 @@ def test_runs_after_a_cut_without_the_block_are_as_at_1b65916(tmp_path):
     _same_outputs(again["ref"], again["head"])
     assert json.loads((again["head"] / "result.json").read_text())["steps"] == 6
     assert np.isfinite(np.loadtxt(again["head"] / "chains.txt", ndmin=2)).any()
+
+
+def test_with_the_block_the_run_after_a_cut_lowers_oomph_libs_smallest_step(tmp_path):
+    """The run after the cut of the synthetic cavity with the block: the stops of the events branch
+    let it take its steps, and oomph-lib's smallest step is post.minimum_dt after the cut, at
+    the default (1e-12) before it; without the block it stays at the default."""
+    spec = {"physics": fem.PHYSICS, "mesh": fem.MESH, "cut": CUT,
+            "collapse": dict(COLLAPSE, max_steps=3, refine_ratio=1.5),
+            "events": {"post": {"minimum_dt": 1e-16}}}
+    out = _run(ROOT / "src", tmp_path / "block", spec)
+    result = json.loads((out / "result.json").read_text())
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 3
+    assert result["minimum_dt"] == 1e-16
+    events = [json.loads(x) for x in (out / "events.jsonl").read_text().splitlines()]
+    leg = next(e for e in events if e["event"] == "leg")
+    assert leg["start"] == "cut" and leg["minimum_dt"] == 1e-16
+    meta = json.loads((out / "states" / "precut_0.021.json").read_text())
+    assert "events_settings" not in meta  # the state before the cut carries no block
+    plain = _run(ROOT / "src", tmp_path / "plain", dict(spec, events=None))
+    assert json.loads((plain / "result.json").read_text())["minimum_dt"] == 1e-12
+
+
+ODE_RUN = """
+import json, sys
+from pyoomph import Problem
+from pyoomph.equations.generic import InitialCondition
+from pyoomph.expressions import partial_t, testfunction, var
+from pyoomph.generic.codegen import ODEEquations
+
+spec = json.loads(sys.argv[1])
+
+
+class Stiff(ODEEquations):
+    def define_fields(self):
+        self.define_ode_variable("y")
+
+    def define_residuals(self):
+        y = var("y")
+        self.add_residual((partial_t(y) + spec["K"] * y**3) * testfunction("y"))
+
+
+class P(Problem):
+    def define_problem(self):
+        self.add_equations((Stiff() + InitialCondition(y=1.0)) @ "ode")
+
+
+pb = P()
+pb.set_output_directory(spec["out"])
+out = {}
+with pb:
+    pb.initialise()
+    out["default"] = pb.DTSF_minimum_dt
+    if spec.get("max_residuals") is not None:
+        pb.max_residuals = spec["max_residuals"]
+    if spec.get("minimum_dt") is not None:
+        pb.DTSF_minimum_dt = spec["minimum_dt"]
+    dt = spec["dt"]
+    try:
+        pb.run(dt, timestep=dt, maxstep=dt, outstep=False, temporal_error=1.0,
+               newton_solver_tolerance=spec["tol"])
+        out["ok"] = True
+    except RuntimeError as exc:
+        out["ok"], out["error"] = False, str(exc)
+    out["time"] = pb.get_current_time(dimensional=False, as_float=True)
+    out["steps"] = pb.timestepper.get_num_unsteady_steps_done()
+log = open(spec["out"] + "/_pyoomph_logfile.txt").read()
+out["rejected"] = log.count("TIMESTEP REJECTED")
+out["minimum_dt_message"] = [x for x in log.splitlines() if "less than the minimum dt" in x]
+print(json.dumps(out))
+"""
+
+
+def _ode(tmp_path, name, **spec):
+    env = dict(os.environ, MKL_NUM_THREADS="1", OMP_NUM_THREADS="1")
+    spec = {"out": str(tmp_path / name), "tol": 1e-2, **spec}
+    proc = subprocess.run([sys.executable, "-c", ODE_RUN, json.dumps(spec)], capture_output=True,
+                          text=True, timeout=600, cwd=tmp_path, env=env, check=False)
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_oomph_libs_smallest_step_ends_accepted_and_failed_steps_unless_lowered(tmp_path):
+    """dy/dt = -K y^3 in one unknown. An accepted step of 1e-13 (K = 1): at the default smallest
+    step (1e-12) oomph-lib gives up after it, since its next candidate, 4e-13, lies below; lowered
+    to 1e-15 the step is taken. A step of 1e-12 whose Newton solve fails (K = 1e9, the residual of
+    its first iterate, about 3e3, beyond max_residuals 1e3): at the default it is not halved, the
+    solve gives up; lowered it is halved once and taken in two steps of about 5e-13."""
+    accepted = {"K": 1.0, "dt": 1e-13}
+    out = _ode(tmp_path, "accepted-default", **accepted)
+    assert out["default"] == 1e-12 and not out["ok"] and out["rejected"] == 0
+    assert "reduce dt to 4e-13 which is less than the minimum dt (1e-12)" in \
+        out["minimum_dt_message"][-1]
+    out = _ode(tmp_path, "accepted-lowered", minimum_dt=1e-15, **accepted)
+    assert out["ok"] and out["steps"] == 1 and out["time"] == pytest.approx(1e-13, rel=1e-12)
+    failing = {"K": 1e9, "dt": 1e-12, "max_residuals": 1e3}
+    out = _ode(tmp_path, "failing-default", **failing)
+    assert not out["ok"] and out["rejected"] == 1
+    assert "reduce dt to 5e-13 which is less than the minimum dt (1e-12)" in \
+        out["minimum_dt_message"][-1]
+    out = _ode(tmp_path, "failing-lowered", minimum_dt=1e-15, **failing)
+    assert out["ok"] and out["rejected"] == 1 and out["steps"] == 2
+    assert out["time"] == pytest.approx(1e-12, rel=1e-4) and not out["minimum_dt_message"]

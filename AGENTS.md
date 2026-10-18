@@ -232,7 +232,12 @@ add a second top-level `cases/` tree.
   `_fold_stop`, `_neck_limit`): `post.h_floor` (focus floor, feature regions, guard, kink regions,
   the open chain's neck limit), `post.rise_tol`, `post.dt_min`, `gap.kappa_g delta` (also the groove
   gaps of `chains.txt`), `post.neck_floor` and `post.neck_elements_per_scale` (the neck regions of
-  `reconnect.feature_regions`); `post.open_neck_stop` false skips the open chain's neck stop.
+  `reconnect.feature_regions`); `post.open_neck_stop` false skips the open chain's neck stop. At
+  the cut and at each restart after it the driver with the block sets oomph-lib's smallest step
+  (`pb.DTSF_minimum_dt`) to `post.minimum_dt` or 1e-3 times its step-size floor
+  (`CollapseDriver._lower_minimum_dt`, `minimum_dt` in the leg), never before the cut, where
+  `classify_failure` reads oomph-lib's message at 1e-12; at 1e-12 an accepted step below 2.5e-13
+  ends the solve and a failed one below 2e-12 is not halved (`testCases/test_events_fem.py`).
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the

@@ -897,6 +897,25 @@ class CollapseDriver:
             return self.s.fold_stop
         return fold_stop_after_cut(self.events, self.reconnect.delta, self.s.fold_stop)
 
+    def _minimum_dt(self) -> float:
+        """oomph-lib's smallest step after the cut with the block: ``post.minimum_dt``, or 1e-3
+        times the driver's step-size floor (:meth:`_dt_min`)."""
+        post = self.events.post
+        return post.minimum_dt if post.minimum_dt is not None else 1e-3 * self._dt_min()
+
+    def _lower_minimum_dt(self) -> float:
+        """After a cut with the block, at the cut and at every restart from a state after it:
+        oomph-lib's smallest step (``Problem::Minimum_dt``, pyoomph's ``DTSF_minimum_dt``, 1e-12 by
+        default) set to :meth:`_minimum_dt`. oomph-lib gives up on a step below it, and also on an
+        accepted step whose next candidate, four times the step, would fall below it, so that at
+        the steps a small cut radius needs (about 1e-3 delta^2) the default would end the run on a
+        converged step and lose the halving that rescues a failed one. Before the cut, and without
+        the block, it stays at the default: the classification of a failure before a cut reads
+        oomph-lib's message there (:func:`classify_failure`)."""
+        value = self._minimum_dt()
+        self.pb.DTSF_minimum_dt = value
+        return value
+
     def _neck_limit(self) -> float:
         """The open chain's neck stop, ``max(neck_stop, neck_stop_elements h_floor)``, with the
         floor of :meth:`_h_floor`."""
@@ -1814,13 +1833,14 @@ class CollapseDriver:
         ``leg``: when and from which step it starts, the source it runs (``leg_info``: the commit),
         the hash of the block and the keys in which it differs from the block the state was written
         with (``changed``; for a state written without the block, ``added``, from the block's
-        defaults), and, from the state
+        defaults), oomph-lib's smallest step it sets (``minimum_dt``, :meth:`_lower_minimum_dt`),
+        and, from the state
         before an event, the event from which the keys of its class apply anew
         (``event_keys_changed_at``)."""
         st = self.state
         leg = {"leg": len(st.legs), "start": start, "step": st.step, "time": m["time"],
                **self._taus(m["time"]), **self.leg_info, "settings_sha256": self.events.sha256(),
-               "changed": [], "added": False}
+               "changed": [], "added": False, "minimum_dt": self._lower_minimum_dt()}
         if meta is not None:
             recorded = meta.get("events_settings")
             leg["added"] = recorded is None

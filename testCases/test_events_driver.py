@@ -221,3 +221,39 @@ def test_with_liquid_events_the_open_chains_neck_stop_is_off_after_the_cut(tmp_p
                          events=ev.EventSettings.from_dict(LIQUID)).run(1e-9)
     assert out["stop"]["reason"] == "max-steps" and out["steps"] == 3
 
+
+def test_oomph_libs_smallest_step_is_lowered_after_the_cut_with_the_block_only(tmp_path,
+                                                                              monkeypatch):
+    """At the cut and at every restart after it the driver with the block sets oomph-lib's smallest
+    step (``DTSF_minimum_dt``) to post.minimum_dt, or 1e-3 times its step-size floor, and records it
+    in the leg; before the cut and without the block it leaves it alone."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    plain = CutProblem()
+    _events_driver(tmp_path / "plain", plain, recon).close()
+    assert not hasattr(plain, "DTSF_minimum_dt")
+    pb = CutProblem()
+    drv = CollapseDriver(pb, _settings(), tmp_path / "pre", reconnect=recon,
+                         events=ev.EventSettings())
+    assert not hasattr(pb, "DTSF_minimum_dt")  # no cut yet
+    drv.close()
+    pb = CutProblem()
+    drv = _events_driver(tmp_path / "floor", pb, recon,
+                         events=ev.EventSettings.from_dict({"post": {"dt_min": 1e-14}}))
+    assert pb.DTSF_minimum_dt == pytest.approx(1e-17) and drv.state.legs[0]["minimum_dt"] == \
+        pb.DTSF_minimum_dt
+    drv.close()
+    pb = CutProblem()
+    drv = _events_driver(tmp_path / "default", pb, recon, events=ev.EventSettings(), state_dt=0.0)
+    assert pb.DTSF_minimum_dt == pytest.approx(1e-15)  # 1e-3 times the collapse's dt_min
+    drv.run(1e-9)
+    drv.close()
+    meta = json.loads(max((tmp_path / "default" / "states").glob("state_*.json")).read_text())
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
+        restore_cut=lambda problem, record: setattr(problem, "cut", record)))
+    pb = CutProblem()
+    events = ev.EventSettings.from_dict({"post": {"minimum_dt": 2e-18}})
+    drv = CollapseDriver(pb, _settings(), tmp_path / "restart", reconnect=recon, events=events)
+    drv.restore(meta)
+    drv.close()
+    assert pb.DTSF_minimum_dt == 2e-18 and drv.state.legs[-1]["minimum_dt"] == 2e-18
+    assert drv.state.legs[-1]["changed"] == ["post.minimum_dt"]
