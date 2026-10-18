@@ -119,6 +119,52 @@ def test_an_event_without_a_handler_stops_the_run_resumably(tmp_path, monkeypatc
     assert leg["start"] == "restart" and leg["from_event_state"] == 1 and leg["changed"] == []
 
 
+def test_a_restart_meets_a_dumped_mesh_no_step_ran_on_as_fresh(tmp_path, monkeypatch):
+    """A tracked neck of 0.02 delta, below 4 element lengths at it, not landed (eps_d 0.02): on the
+    mesh of the cut, which no step has run on, the run stops at once (``liquid-neck-unresolved``,
+    a check of a fresh mesh) and dumps that mesh with ``mesh_fresh``. A continuation from the dump
+    meets it as fresh again and stops at once, instead of stepping on it until a rebuild; one that
+    changes a key sizing the mesh (``events.SIZING_KEYS``) takes it as stepped on, so that the
+    rule of its rebuilds meets the new sizes."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    block = {"liquid": {"enabled": True, "eps_d": 0.02},
+             "post": {"open_neck_stop": False, "neck_floor": 2e-6}}
+    events = ev.EventSettings.from_dict(block)
+    thin = dict(r_n=lambda t: 0.02)
+    out = _events_driver(tmp_path / "run", HeadProblem(**thin), recon, events=events).run(1e-9)
+    stop = out["stop"]
+    assert stop["reason"] == "liquid-neck-unresolved" and stop["fresh"] and out["steps"] == 0
+    meta = json.loads(Path(stop["end_state"]).with_suffix(".json").read_text())
+    assert meta["mesh_fresh"] is True
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
+        restore_cut=lambda problem, record: setattr(problem, "cut", record)))
+
+    def again(name, block):
+        pb = HeadProblem(**thin)
+        pb.t = meta["time"]
+        drv = CollapseDriver(pb, _settings(t_end=1.0, dt_max=1.0, max_steps=3), tmp_path / name,
+                             reconnect=recon, events=ev.EventSettings.from_dict(block))
+        drv.restore(meta)
+        res = drv.run(1e-9)
+        drv.close()
+        return drv, res
+
+    drv, res = again("same", block)
+    assert res["stop"]["reason"] == "liquid-neck-unresolved" and res["steps"] == 0
+    assert res["stop"]["fresh"]
+    finer = json.loads(json.dumps(block))
+    finer["post"]["neck_floor"] = 1e-6
+    drv, res = again("finer", finer)
+    assert drv.state.legs[-1]["changed"] == ["post.neck_floor"] and res["steps"] >= 1
+    # a mesh a step has run on stays stepped on
+    later = _events_driver(tmp_path / "later", HeadProblem(), recon,
+                           events=ev.EventSettings.from_dict(LIQUID), state_dt=0.0)
+    later.run(1e-9)
+    later.close()
+    dumps = sorted((tmp_path / "later" / "states").glob("state_*.json"))
+    assert [json.loads(d.read_text())["mesh_fresh"] for d in dumps][-1] is False
+
+
 def test_the_bubble_pierced_by_its_jet_is_a_resumable_stop(tmp_path):
     """The bubble's two tips within delta of each other (the downward jet piercing the bubble):
     without the block a stop (``bubble-jets-approach``); with it an event whose handler, the ring,

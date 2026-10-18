@@ -202,9 +202,11 @@ add a second top-level `cases/` tree.
   change it (`run_case.POST_CUT_DERIVED_KEYS`, `run_case._check_events`), and a run from the start or
   an ordinary restart with it is refused before any output; `run_case.CUT_DERIVED_KEYS` and the
   prototype, which refuses the block, are unchanged. Dumps written after the cut with it carry
-  `events_settings`, `events` (the events made) and `legs` (the cut and each restart: step, time,
-  commit, hash of the block, changed keys; events `leg`), and only a case with the block continues
-  them. The keys of `liquid` and `gap` are fixed once an event of their class was made, except in a
+  `events_settings`, `events` (the events made), `legs` (the cut and each restart: step, time,
+  commit, hash of the block, changed keys; events `leg`) and `mesh_fresh` (no step has run on the
+  mesh since it was built: a restart checks it as a fresh mesh, as the run that dumped it did,
+  unless it changes a key that sizes the mesh, `events.SIZING_KEYS`, whose new sizes the rule of
+  rebuilds then meets), and only a case with the block continues them. The keys of `liquid` and `gap` are fixed once an event of their class was made, except in a
   restart from the state before an event (`precut_e<k>`, `cut_stage` `precut-event`), from which they
   apply anew (`event_keys_changed_at` in its leg); the keys of `post` change at any restart (a key a
   recorded block lacks counts at its default). `post.bubble_bottom_sizing` `frozen` meshes the

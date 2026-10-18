@@ -392,8 +392,10 @@ change it (`run_case.POST_CUT_DERIVED_KEYS`), and a run from the start or an ord
 carries it is refused before any output. The dumps written after the cut with the block record it
 (`events_settings`), the events made (`events`) and the legs of the run (`legs`, also as events
 `leg`: the cut and each restart, with the step and time it starts at, the source commit, the hash
-of the block and the keys in which it differs from the block the state was written with). Such a
-dump continues only under a case with the block. The keys of `liquid` and of `gap` are the keys of
+of the block and the keys in which it differs from the block the state was written with) and
+whether a step has run on its mesh since it was built (`mesh_fresh`): a restart from a mesh no step
+has run on checks it as a fresh mesh, as the run that dumped it did, unless the restart changes a
+key that sizes the mesh. Such a dump continues only under a case with the block. The keys of `liquid` and of `gap` are the keys of
 a class of events: once an event of the class has been made they may not change, except in a
 restart from the state before an event (`precut_e<k>`), from which they apply anew; the keys of
 `post` may change at any restart. With `post.bubble_bottom_sizing` `frozen` the bubble's bottom,

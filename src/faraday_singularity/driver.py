@@ -286,8 +286,8 @@ import numpy as np
 from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_disc_points,
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
-from .events import (EVENT_REQUEST, EVENT_UNHANDLED, PRECUT_EVENT, EventSettings, events_done,
-                     fold_stop_after_cut, minimum_dt_after_cut)
+from .events import (EVENT_REQUEST, EVENT_UNHANDLED, PRECUT_EVENT, SIZING_KEYS, EventSettings,
+                     events_done, fold_stop_after_cut, minimum_dt_after_cut)
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -1661,7 +1661,9 @@ class CollapseDriver:
             if self.events is not None:  # only with the block: other dumps keep their keys
                 meta.update(events_settings=self.events.to_dict(),
                             events=[dict(x) for x in self._made_events()],
-                            legs=[dict(x) for x in st.legs])
+                            legs=[dict(x) for x in st.legs],
+                            # whether a step has run on the mesh since it was built (restore)
+                            mesh_fresh=self._fresh_mesh())
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -1732,6 +1734,14 @@ class CollapseDriver:
         st.last_state_t = meta["time"]
         self.pb.remesh_count = meta["remesh_count"]
         self._stepped_rc = self.pb.remesh_count  # the mesh of the dump has been stepped on
+        if self.events is not None and meta.get("cut") is not None and meta.get("mesh_fresh") \
+                and not set(self.events.changed_keys(meta.get("events_settings"))) & set(
+                    SIZING_KEYS):
+            # with the block, a mesh no step has run on since its build is fresh again: the checks
+            # of a fresh mesh (an unresolved liquid neck, the guard's limits there, the curved
+            # elements) apply to it as they did in the run that dumped it, unless the restart
+            # changes the sizes of the mesh, which its rule of rebuilds then meets
+            self._stepped_rc = None
         if meta.get("focus"):
             self.pb.active_mesh_template().focus = Focus(**meta["focus"])
         if "episodes" in meta:

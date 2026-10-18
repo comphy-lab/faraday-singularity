@@ -54,6 +54,11 @@ BUBBLE_BOTTOM_SIZINGS = ("kept", "frozen")
 EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head"), "gap": ("groove-fill",)}
 # a dump of the state before an event, from which a restart may change the keys of its class
 PRECUT_EVENT = "precut-event"
+# the keys of the block that size the mesh after the cut: a restart that changes one of them does
+# not take a dumped mesh no step had run on as fresh (the checks of a fresh mesh would meet the
+# mesh of the old sizes again); the rule of its rebuilds remeshes it at the new sizes instead
+SIZING_KEYS = ("post.h_floor", "post.neck_floor", "post.neck_elements_per_scale",
+               "post.bubble_bottom_sizing", "post.bubble_bottom_size")
 
 
 def _number(value) -> bool:

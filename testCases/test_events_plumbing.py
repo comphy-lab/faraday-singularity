@@ -241,8 +241,8 @@ def test_dumps_after_a_cut_carry_the_block_its_events_and_legs_only_with_it(tmp_
     drv.close()
     a = json.loads(max((tmp_path / "plain" / "states").glob("state_*.json")).read_text())
     b = json.loads(max((tmp_path / "block" / "states").glob("state_*.json")).read_text())
-    assert not {"events_settings", "events", "legs"} & set(a)
-    assert set(b) - set(a) == {"events_settings", "events", "legs"}
+    assert not {"events_settings", "events", "legs", "mesh_fresh"} & set(a)
+    assert set(b) - set(a) == {"events_settings", "events", "legs", "mesh_fresh"}
     assert b["events_settings"] == s.to_dict() and b["events"] == []
     leg = b["legs"][0]
     assert len(b["legs"]) == 1 and leg["start"] == "cut" and leg["leg"] == 0
