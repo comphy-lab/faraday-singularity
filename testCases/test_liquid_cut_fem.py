@@ -17,8 +17,10 @@ radial inflow that is not solenoidal.
   unlocated as many interface nodes as the geometry predicts, every predicted one on the cap; the
   stump's tip on the axis is the only node without a value; the chains and the axis spans are those
   planned; the budgets close (the removed volume, momentum and kinetic energy against the box's,
-  the projection's change of momentum and energy there, the area); steps after both, and a restart
-  from the dump after the second in a new process;
+  the projection's change of momentum and energy there, the area); steps after both; the dumps the
+  driver keeps for them, admitted as continuations as the runner admits them, and in a new process
+  the state before the second cut cut again and the state after it continued under a driver that
+  restores them;
 * the keys of the cut away from their defaults, in one cut: the restart after it, the radius of
   its box, the height of its cap and the noise floors of its budgets;
 * the cap fill against the imposed field: with it the cap's nodes carry the old bulk velocity at
@@ -32,7 +34,7 @@ radial inflow that is not solenoidal.
   a plan, a fill without the old velocity along the cap or a parking refused after the state before
   the cut is kept: each refusal leaves the problem unchanged.
 
-Each problem compiles in seconds; the module takes about three minutes.
+Each problem compiles in seconds; the module takes about five minutes.
 """
 
 from __future__ import annotations
@@ -48,17 +50,20 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "testCases"))
 
 pytest.importorskip("pyoomph")
 
+import run_case  # noqa: E402
 import test_reconnect_fem as fem  # noqa: E402
 from test_events_stops import head_feature  # noqa: E402
 
 from faraday_singularity import events as ev  # noqa: E402
 from faraday_singularity import reconnect as rc  # noqa: E402
 from faraday_singularity import surgery  # noqa: E402
+from faraday_singularity.driver import CollapseDriver, CollapseSettings  # noqa: E402
 from faraday_singularity.mesh import (FaradayCylinderMesh, Focus, FocusRegion,  # noqa: E402
                                       MeshSettings)
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
@@ -76,6 +81,7 @@ RECON = rc.ReconnectSettings(delta=DELTA, dt0=1e-5, tip_size=0.25, bridge_size=0
 EVENTS = ev.EventSettings.from_dict({"liquid": {"enabled": True},
                                      "post": {"open_neck_stop": False, "neck_floor": 1e-5}})
 CUT_KW = {"dt_prev": 1e-5, "elements_per_scale": EPS, "h_floor": 1e-6}
+DRIVER = {"t_end": 10.0, "dt_max": 0.01, "max_steps": 3}  # the collapse driver that keeps the dumps
 # the keys of the liquid cut a test sets away from their defaults: the noise floors far above the
 # head's own limits, so that they set every limit they floor
 KEYED = {"restart": "impulsive", "box_radius": 8.0, "cap_height": 0.5, "sigma_V": 1e-3,
@@ -402,23 +408,28 @@ def jets(tmp_path_factory):
             late[name] = {"record": err.value.record, "precut": err.value.precut,
                           "same": problem_state(pb) == before}
         res["late"] = late
-        # the cut of the first event, then of the next
+        # the cut of the first event, then of the next, with the driver keeping their dumps
         cuts = out / "cuts"
+        driver = CollapseDriver(pb, CollapseSettings(**DRIVER), cuts, reconnect=RECON,
+                                events=EVENTS)
+        driver.reset_after_cut(pb.cut)
         made = []
 
         def on_made(rec):  # as the driver adds its measurement of the jet's base to the trigger
             made.append(rec["k"])
             rec["trigger"].update(r_j=0.25, z_b=0.5, r_j_over_r_n=0.75)
 
-        res["record1"] = surgery.liquid_cut(pb, EVENTS, RECON, cuts, req, k=1, on_made=on_made,
-                                            **CUT_KW)
+        res["record1"] = surgery.liquid_cut(pb, EVENTS, RECON, cuts, req, k=1, driver=driver,
+                                            on_made=on_made, **CUT_KW)
         res["on_made"] = made
         res["file1"] = json.loads((cuts / "events" / "event_001.json").read_text())
         res["segs1"] = surgery._named_chains(pb)[0]
         res["spans1"] = surgery._axis_spans_of_mesh(pb)
         req = request(pb)
         res["request2"] = req
-        res["record2"] = surgery.liquid_cut(pb, EVENTS, RECON, cuts, req, k=2, **CUT_KW)
+        res["record2"] = surgery.liquid_cut(pb, EVENTS, RECON, cuts, req, k=2, driver=driver,
+                                            **CUT_KW)
+        driver.close()
         res["segs2"] = surgery._named_chains(pb)[0]
         res["spans2"] = surgery._axis_spans_of_mesh(pb)
         res["events"] = [dict(x) for x in pb.events]
@@ -711,45 +722,86 @@ def test_a_projection_that_changes_the_boxs_momentum_fails_the_cut(jets):
     assert rec["closures"]["relative"]["F3"] > 1.0  # the momentum of the head, many times
 
 
+def test_the_dumps_of_a_cut_are_continued_as_the_runner_admits_them(jets):
+    """The dumps the driver keeps for a cut carry its bookkeeping with the block
+    (``events_settings``, the events made, the legs, whether the mesh is fresh), and the runner's
+    checks of a continuation admit each under the block of the cut; a change of a key of the class
+    of liquid events is refused after an event of it (``postcut_e<k>``) but taken from the state
+    before one (``precut_e<k>``, here before the second cut, after the first), and a case without
+    the block is refused."""
+    changed = settings(cap_height=0.5)
+    for k, rec in ((1, jets["record1"]), (2, jets["record2"])):
+        for key in ("precut", "postcut"):
+            meta = json.loads(Path(rec["dumps"][key]).with_suffix(".json").read_text())
+            assert meta["events_settings"] == EVENTS.to_dict() and meta["legs"], (k, key)
+            assert [e["k"] for e in meta["events"]] == list(range(1, k + (key == "postcut")))
+            assert meta["mesh_fresh"] is True  # the driver has stepped on no mesh here
+            run_case._check_post_cut(meta, RECON)
+            run_case._check_events(meta, EVENTS)
+            if key == "precut" or not meta["events"]:
+                run_case._check_events(meta, changed)
+            else:
+                with pytest.raises(SystemExit, match="changes the keys of a class"):
+                    run_case._check_events(meta, changed)
+            with pytest.raises(SystemExit, match="needs a case with that block"):
+                run_case._check_events(meta, None)
+
+
 RESTART = """
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])
 import test_liquid_cut_fem as T
 from faraday_singularity import surgery
-state, out = Path(sys.argv[3]), Path(sys.argv[4])
-pb = T.jets_problem(out)
-with pb:
-    pb.initialise()
-    pb.load_state(str(state))
-    meta = json.loads(state.with_suffix(".json").read_text())
-    surgery.restore_cut(pb, meta["cut"])
-    named, _ = surgery._named_chains(pb)
-    before = {name: [float(c.points[0, 1]), float(c.points[-1, 1])] for name, c in named}
-    for k in range(2):
-        t = pb.get_current_time(dimensional=False, as_float=True)
-        pb.run(t + 1e-5, timestep=1e-5, maxstep=1e-5, outstep=False, temporal_error=1.0,
-               newton_solver_tolerance=1e-8)
-    named, _ = surgery._named_chains(pb)
-    print(json.dumps({"before": before, "time": pb.get_current_time(dimensional=False,
-                                                                     as_float=True),
-                      "chains": sorted(name for name, _ in named)}))
+from faraday_singularity.driver import CollapseDriver, CollapseSettings
+out, report = Path(sys.argv[5]), {}
+for name, state in (("precut", Path(sys.argv[3])), ("postcut", Path(sys.argv[4]))):
+    pb = T.jets_problem(out / name)
+    with pb:
+        pb.initialise()
+        pb.load_state(str(state))
+        meta = json.loads(state.with_suffix(".json").read_text())
+        driver = CollapseDriver(pb, CollapseSettings(**T.DRIVER), out / name, reconnect=T.RECON,
+                                events=T.EVENTS)
+        driver.restore(meta)
+        got = {"events": [e["k"] for e in pb.events], "fresh": driver._fresh_mesh()}
+        if name == "precut":  # the state before the second cut: cut it again
+            rec = surgery.liquid_cut(pb, T.EVENTS, T.RECON, out / name, T.request(pb), k=2,
+                                     driver=driver, **T.CUT_KW)
+            got.update(closures=rec["closures"], removed_total=rec["removed_total"],
+                       transfer=rec["transfer"])
+        named, _ = surgery._named_chains(pb)
+        got["tips"] = {n: [float(c.points[0, 1]), float(c.points[-1, 1])] for n, c in named}
+        res = driver.run(1e-8)
+        got["run"] = {"steps": res["steps"], "stop": res["stop"]["reason"]}
+        driver.close()
+    report[name] = got
+print(json.dumps(report))
 """
 
 
-def test_a_restart_from_the_dump_after_the_cuts_steps_in_a_new_process(jets, tmp_path):
-    """The dump after the second cut, loaded in a new process (the cut's sizing restored from its
-    record), has both chains with the cut tips, and takes steps."""
-    state = Path(jets["record2"]["dumps"]["postcut"])
+def test_a_restart_from_the_dumps_of_the_cuts_cuts_again_and_steps_in_a_new_process(jets, tmp_path):
+    """In a new process, under a driver that restores their bookkeeping (each mesh fresh, as the
+    driver that dumped it had stepped on none): the state before the second cut, cut again, gives
+    the second cut's transfer and budgets, and the run after it takes its steps; the state after the
+    second cut has both chains with the cut tips and takes its steps too."""
+    precut, postcut = (jets["record2"]["dumps"][k] for k in ("precut", "postcut"))
     env = dict(os.environ, MKL_NUM_THREADS="1", OMP_NUM_THREADS="1")
     proc = subprocess.run([sys.executable, "-c", RESTART, str(ROOT / "src"),
-                           str(ROOT / "testCases"), str(state), str(tmp_path / "again")],
-                          capture_output=True, text=True, timeout=900, check=False, env=env)
+                           str(ROOT / "testCases"), precut, postcut, str(tmp_path / "again")],
+                          capture_output=True, text=True, timeout=1200, check=False, env=env)
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
     got = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert got["chains"] == ["bubble", "open"]
-    assert got["before"]["open"][0] == pytest.approx(jets["record1"]["cap"]["z_tip_new"],
-                                                     abs=1e-12)
-    assert got["before"]["bubble"][1] == pytest.approx(jets["record2"]["cap"]["z_tip_new"],
-                                                       abs=1e-12)
-    assert got["time"] > jets["after_cuts_time"]
+    r1, r2 = jets["record1"], jets["record2"]
+    again = got["precut"]
+    assert again["events"] == [1] and again["fresh"] is True
+    for key in ("reported_unlocated", "predicted_unlocated", "cap_nodes"):
+        assert again["transfer"][key] == r2["transfer"][key], key
+    assert again["closures"]["relative"] == pytest.approx(r2["closures"]["relative"], rel=1e-9)
+    assert again["removed_total"] == pytest.approx(r2["removed_total"], rel=1e-9)
+    after = got["postcut"]
+    assert after["events"] == [1, 2] and after["fresh"] is True
+    for run in (again, after):
+        assert run["tips"]["open"][0] == pytest.approx(r1["cap"]["z_tip_new"], abs=1e-12)
+        assert run["tips"]["bubble"][1] == pytest.approx(r2["cap"]["z_tip_new"], abs=1e-12)
+        assert run["run"] == {"steps": DRIVER["max_steps"], "stop": "max-steps"}
