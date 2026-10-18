@@ -241,7 +241,10 @@ add a second top-level `cases/` tree.
   `reconnect.feature_regions`); `post.open_neck_stop` false skips the open chain's neck stop. At
   the cut and at each restart after it the driver with the block sets oomph-lib's smallest step
   (`pb.DTSF_minimum_dt`) to `post.minimum_dt` or 1e-3 times its step-size floor
-  (`CollapseDriver._lower_minimum_dt`, `minimum_dt` in the leg), never before the cut, where
+  (`CollapseDriver._lower_minimum_dt`, `minimum_dt` in the leg, with `minimum_dt_ulps`, that step
+  over the spacing of doubles at the leg's time), never above oomph-lib's default and at most half
+  the step-size floor after the cut (`events.minimum_dt_after_cut`, refused before any output and
+  where the driver is made: a step failing at the floor must still be halved), never before the cut, where
   `classify_failure` reads oomph-lib's message at 1e-12; at 1e-12 an accepted step below 2.5e-13
   ends the solve and a failed one below 2e-12 is not halved (`testCases/test_events_fem.py`).
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,

@@ -59,11 +59,33 @@ def test_the_block_parses_with_its_defaults_and_round_trips():
     ({"post": {"bubble_bottom_sizing": "own"}}, "bubble_bottom_sizing must be one of"),
     ({"post": {"bubble_bottom_sizing": "frozen"}}, "bubble_bottom_size is given"),
     ({"post": {"bubble_bottom_size": 5e-5}}, "bubble_bottom_size is given"),
-    ({"post": {"dt_min": 1e-14, "minimum_dt": 1e-14}}, "minimum_dt must lie below dt_min"),
+    ({"post": {"dt_min": 1e-14, "minimum_dt": 1e-14}}, "at most half the step-size floor"),
+    ({"post": {"dt_min": 1e-12, "minimum_dt": 9e-13}}, "at most half the step-size floor"),
+    ({"post": {"minimum_dt": 1e-11}}, "may not raise it"),
+    ({"post": {"minimum_dt": 5e-12}}, "may not raise it"),
 ])
 def test_the_block_refuses_unknown_keys_and_invalid_values(block, match):
     with pytest.raises(ValueError, match=match):
         ev.EventSettings.from_dict(block)
+
+
+def test_oomph_libs_smallest_step_after_the_cut_lowers_the_default_below_half_the_floor():
+    """``events.minimum_dt_after_cut``: post.minimum_dt, or 1e-3 times the step-size floor after
+    the cut but never above oomph-lib's default of 1e-12; it must lie at most half that floor, so
+    that a step failing at the floor is still halved, which the collapse's own floor (a null
+    post.dt_min) is checked against where the driver is made."""
+    post = ev.PostCutSettings()
+    assert ev.OOMPH_MINIMUM_DT == 1e-12
+    assert ev.minimum_dt_after_cut(post, 1e-12) == 1e-3 * 1e-12
+    assert ev.minimum_dt_after_cut(post, 1e-6) == 1e-12  # 1e-9 would raise oomph-lib's default
+    assert ev.minimum_dt_after_cut(ev.PostCutSettings(minimum_dt=5e-13), 1e-12) == 5e-13
+    with pytest.raises(ValueError, match="at most half the step-size floor"):
+        ev.minimum_dt_after_cut(ev.PostCutSettings(minimum_dt=9e-13), 1e-12)
+    with pytest.raises(ValueError, match="at most half the step-size floor"):
+        ev.minimum_dt_after_cut(ev.PostCutSettings(minimum_dt=1e-12), 1e-12)
+    # with post.dt_min the block checks itself; without it, minimum_dt waits for the floor
+    assert ev.EventSettings.from_dict({"post": {"minimum_dt": 9e-13}}).post.minimum_dt == 9e-13
+    assert ev.EventSettings.from_dict({"post": {"dt_min": 2e-12, "minimum_dt": 1e-12}})
 
 
 def test_liquid_events_need_the_open_neck_stop_off():

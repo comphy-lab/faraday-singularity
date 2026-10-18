@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -239,21 +240,38 @@ def test_oomph_libs_smallest_step_is_lowered_after_the_cut_with_the_block_only(t
     pb = CutProblem()
     drv = _events_driver(tmp_path / "floor", pb, recon,
                          events=ev.EventSettings.from_dict({"post": {"dt_min": 1e-14}}))
-    assert pb.DTSF_minimum_dt == pytest.approx(1e-17) and drv.state.legs[0]["minimum_dt"] == \
+    # exact: the product the driver sets (approx's absolute tolerance of 1e-12 would pass any)
+    assert pb.DTSF_minimum_dt == 1e-3 * 1e-14 and drv.state.legs[0]["minimum_dt"] == \
         pb.DTSF_minimum_dt
+    assert drv.state.legs[0]["minimum_dt_ulps"] is None  # the cut at t = 0
     drv.close()
     pb = CutProblem()
     drv = _events_driver(tmp_path / "default", pb, recon, events=ev.EventSettings(), state_dt=0.0)
-    assert pb.DTSF_minimum_dt == pytest.approx(1e-15)  # 1e-3 times the collapse's dt_min
+    assert pb.DTSF_minimum_dt == 1e-3 * 1e-12  # 1e-3 times the collapse's dt_min
     drv.run(1e-9)
     drv.close()
     meta = json.loads(max((tmp_path / "default" / "states").glob("state_*.json")).read_text())
     monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
         restore_cut=lambda problem, record: setattr(problem, "cut", record)))
     pb = CutProblem()
+    pb.t = meta["time"]
     events = ev.EventSettings.from_dict({"post": {"minimum_dt": 2e-18}})
     drv = CollapseDriver(pb, _settings(), tmp_path / "restart", reconnect=recon, events=events)
     drv.restore(meta)
     drv.close()
     assert pb.DTSF_minimum_dt == 2e-18 and drv.state.legs[-1]["minimum_dt"] == 2e-18
     assert drv.state.legs[-1]["changed"] == ["post.minimum_dt"]
+    assert drv.state.legs[-1]["minimum_dt_ulps"] == 2e-18 / math.ulp(meta["time"])
+
+
+def test_oomph_libs_smallest_step_must_lie_at_most_half_the_floor_after_the_cut(tmp_path):
+    """A post.minimum_dt above half the driver's step-size floor after the cut (here the
+    collapse's own, post.dt_min null) is refused where the driver is made: a step failing at that
+    floor would not be halved, and would end the run as a failed one."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    events = ev.EventSettings.from_dict({"post": {"minimum_dt": 9e-13}})
+    with pytest.raises(ValueError, match="at most half the step-size floor"):
+        CollapseDriver(CutProblem(), _settings(), tmp_path / "a", reconnect=recon, events=events)
+    drv = CollapseDriver(CutProblem(), _settings(dt_min=2e-12), tmp_path / "b", reconnect=recon,
+                         events=events)
+    drv.close()

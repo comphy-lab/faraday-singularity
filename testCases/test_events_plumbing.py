@@ -184,6 +184,7 @@ def test_the_block_applies_after_a_cut_only(tmp_path):
     ({"reconnect_events": {"post": {"courant_mode": "ale"}}}, "post: unknown key"),
     ({"reconnect_events": {"liquid": {"enabled": True}}}, "open_neck_stop false"),
     ({"reconnect_events": []}, "must be an object"),
+    ({"reconnect_events": {"post": {"minimum_dt": 9e-13}}}, "at most half the step-size floor"),
     ({"fold_stopp": 1e-4}, "collapse: .*fold_stopp"),
 ])
 def test_the_runner_refuses_an_invalid_block_or_collapse_key_before_output(tmp_path, collapse,

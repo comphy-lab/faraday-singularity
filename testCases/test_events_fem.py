@@ -281,7 +281,8 @@ def test_oomph_libs_smallest_step_ends_accepted_and_failed_steps_unless_lowered(
     assert "reduce dt to 4e-13 which is less than the minimum dt (1e-12)" in \
         out["minimum_dt_message"][-1]
     out = _ode(tmp_path, "accepted-lowered", minimum_dt=1e-15, **accepted)
-    assert out["ok"] and out["steps"] == 1 and out["time"] == pytest.approx(1e-13, rel=1e-12)
+    assert out["ok"] and out["steps"] == 1
+    assert out["time"] == pytest.approx(1e-13, rel=1e-12, abs=0.0)
     failing = {"K": 1e9, "dt": 1e-12, "max_residuals": 1e3}
     out = _ode(tmp_path, "failing-default", **failing)
     assert not out["ok"] and out["rejected"] == 1
@@ -289,4 +290,4 @@ def test_oomph_libs_smallest_step_ends_accepted_and_failed_steps_unless_lowered(
         out["minimum_dt_message"][-1]
     out = _ode(tmp_path, "failing-lowered", minimum_dt=1e-15, **failing)
     assert out["ok"] and out["rejected"] == 1 and out["steps"] == 2
-    assert out["time"] == pytest.approx(1e-12, rel=1e-4) and not out["minimum_dt_message"]
+    assert out["time"] == pytest.approx(1e-12, rel=1e-4, abs=0.0) and not out["minimum_dt_message"]

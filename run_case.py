@@ -131,7 +131,7 @@ if "OMPI_MCA_btl" not in os.environ and (_btl := _shared_memory_btl()) is not No
 from faraday_singularity.driver import CollapseDriver, CollapseSettings, check_landing  # noqa: E402
 from faraday_singularity.cases import validate_case  # noqa: E402
 from faraday_singularity.events import (EVENTS_BLOCK, PRECUT_EVENT, EventSettings,  # noqa: E402
-                                        events_done, split_events_block)
+                                        events_done, minimum_dt_after_cut, split_events_block)
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import create_run_manifest, pyoomph_revision  # noqa: E402
@@ -576,6 +576,12 @@ def main() -> int:
             settings = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
         except (ValueError, TypeError) as exc:  # an unknown key is a TypeError of the dataclass
             raise SystemExit(f"{args.case}: collapse: {exc}")
+        if events is not None:  # oomph-lib's smallest step after the cut, against the floor then
+            try:
+                minimum_dt_after_cut(events.post, settings.dt_min if events.post.dt_min is None
+                                     else events.post.dt_min)
+            except ValueError as exc:
+                raise SystemExit(f"{args.case}: {exc}")
 
     if not math.isfinite(periods) or periods <= 0 or not math.isfinite(dt_out) or dt_out <= 0:
         raise SystemExit("completion time and output cadence must be positive and finite")

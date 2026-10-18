@@ -287,7 +287,7 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
 from .events import (EVENT_REQUEST, EVENT_UNHANDLED, PRECUT_EVENT, EventSettings, events_done,
-                     fold_stop_after_cut)
+                     fold_stop_after_cut, minimum_dt_after_cut)
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -565,6 +565,12 @@ class _State:
     legs: list = field(default_factory=list)
 
 
+def _in_ulps(dt: float, t: float) -> float | None:
+    """``dt`` in units of the spacing of doubles at ``t`` (``math.ulp``); None at ``t = 0``, where
+    that spacing is the subnormals'."""
+    return None if t == 0.0 else dt / math.ulp(t)
+
+
 class CollapseDriver:
     def __init__(self, problem, settings: CollapseSettings, outdir: Path, *,
                  keep_stop_state: bool = False, landing=(),
@@ -586,6 +592,9 @@ class CollapseDriver:
         if events is not None and reconnect is None:
             raise ValueError("the events block applies after a cut: a driver with it needs the "
                              "reconnect settings")
+        if events is not None:  # oomph-lib's smallest step after the cut, against the floor then
+            minimum_dt_after_cut(events.post, settings.dt_min if events.post.dt_min is None
+                                 else events.post.dt_min)
         self._post_cut_cache: tuple | None = None
         # the measured state has had its stop checks but not yet its snapshot and remesh checks
         self._checks_pending = False
@@ -899,9 +908,10 @@ class CollapseDriver:
 
     def _minimum_dt(self) -> float:
         """oomph-lib's smallest step after the cut with the block: ``post.minimum_dt``, or 1e-3
-        times the driver's step-size floor (:meth:`_dt_min`)."""
-        post = self.events.post
-        return post.minimum_dt if post.minimum_dt is not None else 1e-3 * self._dt_min()
+        times the driver's step-size floor (:meth:`_dt_min`), never above oomph-lib's default
+        and at most half that floor (``events.minimum_dt_after_cut``, checked at the driver's
+        construction)."""
+        return minimum_dt_after_cut(self.events.post, self._dt_min())
 
     def _lower_minimum_dt(self) -> float:
         """After a cut with the block, at the cut and at every restart from a state after it:
@@ -1833,13 +1843,18 @@ class CollapseDriver:
         ``leg``: when and from which step it starts, the source it runs (``leg_info``: the commit),
         the hash of the block and the keys in which it differs from the block the state was written
         with (``changed``; for a state written without the block, ``added``, from the block's
-        defaults), oomph-lib's smallest step it sets (``minimum_dt``, :meth:`_lower_minimum_dt`),
-        and, from the state before an event, that event (``from_event_state``) and, where the keys
+        defaults), oomph-lib's smallest step it sets (``minimum_dt``, :meth:`_lower_minimum_dt`;
+        ``minimum_dt_ulps``, that step over the spacing of doubles at the leg's time), and, from the
+        state before an event, that event (``from_event_state``) and, where the keys
         of its class change, the event from which they apply anew (``event_keys_changed_at``)."""
         st = self.state
+        minimum_dt = self._lower_minimum_dt()
         leg = {"leg": len(st.legs), "start": start, "step": st.step, "time": m["time"],
                **self._taus(m["time"]), **self.leg_info, "settings_sha256": self.events.sha256(),
-               "changed": [], "added": False, "minimum_dt": self._lower_minimum_dt()}
+               "changed": [], "added": False, "minimum_dt": minimum_dt,
+               # oomph-lib's smallest step in units of the spacing of doubles at the leg's time:
+               # a step of a few of them no longer advances the time by itself
+               "minimum_dt_ulps": _in_ulps(minimum_dt, m["time"])}
         if meta is not None:
             recorded = meta.get("events_settings")
             leg["added"] = recorded is None

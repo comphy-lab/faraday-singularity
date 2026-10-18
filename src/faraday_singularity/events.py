@@ -48,6 +48,7 @@ from dataclasses import asdict, dataclass, field, fields
 import numpy as np
 
 EVENTS_BLOCK = "reconnect_events"  # the key of the block in a case's collapse block
+OOMPH_MINIMUM_DT = 1e-12  # oomph-lib's smallest step by default (Problem::Minimum_dt)
 BUBBLE_BOTTOM_SIZINGS = ("kept", "frozen")
 # the kinds of the events a run makes, by class: the keys of a class are fixed after its first event
 EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head"), "gap": ("groove-fill",)}
@@ -127,9 +128,12 @@ class PostCutSettings:
     radius (``reconnect.elements_per_scale`` without it); ``rise_tol`` replaces the collapse's
     ``rise_tol`` (the rise of a bump above its base that makes a jet); ``dt_min`` the step-size
     floor of the driver; ``minimum_dt`` is oomph-lib's smallest step after the cut (``Problem::
-    Minimum_dt``, 1e-3 times the driver's floor without it), below which it gives up on a step,
-    and below which it also refuses an accepted step whose next candidate, four times the step,
-    would fall; before the cut it stays at oomph-lib's default. ``open_neck_stop`` false drops the
+    Minimum_dt``, :func:`minimum_dt_after_cut`: 1e-3 times the driver's floor without it, never
+    above oomph-lib's default), below which it gives up on a step, and below which it also
+    refuses an accepted step whose next candidate, four times the step, would fall; it lowers
+    oomph-lib's default (1e-12), never raises it, and lies at most half the driver's floor, so
+    that a step failing at that floor is still halved once; before the cut it stays at the
+    default. ``open_neck_stop`` false drops the
     open chain's neck stop after the cut (``collapse.neck_stop``), which liquid events need.
     ``bubble_bottom_sizing`` ``frozen`` meshes the bubble's bottom (far from the cut) never coarser
     than ``bubble_bottom_size`` instead of never coarser than the landing state's focus there
@@ -155,10 +159,27 @@ class PostCutSettings:
         if (self.bubble_bottom_sizing == "frozen") != (self.bubble_bottom_size is not None):
             raise ValueError(f"collapse.{EVENTS_BLOCK}.post.bubble_bottom_size is given with "
                              "bubble_bottom_sizing frozen, and only then")
-        if self.minimum_dt is not None and self.dt_min is not None \
-                and not self.minimum_dt < self.dt_min:
-            raise ValueError(f"collapse.{EVENTS_BLOCK}.post.minimum_dt must lie below dt_min: "
-                             "oomph-lib would give up on a step before the driver's floor stops")
+        if self.minimum_dt is not None and self.minimum_dt > OOMPH_MINIMUM_DT:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.post.minimum_dt lowers oomph-lib's smallest "
+                             f"step, {OOMPH_MINIMUM_DT:g} by default; it may not raise it")
+        if self.dt_min is not None:
+            minimum_dt_after_cut(self, self.dt_min)
+
+
+def minimum_dt_after_cut(post: PostCutSettings, dt_min: float) -> float:
+    """oomph-lib's smallest step after the cut with the block, for the driver's step-size floor
+    after it, ``dt_min`` (``post.dt_min``, or the collapse's own without it): ``post.minimum_dt``,
+    or ``1e-3 dt_min`` but at most oomph-lib's default (:data:`OOMPH_MINIMUM_DT`). Raises
+    ``ValueError`` unless it lies at most half ``dt_min``: oomph-lib halves a failed step only
+    above its smallest step, so that a step failing at the driver's floor would otherwise end the
+    run as a failed one, which no failure after a cut ends cleanly, before the floor stops it."""
+    value = post.minimum_dt if post.minimum_dt is not None else min(1e-3 * dt_min,
+                                                                      OOMPH_MINIMUM_DT)
+    if not 2.0 * value <= dt_min:
+        raise ValueError(f"collapse.{EVENTS_BLOCK}.post.minimum_dt ({value:g}) must lie at most "
+                         f"half the step-size floor after the cut ({dt_min:g}): oomph-lib would "
+                         "give up on a step the driver still allows, without halving it")
+    return value
 
 
 @dataclass(frozen=True)
