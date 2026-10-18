@@ -181,6 +181,38 @@ def test_the_block_applies_after_a_cut_only(tmp_path):
     assert not out.exists()
 
 
+def test_the_precut_state_of_a_cut_is_cut_again_under_a_block_added_changed_or_dropped(tmp_path):
+    """The precut dump of a cut run (``cut_stage`` ``precut``, with its neck) is cut again by a
+    restart under a case with a reconnect block (``run_case.restart_admission``): one that adds,
+    changes or drops the events block too is that cut (``CUT_EVENTS_DERIVED_KEYS``), the block
+    named among the keys that differ."""
+    from test_runner_manifest import PRECUT_NECK
+
+    for name, parent_block, child_block, keys in (
+            ("added", None, LIQUID, ["collapse.reconnect_events"]),
+            ("changed", LIQUID, {**LIQUID, "liquid": {"enabled": True, "eps_d": 0.1}},
+             ["collapse.reconnect_events.liquid.eps_d"]),
+            ("dropped", LIQUID, None, ["collapse.reconnect_events"])):
+        root = tmp_path / name
+        parent = _cut_case(landing=[2e-3, 1.1e-3],
+                           **({} if parent_block is None else {"reconnect_events": parent_block}))
+        state, _ = _parent_run(root, case=parent)
+        _write_meta(state, cut_stage="precut", neck=PRECUT_NECK, pinch={"t_p": 0.6})
+        child = json.loads(json.dumps(parent))
+        child["case_id"] = "sigterm-recut"
+        child["collapse"].pop("reconnect_events", None)
+        if child_block is not None:
+            child["collapse"]["reconnect_events"] = child_block
+        path = _write(root, child, "recut.json")
+        record, mode = _admit(state, child, path)
+        assert mode == run_case.CUT
+        assert record["parent_record"]["derived_keys"] == ["case_id"] + keys
+        proc = _check(path, root / "out", state)
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        assert json.loads(proc.stdout.strip().splitlines()[-1])["restart_mode"] == "cut"
+        assert not (root / "out").exists()
+
+
 @pytest.mark.parametrize("collapse, message", [
     ({"reconnect_events": {"post": {"courant_mode": "ale"}}}, "post: unknown key"),
     ({"reconnect_events": {"liquid": {"enabled": True}}}, "open_neck_stop false"),
