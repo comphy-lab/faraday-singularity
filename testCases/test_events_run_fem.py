@@ -226,9 +226,15 @@ def test_a_run_resumes_from_the_dump_of_an_unhandled_event_with_the_handler(tmp_
     precut = Path(stop["precut"])
     meta = json.loads(precut.with_suffix(".json").read_text())
     assert meta["cut_stage"] == ev.PRECUT_EVENT and meta["mesh_fresh"] is True
+    rec = json.loads((tmp_path / "first" / stop["record"]).read_text())
+    assert (rec["outcome"], rec["kind"], rec["class"], rec["handler"], rec["tip"]) == (
+        "unhandled", "liquid-neck", "L", "liquid-cut", "cavity_tip")
+    assert rec["dumps"]["precut"] == stop["precut"] and rec["trigger"]["ratio"] <= 1.0
     again = _resume(precut, tmp_path / "again", DRIVER["max_steps"])
     assert again["stop"]["reason"] == "max-steps" and again["steps"] == DRIVER["max_steps"]
     assert again["events"] == [1, 2] and again["tips"] == ["cavity_tip", "bubble_top"]
+    made = json.loads((tmp_path / "again" / "events" / "event_001.json").read_text())
+    assert made["outcome"] == "made" and made["dumps"]["precut"] != stop["precut"]
     assert again["leg"]["from_event_state"] == 1 and again["leg"]["changed"] == []
     end = Path(again["stop"]["end_state"])
     later = _resume(end, tmp_path / "later", DRIVER["max_steps"] + 2)

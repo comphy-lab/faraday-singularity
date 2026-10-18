@@ -459,6 +459,9 @@ EVENT_LIMIT = "max-events"
 LIQUID_CUT_REFUSED = "liquid-cut-refused"
 EVENT_UNCLOSED = "event-unclosed"
 EVENT_STOPS = (EVENT_UNHANDLED, EVENT_CASCADE, EVENT_LIMIT, LIQUID_CUT_REFUSED, EVENT_UNCLOSED)
+# the outcome in the record of an event the run stops on before any handler is made for it
+# (events/event_<k>.json, written by the driver); a cut refused or unclosed writes its own record
+STOP_OUTCOMES = {EVENT_UNHANDLED: "unhandled", EVENT_CASCADE: "cascade", EVENT_LIMIT: "max-events"}
 HEAD_SIDE_TOL = 0.05  # a head lies on one side of its neck's height to within this * r_n
 
 

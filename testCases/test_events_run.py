@@ -238,10 +238,13 @@ def fake_surgery(*, refuse=(), refuse_late=(), unclosed=(), fail=(), keep_neck=F
         neck = ev.event_neck(request)
         record = {"schema": "faraday-event/2", "k": k, "kind": request["kind"],
                   "class": request["class"]}
-        if k in refuse:
-            raise CutRefused("refused for the test", {**record, "outcome": "refused",
-                                                      "failed_at": "admission",
-                                                      "error": "CutRefused: for the test"})
+        if k in refuse:  # its record written, as the real cut writes it, without a dump
+            failed = {**record, "outcome": "refused", "failed_at": "admission",
+                      "error": "CutRefused: for the test"}
+            path = Path(outdir) / "events" / f"event_{k:03d}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_json.dumps(failed))
+            raise CutRefused("refused for the test", failed)
         precut = str(driver.keep_state(Path(outdir) / "states" / f"precut_e{k:03d}.dump",
                                        cut_stage=ev.PRECUT_EVENT,
                                        event={**{x: v for x, v in request.items()
@@ -418,6 +421,13 @@ def test_the_run_stops_resumably_on_the_event_after_the_most_it_may_make(tmp_pat
     assert [e["k"] for e in meta["events"]] == [1]
     assert out["events"]["stop"]["reason"] == ev.EVENT_LIMIT
     assert _jsonl(tmp_path / "events.jsonl")[-2]["event"] == ev.EVENT_LIMIT
+    rec = json.loads((tmp_path / "events" / "event_002.json").read_text())
+    assert (rec["outcome"], rec["reason"], rec["max_events"]) == ("max-events", ev.EVENT_LIMIT, 1)
+    assert (rec["kind"], rec["class"], rec["handler"]) == ("liquid-neck", "L", "liquid-cut")
+    assert rec["tip"] == "bubble_top" and rec["trigger"]["r_n"] == stop["r_n"]
+    assert rec["dumps"] == {"precut": stop["precut"]} and stop["record"] == "events/event_002.json"
+    # the record of the event made is the cut's own, untouched
+    assert json.loads((tmp_path / "events" / "event_001.json").read_text())["outcome"] == "made"
 
 
 def test_events_at_one_tip_that_come_ever_faster_stop_the_run_as_a_cascade(tmp_path,
@@ -433,6 +443,10 @@ def test_events_at_one_tip_that_come_ever_faster_stop_the_run_as_a_cascade(tmp_p
     assert [c["k"] for c in surgery.calls] == [1] and len(drv.pb.events) == 1
     assert Path(stop["precut"]).name == "precut_e002.dump"
     assert out["events"]["stop"]["reason"] == ev.EVENT_CASCADE
+    rec = json.loads((tmp_path / "events" / "event_002.json").read_text())
+    assert (rec["outcome"], rec["tip"], rec["generation"]) == ("cascade", "bubble_top", 2)
+    assert rec["cascade"]["verdict"] == "shrink" and rec["cascade"]["interval"] == 0.0
+    assert rec["t"] == drv.pb.events[0]["t"] and rec["step"] == drv.pb.events[0]["step"]
 
 
 def test_a_refused_cut_stops_the_run_resumably_and_changes_nothing(tmp_path, monkeypatch):
@@ -446,6 +460,9 @@ def test_a_refused_cut_stops_the_run_resumably_and_changes_nothing(tmp_path, mon
     assert stop["failed_at"] == "admission" and "for the test" in stop["error"]
     assert stop["record"] == "events/event_001.json" and drv.pb.events == []
     assert Path(stop["precut"]).name == "precut_e001.dump" and Path(stop["end_state"]).is_file()
+    # the cut's own record, with the dump of the state before the event the driver kept
+    rec = json.loads((tmp_path / "a" / stop["record"]).read_text())
+    assert rec["outcome"] == "refused" and rec["dumps"] == {"precut": stop["precut"]}
     drv, out, _ = _run(tmp_path / "b", monkeypatch, RegrowingHead(),
                        surgery=fake_surgery(refuse_late=(1,)))
     stop = out["stop"]

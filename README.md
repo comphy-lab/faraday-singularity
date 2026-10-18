@@ -445,9 +445,11 @@ neck, `L` or `A-head` (below), within itself and goes on; it stops on any other 
 (`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of its class:
 the ring of a piercing, the fill of a groove and the split of a gas neck are still to be built),
 and keeps the state before it as `states/precut_e<k>.dump` (`cut_stage` `precut-event`), besides
-the state it ends on; a continuation from it meets the event again, and its handler once one
-exists. The keys of `liquid` also set the cut of a landed neck: the cap that closes the stump
-(`liquid.cap`, `hemispheroid`, of height `liquid.cap_height`, 1, in neck radii and at most one), the
+the state it ends on, with the record of the event (`events/event_<k>.json`, `outcome`
+`unhandled`); a continuation from it meets the event again, and its handler once one exists. The
+bubble's tips meeting ends no window: until the ring is built the piercing is such a stop. The
+keys of `liquid` also set the cut of a landed neck: the cap that closes the stump (`liquid.cap`,
+`hemispheroid`, of height `liquid.cap_height`, 1, in neck radii and at most one), the
 velocity of the cap's nodes (`liquid.cap_fill`: `sample`, the old bulk velocity at their places, or
 `transfer`, what pyoomph's transfer gives them, an arm only), the projection after the cut
 (`liquid.projection`, true) and the first step after it (`liquid.restart`, null for the cut's
@@ -530,9 +532,11 @@ after the cut with the liquid of the mesh (its volume, axial momentum and kineti
 box) and their sums. Under `post.keep_event_dumps` `first<N>-last<M>` the dumps of the events made
 that the policy no longer keeps are deleted as the events come (`dumps.dropped` in their records
 and the records' files). With `post.prune_gmsh` the run deletes, after every dump and every event,
-the meshes gmsh wrote for it that no dump in its directory refers to and that the problem no longer holds, so that every dump
-kept restarts with its mesh (nothing is deleted where a dump cannot be read). The run stops
-resumably, with the dump of the state before the event, which is always kept, at the event after
+the meshes gmsh wrote for it that no dump in its directory refers to and that the problem no longer
+holds, so that every dump kept restarts with its mesh (nothing is deleted where a dump cannot be
+read). The run stops resumably, with the dump of the state before the event, which is always kept,
+and the record of the event (`outcome` `max-events` or `cascade`; a refused or unclosed cut's own
+record, with that dump), at the event after
 `max_events` (`max-events`), at one that the cascade test of its tip judges to shrink
 (`event-cascade`: an interval since the last at the tip below `cascade_min_interval delta^2`, or
 `cascade_count` successive ratios of the intervals and of the heads' volumes, each below

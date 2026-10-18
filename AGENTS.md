@@ -293,7 +293,12 @@ add a second top-level `cases/` tree.
   rotating dump and every event (`CollapseDriver._prune_meshes`, none where a dump cannot be read;
   `testCases/test_events_fem.py` restarts the dumps kept in new processes). Every other event is a
   resumable stop with the dump of the state before it (`states/precut_e<k>.dump`, `cut_stage`
-  `precut-event`, the event under `event`, also an event of its reason) besides the end state:
+  `precut-event`, the event under `event`, also an event of its reason) besides the end state, and
+  with the record of the event, so that every event a run meets has one (`events/event_<k>.json`,
+  `CollapseDriver._write_stop_record`: `outcome` `unhandled`, `cascade` or `max-events`,
+  `events.STOP_OUTCOMES`, with the request, the neck of a liquid event as its `trigger`, its tip,
+  times and the dump; a cut refused or unclosed has its own, to which the dump is added; `record`
+  in the stop):
   `event-unhandled` (no handler made: the ring of a piercing, the groove fill, the split of a gas
   neck, a liquid neck without a single head), `max-events` (the event after `max_events`),
   `event-cascade` (`events.CascadeMonitor` judges it to shrink: an interval at its tip below

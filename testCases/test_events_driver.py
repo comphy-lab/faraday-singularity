@@ -89,6 +89,13 @@ def test_an_event_without_a_handler_stops_the_run_resumably(tmp_path, monkeypatc
     assert lines[-2]["k"] == 1 and lines[-2]["precut"] == stop["precut"]
     assert out["events"]["made"] == 0 and out["events"]["stop"]["reason"] == ev.EVENT_UNHANDLED
     assert out["window_end"] is None
+    # its record: the neck as its trigger, at the tip its head ends on
+    rec = json.loads((run / "events" / "event_001.json").read_text())
+    assert (rec["outcome"], rec["kind"], rec["class"], rec["handler"]) == (
+        "unhandled", "liquid-neck", "L-unhandled", None)
+    assert (rec["chain"], rec["tip"], rec["step"]) == ("bubble", "bubble_top", 1)
+    assert rec["trigger"]["r_n"] == stop["r_n"] and rec["trigger"]["status"] == "head-too-large"
+    assert rec["trigger"]["index"] == stop["index"] and rec["dumps"]["precut"] == stop["precut"]
     # the runner admits a continuation from it (the parent's records, as run_case writes them)
     case = json.loads(json.dumps(CASE))
     case["collapse"].update(reconnect=dict(RECON.to_dict(), delta=1e-3, dt0=1e-6),
@@ -190,6 +197,20 @@ def test_the_bubble_pierced_by_its_jet_is_a_resumable_stop(tmp_path):
     assert stop["bubble_length"] == pytest.approx(8e-4, rel=1e-6)
     assert Path(stop["precut"]).name == "precut_e001.dump" and out["steps"] == 0
     assert stop["tau"] == 0.0
+    assert out["window_end"] is None  # the tips meeting ends no window
+    # the record of the event, as of every event a run meets
+    assert stop["record"] == "events/event_001.json" == out["events"]["stop"]["record"]
+    rec = json.loads((tmp_path / "block" / stop["record"]).read_text())
+    assert rec["schema"] == ev.EVENT_SCHEMA and rec["k"] == 1
+    assert (rec["kind"], rec["class"], rec["handler"]) == ("piercing", "W1", "ring")
+    assert (rec["outcome"], rec["reason"]) == ("unhandled", ev.EVENT_UNHANDLED)
+    assert rec["request"]["bubble_length"] == pytest.approx(8e-4, rel=1e-6)
+    assert rec["dumps"] == {"precut": stop["precut"]} and rec["trigger"] == {}
+    assert rec["tip"] is None and rec["step"] == 0 and rec["leg"] == 0
+    assert rec["tau"] == 0.0 and rec["tau_p"] == pytest.approx(1e-6)
+    assert rec["t_prime_over_T"] == pytest.approx(-1.0)
+    assert rec["settings"] == ev.EventSettings().to_dict()
+    assert rec["settings_sha256"] == ev.EventSettings().sha256()
 
 
 def test_a_closing_groove_is_met_at_kappa_g_delta_not_at_the_absolute_fold_stop(tmp_path):
