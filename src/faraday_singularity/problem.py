@@ -83,6 +83,8 @@ class FaradayProblem(Problem):
         self.recon = None  # the reconnection handler on the free surface, with ``reconnect``
         self.interface_zeta: AssignZetaCoordinatesByArclength | None = None
         self.cut: dict | None = None  # the record of a cut, once one has been made
+        # the records of the events made after the cut (the events block, events.EventSettings)
+        self.events: list[dict] = []
         self._projecting = False  # set while the projection's auxiliary solve runs
         # the thresholds of RemeshWhen, pyoomph's defaults: an element shrunk below 0.6 or grown
         # beyond 1.75 times its size at the build, or of a fifth of its quality then

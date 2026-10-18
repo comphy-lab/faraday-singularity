@@ -194,6 +194,21 @@ add a second top-level `cases/` tree.
   `testCases/test_reconnect_fem.py`; check them when the pin moves. Planner tests on stored neck
   profiles run when `FARADAY_RECONNECT_PROFILES` names their directory; a synthetic slender thread
   covers the same planner classes by default.
+- The events after the cut are set by `collapse.reconnect_events` (`events.EventSettings`:
+  `liquid`, `gap`, `post`), a block beside the cut's own that needs a `reconnect` block; without it a
+  run is the same to the byte as at 1b65916 (`testCases/test_events_fem.py`: a cut, the run after it
+  with rebuilds and dumps, and a restart from a dump). It applies after a cut only: a cut restart may
+  add, drop or change it (`run_case.CUT_EVENTS_DERIVED_KEYS`), a post-cut continuation may add or
+  change it (`run_case.POST_CUT_DERIVED_KEYS`, `run_case._check_events`), and a run from the start or
+  an ordinary restart with it is refused before any output; `run_case.CUT_DERIVED_KEYS` and the
+  prototype, which refuses the block, are unchanged. Dumps written after the cut with it carry
+  `events_settings`, `events` (the events made) and `legs` (the cut and each restart: step, time,
+  commit, hash of the block, changed keys; events `leg`), and only a case with the block continues
+  them. The keys of `liquid` and `gap` are fixed once an event of their class was made, except in a
+  restart from the state before an event (`precut_e<k>`, `cut_stage` `precut-event`), from which they
+  apply anew (`event_keys_changed_at` in its leg); the keys of `post` change at any restart (a key a
+  recorded block lacks counts at its default). An unknown key of the `collapse` block is refused
+  with a message.
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the

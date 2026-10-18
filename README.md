@@ -378,10 +378,31 @@ restores the cut and continues. The cuts of a study in `delta` are compared at f
 one common `t_p`, since `t_cut` depends on `delta` and fits of `t_p` over different windows differ;
 a reconnected result counts only if the jets do not depend on `delta`.
 
+**Events after the cut.** A `collapse.reconnect_events` block beside `collapse.reconnect`
+(`src/faraday_singularity/events.py`, `EventSettings`) governs how a run after the cut meets the
+changes of topology that follow it. It has three parts: `liquid`, the necks on the liquid side at
+the roots of the jets the cut launched; `gap`, the closing folds of either chain (a gas groove
+narrowing); and `post`, the limits, floors and mesh sizes of the run after the cut, each by default
+the collapse's own. A case without the block runs exactly as before the block existed: the tests
+run a cut, the run after it with rebuilds and dumps, and a restart from one of those dumps, against
+the source of commit `1b65916`, to the byte. The block applies after the cut only, and needs a
+`reconnect` block: a cut restart may add, drop or change it together with the reconnect block
+(`run_case.CUT_EVENTS_DERIVED_KEYS`), a continuation from a dump written after the cut may add or
+change it (`run_case.POST_CUT_DERIVED_KEYS`), and a run from the start or an ordinary restart that
+carries it is refused before any output. The dumps written after the cut with the block record it
+(`events_settings`), the events made (`events`) and the legs of the run (`legs`, also as events
+`leg`: the cut and each restart, with the step and time it starts at, the source commit, the hash
+of the block and the keys in which it differs from the block the state was written with). Such a
+dump continues only under a case with the block. The keys of `liquid` and of `gap` are the keys of
+a class of events: once an event of the class has been made they may not change, except in a
+restart from the state before an event (`precut_e<k>`), from which they apply anew; the keys of
+`post` may change at any restart.
+
 `simulationCases/reconnect_prototype.py` is a development tool beside this: it cuts a landing state
 at `--delta` or `--delta-ratio` times its neck radius, with options that override the case's
-reconnect block, and takes `--steps` steps under the same driver and post-cut mode. Its manifest has
-its own schema, so its outputs feed no figure, and no runner continues its states.
+reconnect block, and takes `--steps` steps under the same driver and post-cut mode, without the
+events block, which it refuses. Its manifest has its own schema, so its outputs feed no figure, and
+no runner continues its states.
 
 ## References
 

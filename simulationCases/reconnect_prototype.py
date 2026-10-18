@@ -94,6 +94,9 @@ def parse_args(argv=None):
 
 
 def settings_from(case: dict, args) -> tuple[CollapseSettings, dict, float]:
+    if "reconnect_events" in case["collapse"]:
+        raise SystemExit("the prototype takes no collapse.reconnect_events block: the events after "
+                         "the cut run under the production runner only")
     period = nondimensionalise(CaseParameters.from_dict(case["physics"])).forcing_period
     block, recon, _keep, _landing = split_collapse_block(case["collapse"])
     if "snapshot_dt_periods" in block:

@@ -76,6 +76,16 @@ run) are inactive, as ``parameters.json`` records (``inactive_after_cut``): one 
 radii are therefore not checked against its neck-radius stop either, so that a cut or continuation
 case may change ``neck_stop`` (``DERIVED_KEYS``); the check applies to every other run, before any
 output.
+
+The ``collapse.reconnect_events`` block (``events.EventSettings``) governs the run after the cut and
+needs a ``reconnect`` block. Only a cut restart, which may add, drop or change it with the reconnect
+block (``CUT_EVENTS_DERIVED_KEYS``), and a post-cut continuation, which may add or change it
+(``POST_CUT_DERIVED_KEYS``), take it; a run from the start or an ordinary restart with it is
+refused before any output. A state written with the block continues only under a case with it, and
+the keys of a class of events of which the state has made one must be those it recorded, unless the
+state is the one before an event (``precut_e<k>``), from which they apply anew
+(``_check_events``). ``parameters.json`` and the manifest record the block (``reconnect_events``).
+An unknown key of the ``collapse`` block is refused with a message before any output.
 """
 
 from __future__ import annotations
@@ -120,6 +130,8 @@ if "OMPI_MCA_btl" not in os.environ and (_btl := _shared_memory_btl()) is not No
 
 from faraday_singularity.driver import CollapseDriver, CollapseSettings, check_landing  # noqa: E402
 from faraday_singularity.cases import validate_case  # noqa: E402
+from faraday_singularity.events import (EVENTS_BLOCK, PRECUT_EVENT, EventSettings,  # noqa: E402
+                                        events_done, split_events_block)
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import create_run_manifest, pyoomph_revision  # noqa: E402
@@ -163,6 +175,14 @@ DERIVED_KEYS = ("case_id", "completion.value", "collapse.keep_stop_state", "coll
 # state it loads too, so its case may also add or change that block.
 CUT_DERIVED_KEYS = DERIVED_KEYS + ("collapse.reconnect",)
 PROTOTYPE_DERIVED_KEYS = CUT_DERIVED_KEYS
+# The block of the events after the cut (events.EventSettings), which governs only what follows the
+# cut: a cut restart may add, drop or change it with the reconnect block, and a continuation after
+# the cut may add it or change it, within what events.EventSettings.refused_changes allows (the keys
+# of a class of events are fixed once an event of the class was made). The prototype takes no such
+# block.
+EVENTS_KEY = "collapse." + EVENTS_BLOCK
+CUT_EVENTS_DERIVED_KEYS = CUT_DERIVED_KEYS + (EVENTS_KEY,)
+POST_CUT_DERIVED_KEYS = DERIVED_KEYS + (EVENTS_KEY,)
 # Restart modes: continue a run before any cut; cut at the start, then continue after the cut;
 # continue a run from a state written after its cut.
 ORDINARY, CUT, POST_CUT = "ordinary", "cut", "post-cut"
@@ -329,8 +349,33 @@ def _check_post_cut(meta: dict, reconnect) -> None:
                          "stops: raise tau_end (or remove it) to continue")
 
 
+def _check_events(meta: dict, events) -> None:
+    """Refuse to continue a state written after a cut under an events block it cannot take: a
+    state written with the block (``events_settings``) under a case without it, which would fall
+    back to the stops of the cut alone, or under one that changes the keys of a class of events of
+    which the state has made one, unless the state is the one before an event (``precut_e<k>``,
+    ``cut_stage`` ``precut-event``), from which they apply anew (events.EventSettings.
+    refused_changes). A state written before the block existed takes any block."""
+    recorded = meta.get("events_settings")
+    if events is None:
+        if recorded is not None:
+            raise SystemExit(f"the state was written with collapse.{EVENTS_BLOCK}; continuing it "
+                             "needs a case with that block")
+        return
+    recut_from = None
+    if meta.get("cut_stage") == PRECUT_EVENT:
+        recut_from = (meta.get("event") or {}).get("k")
+        if not isinstance(recut_from, int) or isinstance(recut_from, bool) or recut_from < 1:
+            raise SystemExit("the state before an event records no event number")
+    refused = events.refused_changes(recorded, events_done(meta.get("events")), recut_from)
+    if refused:
+        raise SystemExit(f"collapse.{EVENTS_BLOCK} changes the keys of a class of events of which "
+                         "the state has made one: " + ", ".join(refused)
+                         + "; restart from the state before an event (precut_e<k>) to change them")
+
+
 def restart_admission(state: Path, case: dict, case_path: Path, reconnect, *,
-                      legacy: bool = False) -> tuple[dict, str]:
+                      legacy: bool = False, events=None) -> tuple[dict, str]:
     """The custody record of a restart and its mode, checked before any output.
 
     * ``post-cut``: the state was written after a cut (the ``postcut`` dump or a rotating dump of a
@@ -347,7 +392,12 @@ def restart_admission(state: Path, case: dict, case_path: Path, reconnect, *,
     * ``ordinary``: any other restart, with ``DERIVED_KEYS``; with a reconnect block the parent had
       too, the run goes on before any cut.
 
-    Legacy imports (``legacy``) are ordinary restarts of cases without a reconnect block."""
+    Legacy imports (``legacy``) are ordinary restarts of cases without a reconnect block.
+
+    The events block (``events``, the case's ``collapse.reconnect_events``) applies after the cut
+    only: a cut restart may add, drop or change it (``CUT_EVENTS_DERIVED_KEYS``), a post-cut
+    continuation may add or change it (``POST_CUT_DERIVED_KEYS``) within :func:`_check_events`, and
+    an ordinary restart, before any cut, refuses it."""
     try:
         meta = json.loads(state.resolve().with_suffix(".json").read_text())
     except (OSError, ValueError):
@@ -363,19 +413,25 @@ def restart_admission(state: Path, case: dict, case_path: Path, reconnect, *,
             raise SystemExit("the state was written after a cut; continuing it needs the case of "
                              "that cut, with its collapse.reconnect block")
         _check_post_cut(meta, reconnect)
-        return restart_record(state, case, case_path, post_cut=True), POST_CUT
+        _check_events(meta, events)
+        return restart_record(state, case, case_path, post_cut=True,
+                              derived_keys=POST_CUT_DERIVED_KEYS), POST_CUT
     if meta.get("cut_stage") == "precut":
         # the state a cut started from: cut it again, never continue it before a cut
         if reconnect is None:
             raise SystemExit("the state is the precut state of a cut, which only a cut continues: "
                              "restart it under a case with a collapse.reconnect block")
-        record = restart_record(state, case, case_path, derived_keys=CUT_DERIVED_KEYS)
+        record = restart_record(state, case, case_path, derived_keys=CUT_EVENTS_DERIVED_KEYS)
         _check_cut_landing(meta, reconnect)
         return record, CUT
     if reconnect is None:
         return restart_record(state, case, case_path), ORDINARY
-    record = restart_record(state, case, case_path, derived_keys=CUT_DERIVED_KEYS)
+    record = restart_record(state, case, case_path, derived_keys=CUT_EVENTS_DERIVED_KEYS)
     if not _derives_reconnect(record):  # the parent's own reconnect block: no cut
+        if events is not None or any(k == EVENTS_KEY or k.startswith(EVENTS_KEY + ".") for k in
+                                     record["parent_record"].get("derived_keys", [])):
+            raise SystemExit(f"collapse.{EVENTS_BLOCK} applies after a cut, and this restart makes "
+                             "none (the case keeps the parent's collapse.reconnect)")
         return record, ORDINARY
     _check_cut_landing(meta, reconnect)
     return record, CUT
@@ -497,20 +553,28 @@ def main() -> int:
     t_end = periods * period
     settings = None
     reconnect = None
+    events = None
     keep_stop_state = False
     landing = ()
     if collapse:
         try:
-            block, recon_block, keep_stop_state, landing = split_collapse_block(case["collapse"])
+            # the events block first: it is no key of the cut nor of the driver
+            block, events_block = split_events_block(case["collapse"])
+            block, recon_block, keep_stop_state, landing = split_collapse_block(block)
             if recon_block is not None:
                 reconnect = ReconnectSettings.from_dict(recon_block)
+            if events_block is not None:
+                if reconnect is None:
+                    raise ValueError(f"collapse.{EVENTS_BLOCK} needs a collapse.reconnect block: it "
+                                     "governs the run after a cut")
+                events = EventSettings.from_dict(events_block)
         except ValueError as exc:
             raise SystemExit(f"{args.case}: {exc}")
         if "snapshot_dt_periods" in block:
             block["snapshot_dt"] = block.pop("snapshot_dt_periods") * period
         try:
             settings = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:  # an unknown key is a TypeError of the dataclass
             raise SystemExit(f"{args.case}: collapse: {exc}")
 
     if not math.isfinite(periods) or periods <= 0 or not math.isfinite(dt_out) or dt_out <= 0:
@@ -526,7 +590,8 @@ def main() -> int:
         if not collapse:
             raise SystemExit("restarts require a collapse case")
         parent_record, restart_mode = restart_admission(
-            source_state, case, args.case, reconnect, legacy=args.legacy_restart_from is not None)
+            source_state, case, args.case, reconnect, legacy=args.legacy_restart_from is not None,
+            events=events)
         if restart_mode in (CUT, POST_CUT):
             # one cut per run: what the case keeps for a cut is the landing run's, not this run's
             inactive = {k: v for k, v in (("landing", list(landing)),
@@ -547,6 +612,9 @@ def main() -> int:
         if args.outdir.resolve().is_relative_to(parent_root):
             raise SystemExit("restart output cannot be inside its parent run")
         args.restart = source_state
+    if events is not None and restart_mode not in (CUT, POST_CUT):
+        raise SystemExit(f"{args.case}: collapse.{EVENTS_BLOCK} applies after a cut: only a cut "
+                         "or post-cut restart takes it")
     if collapse and restart_mode not in (CUT, POST_CUT):
         # the cut radii this run lands; after a cut the case's landing is the landing run's,
         # inactive (inactive_after_cut), so its radii are not this run's to reach before its stop
@@ -586,6 +654,8 @@ def main() -> int:
         manifest["restart_mode"] = restart_mode
     if reconnect is not None:
         manifest["reconnect"] = reconnect.to_dict()
+    if events is not None:
+        manifest["reconnect_events"] = events.to_dict()
     create_run_manifest(args.outdir, manifest)
     with (args.outdir / "progress.jsonl").open("a") as stream:
         stream.write(json.dumps({"event": "start", "wall_time": time.time()}) + "\n")
@@ -607,6 +677,8 @@ def main() -> int:
         info["inactive_after_cut"] = inactive
     if reconnect is not None:
         info["reconnect"] = reconnect.to_dict()
+    if events is not None:
+        info["reconnect_events"] = events.to_dict()
     if keep_stop_state:
         info["keep_stop_state"] = True
     if landing:
@@ -640,7 +712,9 @@ def main() -> int:
                                         **({"keep_stop_state": True} if keep_stop_state else {}),
                                         **({"landing": landing} if landing else {}),
                                         **({"reconnect": reconnect}
-                                           if restart_mode in (CUT, POST_CUT) else {}))
+                                           if restart_mode in (CUT, POST_CUT) else {}),
+                                        **({"events": events, "leg_info": {"commit": commit}}
+                                           if events is not None else {}))
                 try:
                     if args.restart is not None:
                         from pyoomph.output.states import copy_state_file

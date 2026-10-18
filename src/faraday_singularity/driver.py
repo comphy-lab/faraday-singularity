@@ -286,6 +286,7 @@ import numpy as np
 from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_disc_points,
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
+from .events import PRECUT_EVENT, EventSettings, events_done
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -559,12 +560,15 @@ class _State:
     # (reconnect.kink_regions)
     apex_history: dict = field(default_factory=dict)
     kinks: dict = field(default_factory=dict)
+    # after a cut with the events block: the legs of the run, a restart or the cut each starting one
+    legs: list = field(default_factory=list)
 
 
 class CollapseDriver:
     def __init__(self, problem, settings: CollapseSettings, outdir: Path, *,
                  keep_stop_state: bool = False, landing=(),
-                 reconnect: ReconnectSettings | None = None):
+                 reconnect: ReconnectSettings | None = None,
+                 events: EventSettings | None = None, leg_info: dict | None = None):
         self.pb = problem
         self.s = settings
         self.keep_stop_state = keep_stop_state
@@ -574,6 +578,13 @@ class CollapseDriver:
         self.reconnect = reconnect
         if reconnect is not None and (self.landing or keep_stop_state):
             raise ValueError("a run after a cut keeps no landing or stop states (one cut per run)")
+        # the events after the cut (events.EventSettings), and what each leg of the run records of
+        # its source (the commit): only after a cut
+        self.events = events
+        self.leg_info = dict(leg_info or {})
+        if events is not None and reconnect is None:
+            raise ValueError("the events block applies after a cut: a driver with it needs the "
+                             "reconnect settings")
         self._post_cut_cache: tuple | None = None
         # the measured state has had its stop checks but not yet its snapshot and remesh checks
         self._checks_pending = False
@@ -1531,6 +1542,10 @@ class CollapseDriver:
                             tip_born=dict(st.tip_born),
                             apex_history={k: list(v) for k, v in st.apex_history.items()},
                             kinks={k: dict(v) for k, v in st.kinks.items()})
+            if self.events is not None:  # only with the block: other dumps keep their keys
+                meta.update(events_settings=self.events.to_dict(),
+                            events=[dict(x) for x in self._made_events()],
+                            legs=[dict(x) for x in st.legs])
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -1575,6 +1590,8 @@ class CollapseDriver:
     def restore(self, meta: dict):
         """Resume the driver bookkeeping from a state dump's metadata."""
         st = self.state
+        if meta.get("cut") is not None:
+            self._check_events_meta(meta)
         for k in self._STATE_FIELDS:
             setattr(st, k, meta[k])
         for k in self._OPTIONAL_FIELDS:
@@ -1623,13 +1640,19 @@ class CollapseDriver:
             st.apex_history = {str(k): [float(x) for x in v]
                                for k, v in (meta.get("apex_history") or {}).items()}
             st.kinks = {str(k): dict(v) for k, v in (meta.get("kinks") or {}).items()}
+            if self.events is not None:
+                self.pb.events = [dict(x) for x in meta.get("events") or []]
+                st.legs = [dict(x) for x in meta.get("legs") or []]
         ep = self.episodes
         resume = {"resume_at": RESUME_REMESH_CHECK} if self._checks_pending else {}
-        self._event("restart", self.measure(), from_time=meta["time"],
+        m = self.measure()
+        self._event("restart", m, from_time=meta["time"],
                     episode_history="episodes" in meta, episode=ep.index, episode_kind=ep.kind,
                     episode_start=ep.start, episode_partial=ep.partial, h_crest=ep.h_crest,
                     t_crest=ep.t_crest, crest_jet=ep.crest_jet, max_curvature_reset=reset,
                     coarsen_held_until=st.coarsen_held_until, **resume)
+        if self.events is not None and meta.get("cut") is not None:
+            self._start_leg(m, "restart", meta)
 
     def reset_after_cut(self, record: dict):
         """Restart the bookkeeping for the surface after a cut (``surgery.cut``).
@@ -1667,8 +1690,61 @@ class CollapseDriver:
                     delta_KE=record.get("projection", {}).get("delta_KE"),
                     transfer=record.get("transfer"), focus=record.get("focus"))
         self._track_tips(m, snapshot=False)  # a jet already inside the bubble, say
+        if self.events is not None:
+            self.pb.events, st.legs = [], []
+            self._start_leg(m, "cut", None)
         self._snapshot(m, "cut")
         return m
+
+    # --- after a cut: the events block ---------------------------------------------------------
+
+    def _made_events(self) -> list:
+        """The events made after the cut (their records, ``events.EVENT_CLASSES`` kinds)."""
+        return list(getattr(self.pb, "events", None) or [])
+
+    def _check_events_meta(self, meta: dict):
+        """Refuse to continue a state written after a cut under an events block it cannot take
+        (``run_case._check_events``, which checks it before any output): a state written with the
+        block under a driver without it, or a change of the keys of a class of events of which the
+        state has made one, but from the state before an event (``precut_e<k>``)."""
+        recorded = meta.get("events_settings")
+        if self.events is None:
+            if recorded is not None:
+                raise RuntimeError("a state written with the events block after its cut is "
+                                   "continued only by a driver with that block")
+            return
+        recut_from = ((meta.get("event") or {}).get("k")
+                      if meta.get("cut_stage") == PRECUT_EVENT else None)
+        refused = self.events.refused_changes(recorded, events_done(meta.get("events")),
+                                              recut_from)
+        if refused:
+            raise ValueError("the events block changes the keys of a class of events of which the "
+                             "state has made one: " + ", ".join(refused))
+
+    def _start_leg(self, m: dict, start: str, meta: dict | None):
+        """After a cut with the events block: a new leg of the run, at the cut (``start`` ``cut``)
+        or at a restart from ``meta``, recorded in every later dump (``legs``) and as event
+        ``leg``: when and from which step it starts, the source it runs (``leg_info``: the commit),
+        the hash of the block and the keys in which it differs from the block the state was written
+        with (``changed``; for a state written without the block, ``added``, from the block's
+        defaults), and, from the state
+        before an event, the event from which the keys of its class apply anew
+        (``event_keys_changed_at``)."""
+        st = self.state
+        leg = {"leg": len(st.legs), "start": start, "step": st.step, "time": m["time"],
+               **self._taus(m["time"]), **self.leg_info, "settings_sha256": self.events.sha256(),
+               "changed": [], "added": False}
+        if meta is not None:
+            recorded = meta.get("events_settings")
+            leg["added"] = recorded is None
+            leg["changed"] = self.events.changed_keys(recorded)  # without a record: the defaults
+            if meta.get("cut_stage") == PRECUT_EVENT:
+                k = (meta.get("event") or {}).get("k")
+                leg["from_event_state"] = k
+                if any(c.split(".", 1)[0] in EventSettings.CLASSES for c in leg["changed"]):
+                    leg["event_keys_changed_at"] = k
+        st.legs.append(leg)
+        self._event("leg", m, **{k: v for k, v in leg.items() if k not in ("time", "step")})
 
     def _neck_sample(self, m: dict):
         """Offer the measured neck to the series from which :meth:`pinch_time` fits; no neck
