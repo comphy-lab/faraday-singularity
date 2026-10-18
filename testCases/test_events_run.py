@@ -427,7 +427,29 @@ def test_the_run_stops_resumably_on_the_event_after_the_most_it_may_make(tmp_pat
     assert rec["tip"] == "bubble_top" and rec["trigger"]["r_n"] == stop["r_n"]
     assert rec["dumps"] == {"precut": stop["precut"]} and stop["record"] == "events/event_002.json"
     # the record of the event made is the cut's own, untouched
-    assert json.loads((tmp_path / "events" / "event_001.json").read_text())["outcome"] == "made"
+    first = json.loads((tmp_path / "events" / "event_001.json").read_text())
+    assert first["outcome"] == "made"
+    # a leg with a larger max_events (a key of the leg) goes on from that dump: event 2 at once
+    from test_bookkeeping import _settings
+
+    from faraday_singularity.driver import CollapseDriver
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    pb = RegrowingHead()
+    pb.t, pb.last_cut = meta["time"], first["t"]
+    more = fake_surgery()
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", more)
+    again = CollapseDriver(pb, _settings(t_end=1.0, dt_max=1.0, max_steps=meta["step"] + 4),
+                           tmp_path / "more", reconnect=ReconnectSettings(delta=1e-3, dt0=1e-6),
+                           events=ev.EventSettings.from_dict({**LIQUID, "max_events": 5}))
+    again.restore(meta)
+    res = again.run(1e-9)
+    again.close()
+    assert more.calls[0]["k"] == 2 and pb.events[1]["step"] == meta["step"]
+    leg = again.state.legs[-1]
+    assert leg["changed"] == ["max_events"] and leg["from_event_state"] == 2
+    assert res["stop"]["reason"] == "max-steps" and res["events"]["max_events"] == 5
+    assert res["events"]["made"] == len(pb.events) >= 2
 
 
 def test_events_at_one_tip_that_come_ever_faster_stop_the_run_as_a_cascade(tmp_path,
