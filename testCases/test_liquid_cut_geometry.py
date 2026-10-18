@@ -212,6 +212,19 @@ def test_a_cap_that_leaves_the_old_liquid_is_refused_and_a_flatter_one_may_pass(
         ev.truncate_chain((("open", chain),), dict(neck, head=[i, len(P) - 1]), **CUT)
 
 
+def test_a_cap_on_a_neck_whose_nodes_lie_far_apart_is_refused():
+    """Nodes 0.12 delta apart about a neck of 0.09 delta: the cap's own spacing (r_n/8 of arc)
+    cannot be reached from theirs within its arc, and it would have fewer than CAP_MIN_POINTS
+    points; the same neck at the usual spacing is cut."""
+    named = (("bubble", stops.bubble_with_head(1e-3, r_n=0.09, h=0.12)[0]),
+             ("open", stops.cavity()))
+    neck = _neck(named, "bubble")
+    with pytest.raises(ev.CapRefused) as err:
+        ev.truncate_chain(named, neck, **CUT)
+    assert "points" in err.value.checks["failed"]
+    assert err.value.checks["points"] < ev.CAP_MIN_POINTS
+
+
 def test_the_cut_of_a_neck_is_the_same_in_units_of_delta_at_every_delta():
     """The jet, its neck and its node spacing scaled with delta by 2^-k (k = 0..7) inside a bubble
     and a cavity of fixed size: the same cap and removed region in units of delta."""
@@ -255,3 +268,4 @@ def test_the_necks_of_the_stop_states_of_runs_after_a_cut_are_cut_cleanly(run):
             assert cut.tip == ("bubble_top" if neck["chain"] == "bubble" else "cavity_tip")
             assert cut.summary()["tip_shift"] == pytest.approx(cut.L_rem - eta * neck["r_n"],
                                                               rel=1e-9)
+

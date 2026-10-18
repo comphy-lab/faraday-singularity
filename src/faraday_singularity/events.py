@@ -887,15 +887,17 @@ def truncate_chain(named, neck: dict, *, eta: float, elements_per_scale: float,
     the splice, and the stump closed by the cap of :func:`hemispheroid_cap` of height ``eta``, its
     own spacing one :func:`cap_point_count` interval (``elements_per_scale`` elements per neck
     radius) reached from the neck's node spacing by :func:`cap_spacing`. Raises
-    :class:`CapRefused` unless the hard checks hold: (i) every cap point but those within
-    ``CAP_SKIP`` of its own intervals of the neck lies in the old liquid at least ``CAP_CLEARANCE
-    r_n`` from the gas (:func:`liquid_clearance`); (ii) the cap, from its tip through the neck and
-    two nodes beyond, comes back towards its tip by at most ``CAP_BACKTRACK r_n``
-    (``reconnect.cap_backtrack``); (iii) the interior angles over the neck and ``CAP_ANGLE_NODES``
-    nodes on either side are at least ``min_angle``; (iv) the removed half-section is a simple
-    polygon of positive volume; (v) the new chains pass ``reconnect.check_chains`` (simple,
-    disjoint, one open, their splines too). The chart, the last check, is the plan's
-    (:func:`build_liquid_plan`)."""
+    :class:`CapRefused` unless the hard checks hold: the cap has at least ``CAP_MIN_POINTS``
+    points (not where the nodes of the neck lie so far apart that the cap's spacing cannot be
+    reached from theirs within its arc) and ends short of the head's tip; (i) every cap point but
+    those within ``CAP_SKIP`` of its own intervals of the neck lies in the old liquid at least
+    ``CAP_CLEARANCE r_n`` from the gas (:func:`liquid_clearance`); (ii) the cap, from its tip
+    through the neck and two nodes beyond, comes back towards its tip by at most ``CAP_BACKTRACK
+    r_n`` (``reconnect.cap_backtrack``); (iii) the interior angles over the neck and
+    ``CAP_ANGLE_NODES`` nodes on either side are at least ``min_angle``; (iv) the removed
+    half-section is a simple polygon of positive volume; (v) the new chains pass
+    ``reconnect.check_chains`` (simple, disjoint, one open, their splines too). The chart, the last
+    check, is the plan's (:func:`build_liquid_plan`)."""
     from shapely.geometry import LinearRing
 
     from .reconnect import Chain, cap_backtrack, check_chains, interior_angles, revolved_volume
@@ -941,6 +943,8 @@ def truncate_chain(named, neck: dict, *, eta: float, elements_per_scale: float,
     checks = {"eta": eta, "points": n_cap, "spacing": h_cap, "first_spacing": float(u[0]),
               "skip_arc": CAP_SKIP * h_cap, "failed": []}
     failed = checks["failed"]
+    if n_cap < CAP_MIN_POINTS:
+        failed.append("points")  # the neck's nodes are too far apart for a cap at r_n
     if not direction * (z_tip_old - z_tip_new) > 0.0:
         failed.append("tip")  # the head ends within the cap
     # (i) the cap inside the old liquid, but where it leaves the neck tangentially
@@ -987,3 +991,4 @@ def truncate_chain(named, neck: dict, *, eta: float, elements_per_scale: float,
                                                                                    cap])),
                      L_rem=float(np.max(np.abs(removed[:, 1] - z_n))), z_tip_old=z_tip_old,
                      z_tip_new=z_tip_new, checks=checks)
+
