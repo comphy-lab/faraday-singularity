@@ -1065,9 +1065,20 @@ def _onto_polyline(X, Q, s) -> tuple[np.ndarray, np.ndarray]:
     return best, at
 
 
-def _fill_cap(problem, lc, samples: dict, *, apply: bool) -> dict:
-    """The cap fill of a liquid cut: the new interface nodes on the planned cap (beyond the neck,
-    within ``CAP_NODE_TOL r_n`` of it) take the old bulk velocity at their places, interpolated by
+def _on_cap(lc, X, chain) -> np.ndarray:
+    """Which of the interface nodes at ``X`` lie on the planned cap of the cut ``lc``: nodes of the
+    chain it cut (``chain``, its segment of ``FaradayProblem.interface_segments``) beyond the neck
+    and within ``CAP_NODE_TOL r_n`` of the cap."""
+    Q, s = _cap_polyline(lc)
+    dist, u = _onto_polyline(X, Q, s)
+    own = {(float(r), float(z)) for r, z in zip(chain["r"], chain["z"])}
+    mine = np.array([(float(x), float(y)) in own for x, y in X], dtype=bool)
+    return mine & (u > 1e-9 * s[-1]) & (dist <= CAP_NODE_TOL * lc.r_n)
+
+
+def _fill_cap(problem, lc, samples: dict, chain: dict, *, apply: bool) -> dict:
+    """The cap fill of a liquid cut: the new interface nodes on the planned cap (:func:`_on_cap`,
+    of the chain it cut, ``chain``) take the old bulk velocity at their places, interpolated by
     arclength along the cap between the samples taken before the remesh (``samples``), at the
     current level (``project`` makes the history impulsive); ``u_r`` stays pinned on the axis. With
     ``apply`` false only what the fill would change is read. Returns the nodes, the samples used and
@@ -1075,8 +1086,8 @@ def _fill_cap(problem, lc, samples: dict, *, apply: bool) -> dict:
     Q, s = _cap_polyline(lc)
     nodes = mesh_nodes(problem.get_mesh(INTERFACE))
     X = np.array([[n.x(0), n.x(1)] for n in nodes]).reshape(-1, 2)
-    dist, u = _onto_polyline(X, Q, s)
-    on = (u > 1e-9 * s[-1]) & (dist <= CAP_NODE_TOL * lc.r_n)
+    _, u = _onto_polyline(X, Q, s)
+    on = _on_cap(lc, X, chain)
     ok = samples["found"]
     fi = problem.get_mesh("liquid").get_nodal_field_indices()
     iu, iw = fi["velocity_x"], fi["velocity_y"]
@@ -1366,8 +1377,7 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     nodes = mesh_nodes(pb.get_mesh(INTERFACE))
     X = np.array([[n.x(0), n.x(1)] for n in nodes]).reshape(-1, 2)
     predicted = predict_unlocated(X, old_chains)
-    dist, u = _onto_polyline(X, Qc, sc)
-    on_cap = (u > 1e-9 * sc[-1]) & (dist <= CAP_NODE_TOL * lc.r_n)
+    on_cap = _on_cap(lc, X, new_segs[lc.chain])
     reported = transfer["unlocated"].get(INTERFACE, [0, 0])[0]
     others = {name: v for name, v in transfer["unlocated"].items() if name != INTERFACE}
     no_value = transfer["no_value"]
@@ -1392,7 +1402,8 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     poly_after = box_polyline_budgets([c for _, c in new_named], lc.z_n, R_b, s.reservoir_depth)
 
     stage("fill")
-    record["cap_fill"] = _fill_cap(pb, lc, samples, apply=ls.cap_fill == "sample")
+    record["cap_fill"] = _fill_cap(pb, lc, samples, new_segs[lc.chain],
+                                   apply=ls.cap_fill == "sample")
 
     stage("projection")
     record["projection"] = {}

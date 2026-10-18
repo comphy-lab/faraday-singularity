@@ -229,12 +229,10 @@ def cap_nodes(pb, record):
                                            np.linspace(0.0, ev.cap_arc_length(cap["r_n"],
                                                                               cap["eta"]),
                                                        200)[1:])})
-    Q, s = surgery._cap_polyline(lc)
     fi = pb.get_mesh("liquid").get_nodal_field_indices()
     nodes = surgery.mesh_nodes(pb.get_mesh(surgery.INTERFACE))
     X = np.array([[n.x(0), n.x(1)] for n in nodes])
-    dist, u = surgery._onto_polyline(X, Q, s)
-    on = (u > 1e-9 * s[-1]) & (dist <= surgery.CAP_NODE_TOL * cap["r_n"])
+    on = surgery._on_cap(lc, X, surgery._named_chains(pb)[1][record["chain"]])
     U = np.array([[n.value(fi["velocity_x"]), n.value(fi["velocity_y"])] for n in nodes])
     return X[on], U[on]
 
