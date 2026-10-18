@@ -23,8 +23,10 @@ radial inflow that is not solenoidal.
   their places, without it (``cap_fill`` ``transfer``) the old surface's near the neck;
 * the hard checks: a projection that changes the momentum in the box by more than its limit fails
   the cut (the non-solenoidal flow), and the identity of the cutoff holds there with a large
-  pressure impulse; requests without a single head, or of a class without this handler, are
-  refused and leave the problem unchanged.
+  pressure impulse; requests without a single head, of a class without this handler, pairing a
+  kind with another's class, or whose neck does not land under the cut's own keys are refused at
+  admission, and a cap, a plan or its parking refused after the state before the cut is kept: each
+  refusal leaves the problem unchanged.
 
 Each problem compiles in seconds; the module takes about three minutes.
 """
@@ -243,6 +245,25 @@ def cap_nodes(pb, record):
     return X[on], U[on]
 
 
+def problem_state(pb) -> tuple:
+    """What a refused cut must leave as it was: the degrees of freedom and pinned values with the
+    time and the rebuild (``FaradayProblem._fingerprint``), the focus, a parked plan and the
+    handler's note of it, the remeshes asked for and the events made."""
+    template = pb.get_mesh("liquid")._templatemesh
+    focus = template.focus
+    return (pb._fingerprint(), None if focus is None else focus.to_dict(),
+            template.has_pending_surgery_plan(surgery.INTERFACE), pb.recon._pending_on,
+            len(pb._domains_to_remesh), len(pb.events))
+
+
+def _refuse(*args, **kwargs):
+    raise ev.CapRefused("refused for the test", {"failed": ["test"]})
+
+
+def _unparkable(*args, **kwargs):
+    raise RuntimeError("not parked for the test")
+
+
 def _reload(pb, state: Path, record: dict):
     pb.load_state(str(state))
     surgery.restore_cut(pb, record)
@@ -347,6 +368,21 @@ def jets(tmp_path_factory):
         res["refusals"] = refusals
         res["unchanged"] = (pb.remesh_count, pb.get_mesh("liquid")._templatemesh
                             .has_pending_surgery_plan(surgery.INTERFACE), len(pb.events))
+        # the refusals after the state before the cut is kept: of the cap, of the plan, of its
+        # parking, which change nothing either
+        late = {}
+        for name, owner, attr, fake in (("caps", ev, "truncate_chain", _refuse),
+                                        ("plan", ev, "build_liquid_plan", _refuse),
+                                        ("park", surgery, "park_plan", _unparkable)):
+            before = problem_state(pb)
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(owner, attr, fake)
+                with pytest.raises(surgery.CutRefused) as err:
+                    surgery.liquid_cut(pb, EVENTS, RECON, out / f"late-{name}", req, k=1,
+                                       **CUT_KW)
+            late[name] = {"record": err.value.record, "precut": err.value.precut,
+                          "same": problem_state(pb) == before}
+        res["late"] = late
         # the cut of the first event, then of the next
         cuts = out / "cuts"
         res["record1"] = surgery.liquid_cut(pb, EVENTS, RECON, cuts, req, k=1, **CUT_KW)
@@ -410,6 +446,24 @@ def test_the_refused_cuts_leave_the_problem_unchanged(jets):
     assert "above liquid.eps_max 0.15" in refusals["a-head-above"]["error"]
     assert 0.15 < refusals["a-head-above"]["trigger"]["r_n_over_s"] < 0.2
     assert jets["unchanged"] == (jets["remesh_count"], False, 0)
+
+
+def test_a_cut_refused_after_the_state_before_it_is_kept_leaves_the_problem_unchanged(jets):
+    """A cap refused at its height and at the retry's, a plan refused, a plan that cannot be
+    parked: each refusal comes after the state before the cut is kept (``precut_e<k>``, which it
+    names) and leaves the problem as it was (its degrees of freedom, its focus, no plan parked, no
+    remesh asked for, no event); the record names the stage it stopped at."""
+    late = jets["late"]
+    for name, got in late.items():
+        rec = got["record"]
+        assert rec["outcome"] == "refused" and rec["failed_at"] == name, name
+        assert got["same"], name
+        assert got["precut"] == rec["dumps"]["precut"] and Path(got["precut"]).is_file(), name
+    attempts = late["caps"]["record"]["cap"]["attempts"]
+    assert [a["eta"] for a in attempts] == [1.0, ev.CAP_RETRY_HEIGHT]
+    assert all(a["outcome"] == "refused" for a in attempts)
+    assert "refused for the test" in late["plan"]["record"]["error"]
+    assert "the plan could not be parked" in late["park"]["record"]["error"]
 
 
 def test_each_cut_removes_its_head_and_rebuilds_the_mesh_as_planned(jets):

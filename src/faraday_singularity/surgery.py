@@ -1018,7 +1018,7 @@ EVENT_SCHEMA = "faraday-event/2"
 # the kinds of event a liquid cut is made for, and the class of each (events.post_cut_events)
 LIQUID_CUT_CLASSES = {"liquid-neck": "L", "a-head": "A-head"}
 # the stages of a liquid cut before it changes the problem: any failure up to them is a refusal
-LIQUID_UNCHANGED_STAGES = ("admission", "precut", "caps", "plan", "budgets")
+LIQUID_UNCHANGED_STAGES = ("admission", "precut", "caps", "plan", "budgets", "park")
 CAP_FILL_DENSITY = 4  # samples of the old bulk velocity per node of the new mesh along the cap
 CAP_NODE_TOL = 0.05  # a new interface node within this times r_n of the planned cap lies on it
 UNLOCATED_SLACK = 2  # the transfer may leave this many interface nodes more or fewer than predicted
@@ -1350,6 +1350,7 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
                       "event_cap": {"size": size, "radius": 8.0 * lc.r_n, "z": lc.z_tip_new,
                                     "h_floor": h_floor, "h_cut": h_cut}}
     old_chains = [np.column_stack([segs[name]["r"], segs[name]["z"]]) for name, _ in named]
+    stage("park")
     remeshing = False
     try:
         template.focus = Focus(size=min(g.size for g in regions),
