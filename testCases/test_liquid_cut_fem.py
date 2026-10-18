@@ -19,15 +19,18 @@ radial inflow that is not solenoidal.
   planned; the budgets close (the removed volume, momentum and kinetic energy against the box's,
   the projection's change of momentum and energy there, the area); steps after both, and a restart
   from the dump after the second in a new process;
+* the keys of the cut away from their defaults, in one cut: the restart after it, the radius of
+  its box, the height of its cap and the noise floors of its budgets;
 * the cap fill against the imposed field: with it the cap's nodes carry the old bulk velocity at
   their places, without it (``cap_fill`` ``transfer``) the old surface's near the neck;
-* the hard checks: a projection that changes the momentum in the box by more than its limit fails
-  the cut (the non-solenoidal flow), and the identity of the cutoff holds there with a large
-  pressure impulse; a transfer that leaves more interface nodes unlocated than the slack of the
-  prediction allows fails it after its remesh; requests without a single head, of a class without this handler, pairing a
-  kind with another's class, or whose neck does not land under the cut's own keys are refused at
-  admission, and a cap, a plan or its parking refused after the state before the cut is kept: each
-  refusal leaves the problem unchanged.
+* the hard checks: a projection that changes the momentum in the box by more than its limit ends
+  the cut as unclosed (the non-solenoidal flow), a stop to resume from the state before it, and the
+  identity of the cutoff holds there with a large pressure impulse; a transfer that leaves more
+  interface nodes unlocated than the slack of the prediction allows fails the cut after its remesh;
+  requests without a single head, of a class without this handler, pairing a kind with another's
+  class, or whose neck does not land under the cut's own keys are refused at admission, and a cap,
+  a plan, a fill without the old velocity along the cap or a parking refused after the state before
+  the cut is kept: each refusal leaves the problem unchanged.
 
 Each problem compiles in seconds; the module takes about three minutes.
 """
@@ -73,6 +76,10 @@ RECON = rc.ReconnectSettings(delta=DELTA, dt0=1e-5, tip_size=0.25, bridge_size=0
 EVENTS = ev.EventSettings.from_dict({"liquid": {"enabled": True},
                                      "post": {"open_neck_stop": False, "neck_floor": 1e-5}})
 CUT_KW = {"dt_prev": 1e-5, "elements_per_scale": EPS, "h_floor": 1e-6}
+# the keys of the liquid cut a test sets away from their defaults: the noise floors far above the
+# head's own limits, so that they set every limit they floor
+KEYED = {"restart": "impulsive", "box_radius": 8.0, "cap_height": 0.5, "sigma_V": 1e-3,
+         "sigma_Pz": 1.0, "sigma_KE": 1.0}
 MESH = {"h_interface": 0.01, "h_axis": 0.01, "h_max": 0.25, "grading": 0.3,
         "interface_points": 401}
 
@@ -436,6 +443,13 @@ def jets(tmp_path_factory):
             ur, uz = stream_velocity(X[:, 0], X[:, 1], necks)
             res["fill"][fill] = {"record": rec, "error": np.hypot(U[:, 0] - ur, U[:, 1] - uz),
                                  "speed": np.hypot(ur, uz), "nodes": len(X)}
+        # the keys of the cut that the cuts above leave at their defaults: the restart after it, the
+        # radius of its box, the height of its cap and the noise floors of its budgets
+        _reload(pb, initial, record)
+        rec = surgery.liquid_cut(pb, settings(**KEYED), RECON, out / "keyed", request(pb), k=1,
+                                 **CUT_KW)
+        res["keyed"] = {"record": rec, "counter": pb.timestepper.get_num_unsteady_steps_done(),
+                        "dt": pb.timestepper.time_pt().dt(0)}
         # a flow that is not solenoidal: the projection changes the momentum in the box
         _reload(pb, initial, record)
         impose(pb, closing_velocity, necks)
@@ -635,7 +649,35 @@ def test_after_the_cuts_the_run_steps_and_the_time_is_kept(jets):
     named = dict(jets["stepped"])
     assert set(named) == {"bubble", "open"}
     req = jets["request3"]
-    assert req is None or req.get("kind") not in ("liquid-neck", "a-head")
+    assert req is None
+
+
+def test_the_keys_of_a_cut_set_its_restart_its_box_its_cap_and_the_floors_of_its_limits(jets):
+    """A cut under ``liquid.restart`` ``impulsive`` leaves the step counter for a BDF2 step on the
+    flat history (one step done; the cut's own ``bdf1`` leaves none), under ``box_radius`` 8 takes
+    its budgets within 8 delta of the neck (beyond twice the head's reach), under ``cap_height``
+    0.5 closes the stump by a half-spheroid half a neck radius high, and under the noise floors
+    ``sigma_V``, ``sigma_Pz``, ``sigma_KE`` far above the head's own limits takes each limit they
+    floor at its multiple of them."""
+    got = jets["keyed"]
+    rec = got["record"]
+    assert rec["outcome"] == "made" and rec["settings"]["liquid"]["restart"] == "impulsive"
+    assert got["counter"] == 1 and jets["counter"] == 0 and got["dt"] == CUT_KW["dt_prev"]
+    assert rec["projection"]["restart"] == "impulsive"
+    R = rec["budgets"]["box"]["R"]
+    assert R == 8.0 * DELTA > 2.0 * rec["removed"]["length"]
+    assert rec["projection"]["box"]["R"] == R
+    cap = rec["cap"]
+    assert cap["eta"] == 0.5 and not cap["retried"]
+    assert cap["z_tip_new"] == pytest.approx(cap["z_n"] + 0.5 * cap["direction"] * cap["r_n"])
+    cl = rec["closures"]
+    assert cl["sigma"] == {"V": 1e-3, "Pz": 1.0, "KE": 1.0}
+    assert cl["limits"]["F1"] == 5e-3 > surgery.BUDGET_LIMITS["F1"] * rec["removed"]["V"]
+    assert cl["limits"]["F2"] == cl["limits"]["F3"] == 5.0
+    assert cl["limits"]["F4"] == 3.0 and cl["limits"]["F6"] == 5.0
+    assert cl["limits"]["F5"] == pytest.approx(surgery.BUDGET_LIMITS["F5"] * abs(
+        rec["removed"]["area"] - rec["removed"]["cap_area"]))
+    assert cl["hard"] == []
 
 
 def test_the_cap_carries_the_old_bulk_velocity_at_its_nodes(jets):
