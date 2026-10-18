@@ -46,19 +46,20 @@ def _neck(named, chain):
 
 
 def test_the_cap_is_a_half_spheroid_tangent_to_the_neck_and_square_to_the_axis():
+    """The cap ``r = r_n cos t``, ``z = z_n + direction eta r_n sin t`` (``events.cap_at``) lies on
+    the spheroid between the neck's plane and its tip on the axis, on the side of the head, and
+    points at even arclengths are evenly spaced along it. The caps a cut makes on either chain at
+    either height (``events.truncate_chain``, its points from the neck's spacing to its own) leave
+    the neck parallel to the axis and meet the axis at a right angle: the chords of their first and
+    last intervals within half the angle each interval subtends."""
     r_n, z_n = 2e-4, 4.6
     for direction, eta in ((-1.0, 1.0), (1.0, 1.0), (1.0, 0.5)):
-        cap = ev.hemispheroid_cap(r_n, z_n, direction, eta, 32)
+        u = ev.cap_arc_length(r_n, eta) * np.arange(1, 33) / 32
+        cap = ev.cap_at(r_n, z_n, direction, eta, u)
         assert len(cap) == 32 and tuple(cap[-1]) == (0.0, z_n + direction * eta * r_n)
         # on the spheroid, between the neck's plane and the tip, on the side of the head
         assert np.allclose((cap[:, 0] / r_n) ** 2 + ((cap[:, 1] - z_n) / (eta * r_n)) ** 2, 1.0)
         assert np.all(direction * (cap[:, 1] - z_n) > 0.0)
-        # leaving the neck parallel to the axis, meeting the axis at a right angle: the chords of
-        # the first and the last interval within half the angle the interval subtends
-        d0 = cap[0] - (r_n, z_n)
-        assert abs(d0[0]) < 0.1 * abs(d0[1])
-        d1 = cap[-1] - cap[-2]
-        assert abs(d1[1]) < 0.05 * abs(d1[0])
         # evenly spaced along the arc
         seg = np.hypot(*np.diff(np.vstack([[r_n, z_n], cap]), axis=0).T)
         assert np.ptp(seg) < 1e-3 * seg.mean()
@@ -66,6 +67,20 @@ def test_the_cap_is_a_half_spheroid_tangent_to_the_neck_and_square_to_the_axis()
     # one interval per r_n/eps of arc, at least CAP_MIN_POINTS
     assert ev.cap_point_count(r_n, 1.0, 8.0) == ev.CAP_MIN_POINTS == 16
     assert ev.cap_point_count(r_n, 1.0, 16.0) == math.ceil(0.5 * math.pi * 16)
+    # the caps a cut makes
+    named = (("bubble", stops.bubble_with_head(1e-3, r_n=0.09)[0]),
+             ("open", stops.cavity_with_head(1e-3, r_n=0.09)))
+    for name in ("bubble", "open"):
+        neck = _neck(named, name)
+        for eta in (1.0, ev.CAP_RETRY_HEIGHT):
+            cut = ev.truncate_chain(named, neck, **dict(CUT, eta=eta))
+            cap, r, z, d = cut.cap, cut.r_n, cut.z_n, cut.direction
+            assert tuple(cap[-1]) == (0.0, z + d * eta * r)
+            assert np.allclose((cap[:, 0] / r) ** 2 + ((cap[:, 1] - z) / (eta * r)) ** 2, 1.0)
+            assert np.all(d * (cap[:, 1] - z) > 0.0)
+            first, last = cap[0] - (r, z), cap[-1] - cap[-2]
+            assert abs(first[0]) < 0.1 * abs(first[1]), (name, eta)
+            assert abs(last[1]) < 0.1 * abs(last[0]), (name, eta)
 
 
 def test_the_points_of_a_cap_grow_from_the_spacing_of_the_neck_to_its_own():

@@ -40,9 +40,9 @@ the fold of each head searched apart from that of its chain (:func:`head_fold`).
 
 The geometry of the cut of a liquid neck (:func:`truncate_chain`): the head is removed and the stump
 closed at the neck by a half-spheroid ``r = r_n cos t``, ``z = z_n + direction eta r_n sin t``
-(:func:`hemispheroid_cap`), which leaves the neck tangentially and lies inside the old liquid. Its
-points start at the node spacing of the neck and grow by at most ``CAP_GROWTH`` per point to its
-own spacing (:func:`cap_spacing`), so that the spline a rebuild draws through them has no jump in
+(:func:`cap_at`), which leaves the neck tangentially and lies inside the old liquid. Its points
+start at the node spacing of the neck and grow by at most ``CAP_GROWTH`` per point to its own
+spacing (:func:`cap_spacing`), so that the spline a rebuild draws through them has no jump in
 spacing at the splice. Hard checks refuse a cap that leaves the old liquid, folds back, makes a
 knife-edge angle at the splice, removes no simple region, or leaves chains a mesh cannot be built on
 (:class:`CapRefused`); the removed region ``Q`` (the head, the axis and the cap) gives the volume
@@ -761,7 +761,7 @@ def _quarter_ellipse(r_n: float, eta: float, m: int = 4097) -> tuple[np.ndarray,
 
 
 def cap_arc_length(r_n: float, eta: float) -> float:
-    """Arclength of the cap of :func:`hemispheroid_cap`, a quarter of the ellipse ``r = r_n cos t``,
+    """Arclength of the cap of :func:`cap_at`, a quarter of the ellipse ``r = r_n cos t``,
     ``z = eta r_n sin t``: ``pi r_n / 2`` for ``eta = 1``."""
     return float(_quarter_ellipse(r_n, eta)[1][-1])
 
@@ -775,26 +775,19 @@ def cap_point_count(r_n: float, eta: float, elements_per_scale: float) -> int:
 
 
 def cap_at(r_n: float, z_n: float, direction: float, eta: float, u) -> np.ndarray:
-    """The points of the cap at the arclengths ``u`` from the neck ``(r_n, z_n)`` along it: ``r =
-    r_n cos t``, ``z = z_n + direction eta r_n sin t``, the point at the cap's whole arclength put
-    on the axis exactly."""
+    """The points of the cap that closes the stump of a cut liquid neck at the arclengths ``u`` from
+    the neck ``(r_n, z_n)`` along it: ``r = r_n cos t``, ``z = z_n + direction eta r_n sin t``, the
+    point at the cap's whole arclength put on the axis exactly. With ``eta = 1`` a half sphere
+    centred on the axis at the neck's height: it leaves the neck tangentially, where the surface of
+    a neck, a minimum of ``r``, is parallel to the axis, and it lies within the neck's radius of its
+    centre, inside the old liquid as long as the head reaches beyond it; ``eta`` below one flattens
+    it. A cut spaces the points from the neck's spacing (:func:`cap_spacing`)."""
     t, s = _quarter_ellipse(r_n, eta)
     u = np.asarray(u, dtype=float)
     theta = np.interp(u, s, t)
     cap = np.column_stack([r_n * np.cos(theta), z_n + direction * eta * r_n * np.sin(theta)])
     cap[u >= s[-1]] = (0.0, z_n + direction * eta * r_n)
     return cap
-
-
-def hemispheroid_cap(r_n: float, z_n: float, direction: float, eta: float, n: int) -> np.ndarray:
-    """The cap that closes the stump of a cut liquid neck, at ``n`` points evenly spaced along it:
-    ``r = r_n cos t``, ``z = z_n + direction eta r_n sin t``, from next to the neck ``(r_n, z_n)``
-    (excluded) to the tip on the axis (included, on ``r = 0`` exactly). With ``eta = 1`` a half
-    sphere centred on the axis at the neck's height: it leaves the neck tangentially, where the
-    surface of a neck, a minimum of ``r``, is parallel to the axis, and it lies within the neck's
-    radius of its centre, inside the old liquid as long as the head reaches beyond it; ``eta``
-    below one flattens it. A cut spaces the points from the neck's spacing (:func:`cap_spacing`)."""
-    return cap_at(r_n, z_n, direction, eta, cap_arc_length(r_n, eta) * np.arange(1, n + 1) / n)
 
 
 def cap_spacing(length: float, h_start: float, h_cap: float,
@@ -898,20 +891,19 @@ def truncate_chain(named, neck: dict, *, eta: float, elements_per_scale: float,
                    min_angle: float, reservoir_depth: float) -> LiquidCut:
     """The chain of a liquid cut at a tracked neck with a single head (:func:`liquid_necks`, status
     ``head``) of the ``(name, chain)`` pairs ``named``: the head side removed, the neck node kept as
-    the splice, and the stump closed by the cap of :func:`hemispheroid_cap` of height ``eta``, its
-    own spacing one :func:`cap_point_count` interval (``elements_per_scale`` elements per neck
-    radius) reached from the neck's node spacing by :func:`cap_spacing`. Raises
-    :class:`CapRefused` unless the hard checks hold: the cap has at least ``CAP_MIN_POINTS``
-    points (not where the nodes of the neck lie so far apart that the cap's spacing cannot be
-    reached from theirs within its arc) and ends short of the head's tip; (i) every cap point but
-    those within ``CAP_SKIP`` of its own intervals of the neck lies in the old liquid at least
-    ``CAP_CLEARANCE r_n`` from the gas (:func:`liquid_clearance`); (ii) the cap, from its tip
-    through the neck and two nodes beyond, comes back towards its tip by at most ``CAP_BACKTRACK
-    r_n`` (``reconnect.cap_backtrack``); (iii) the interior angles over the neck and
-    ``CAP_ANGLE_NODES`` nodes on either side are at least ``min_angle``; (iv) the removed
-    half-section is a simple polygon of positive volume; (v) the new chains pass
-    ``reconnect.check_chains`` (simple, disjoint, one open, their splines too). The chart, the last
-    check, is the plan's (:func:`build_liquid_plan`)."""
+    the splice, and the stump closed by the cap of :func:`cap_at` of height ``eta``, its own spacing
+    one :func:`cap_point_count` interval (``elements_per_scale`` elements per neck radius) reached
+    from the neck's node spacing by :func:`cap_spacing`. Raises :class:`CapRefused` unless the hard
+    checks hold: the cap has at least ``CAP_MIN_POINTS`` points (not where the nodes of the neck lie
+    so far apart that the cap's spacing cannot be reached from theirs within its arc) and ends short
+    of the head's tip; (i) every cap point but those within ``CAP_SKIP`` of its own intervals of the
+    neck lies in the old liquid at least ``CAP_CLEARANCE r_n`` from the gas
+    (:func:`liquid_clearance`); (ii) the cap, from its tip through the neck and two nodes beyond,
+    comes back towards its tip by at most ``CAP_BACKTRACK r_n`` (``reconnect.cap_backtrack``); (iii)
+    the interior angles over the neck and ``CAP_ANGLE_NODES`` nodes on either side are at least
+    ``min_angle``; (iv) the removed half-section is a simple polygon of positive volume; (v) the new
+    chains pass ``reconnect.check_chains`` (simple, disjoint, one open, their splines too). The
+    chart, the last check, is the plan's (:func:`build_liquid_plan`)."""
     from shapely.geometry import LinearRing
 
     from .reconnect import Chain, cap_backtrack, check_chains, interior_angles, revolved_volume
