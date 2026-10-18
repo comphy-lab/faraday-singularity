@@ -383,3 +383,22 @@ def test_the_polyline_budgets_of_a_box_are_those_of_a_sphere_and_a_plane():
         assert b["V_gas"] == pytest.approx(gas, rel=1e-4)
         assert b["A"] == pytest.approx(area, rel=1e-4)
         assert b["V_liquid"] == pytest.approx(b["V_disc"] - b["V_gas"])
+
+
+def test_the_neck_a_request_lands_is_the_tracked_one_and_its_head_is_cut():
+    """The neck of a request of the events branch (``events.event_neck``): of a landed liquid neck
+    its own fields, of a fold that reaches a head (``a-head``) the fields of that head's neck; each
+    the tracked neck of ``events.liquid_necks``, whose head the cut removes."""
+    landed, _ = stops.bubble_with_head(1e-3, r_n=0.09)
+    folded, apex = stops.bubble_with_head(1e-3, r_n=0.2, r_w=0.54)
+    for bubble, kw, kind in ((landed, {}, "liquid-neck"),
+                             (folded, {"apexes": stops._apexes(apex)}, "a-head")):
+        named = (("bubble", bubble), ("open", stops.cavity()))
+        req = stops._stops([bubble, stops.cavity()], **kw)
+        assert req["kind"] == kind and req["class"] in ("L", "A-head")
+        neck = ev.event_neck(req)
+        tracked = _neck(named, "bubble")
+        assert neck == {k: v for k, v in tracked.items() if k in ev.NECK_KEYS}
+        cut = ev.truncate_chain(named, neck, **CUT)
+        assert cut.index == tracked["index"] and cut.tip == "bubble_top"
+    assert ev.event_neck({"kind": "groove"}) == {}
