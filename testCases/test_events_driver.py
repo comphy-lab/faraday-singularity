@@ -330,3 +330,207 @@ def test_oomph_libs_smallest_step_must_lie_at_most_half_the_floor_after_the_cut(
     drv = CollapseDriver(CutProblem(), _settings(dt_min=2e-12), tmp_path / "b", reconnect=recon,
                          events=events)
     drv.close()
+
+
+# --- the readers of the limits after the cut ------------------------------------------------------
+
+# a liquid event block whose post keys all differ from the collapse's own, so that each reader
+# shows which value it took
+WIRED = {"liquid": {"enabled": True},
+         "gap": {"kappa_g": 0.07},
+         "post": {"open_neck_stop": False, "h_floor": 3e-7, "rise_tol": 2e-8, "neck_floor": 4e-7,
+                  "neck_elements_per_scale": 24.0, "dt_min": 1e-9}}
+
+
+def _spy(monkeypatch, calls: list, *names):
+    """Record every call of the driver's own names (``faraday_singularity.driver``) as
+    ``(name, args, kw)``, the call itself unchanged."""
+    import faraday_singularity.driver as module
+
+    for name in names:
+        real = getattr(module, name)
+
+        def spy(*args, _name=name, _real=real, **kw):
+            calls.append((_name, args, kw))
+            return _real(*args, **kw)
+
+        monkeypatch.setattr(module, name, spy)
+
+
+def test_after_the_cut_every_reader_of_a_limit_takes_the_blocks_value(tmp_path, monkeypatch):
+    """Each place the driver reads a limit or floor after the cut takes the block's value with the
+    block and the collapse's own without it: the rise of a jet (the open chain's jet base, the
+    bubble's tips and the bases of their jets), the fold stop of the grooves at the jets' bases
+    (``kappa_g delta``), the regions of the features (``h_floor``, ``neck_floor``,
+    ``neck_elements_per_scale``), the guard and the kink regions of the regions (``h_floor``), and
+    the stops (the guard's floor and freshness, the check of the curved elements on a fresh
+    mesh)."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    names = ("jet_base", "tip_jet", "groove_gap", "feature_regions", "interface_guard",
+             "kink_regions", "post_cut_stops")
+    for block in (WIRED, None):
+        calls: list = []
+        events = None if block is None else ev.EventSettings.from_dict(block)
+        drv = _events_driver(tmp_path / str(block is None), HeadProblem(r_n=lambda t: 0.3), recon,
+                             events=events, h_floor=1e-5, rise_tol=1e-6)
+        _spy(monkeypatch, calls, *names)
+        drv._post_cut_cache = None
+        drv.measure()
+        drv._post_cut_stop()
+        monkeypatch.undo()
+        got = {}
+        for name, args, kw in calls:
+            got.setdefault(name, []).append((args, kw))
+        assert set(got) == set(names), set(names) - set(got)
+        rise = 2e-8 if block else 1e-6
+        assert [a[2] for a, _ in got["jet_base"]] == [rise] * len(got["jet_base"])
+        assert [k["rise_tol"] for _, k in got["tip_jet"]] == [rise, rise]
+        assert {k["stop"] for _, k in got["groove_gap"]} == {0.07 * 1e-3 if block else 1e-3}
+        (_, regions), = got["feature_regions"]
+        assert regions["h_floor"] == (3e-7 if block else 1e-5)
+        assert {k: regions.get(k) for k in ("neck_floor", "neck_elements_per_scale")} == (
+            {"neck_floor": 4e-7, "neck_elements_per_scale": 24.0} if block
+            else {"neck_floor": None, "neck_elements_per_scale": None})
+        assert {k["h_floor"] for _, k in got["interface_guard"]} == {3e-7 if block else 1e-5}
+        assert {k["h_floor"] for _, k in got["kink_regions"]} == {3e-7 if block else 1e-5}
+        (_, stops), = got["post_cut_stops"]
+        assert stops["guard"] == {"fresh": True, "h_floor": 3e-7 if block else 1e-5,
+                                  "refine_ratio": 1.5}
+        if block:
+            assert stops["events"] is drv.events and stops["invalid"] == drv._jacobian_stop
+        else:
+            assert "events" not in stops and "invalid" not in stops
+        drv.close()
+
+
+def test_after_a_step_the_stops_take_the_guard_of_a_stepped_mesh_and_no_jacobian_check(
+        tmp_path, monkeypatch):
+    """With the block the stops of a state are told whether its mesh is fresh, and only a fresh
+    one has its curved elements checked: the call after a step that rebuilt nothing has
+    ``fresh`` false and no ``invalid``."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    drv = _events_driver(tmp_path, HeadProblem(r_n=lambda t: 0.3), recon,
+                         events=ev.EventSettings.from_dict(WIRED), max_steps=1, h_floor=1e-5)
+    calls: list = []
+    _spy(monkeypatch, calls, "post_cut_stops")
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["steps"] == 1 and out["stop"]["reason"] == "max-steps"
+    seen = [(k["guard"]["fresh"], k["invalid"] is not None) for _, _, k in calls]
+    assert seen[0] == (True, True) and (False, False) in seen
+    assert all(fresh == checked for fresh, checked in seen)
+
+
+def test_the_open_chains_neck_stop_after_the_cut_has_the_floor_of_the_block(tmp_path):
+    """``max(neck_stop, neck_stop_elements h_floor)`` with the block's ``post.h_floor``: a neck of
+    the open chain of 3e-4 (the root of a jet rising from the cavity's tip) lies below that limit
+    with the collapse's floor of 2e-4 (6e-4), and above it with the block's of 1e-6 (the neck
+    stop, 1e-5): the run then meets the neck as an event instead."""
+    from test_events_stops import cavity_with_head
+
+    class RisingJet(CutProblem):
+        def interface_segments(self):
+            segs = super().interface_segments()
+            P = cavity_with_head(1e-3, r_n=0.3).points
+            segs[1] = self._chain("open", P[:, 0].copy(), P[:, 1].copy(), ("axis", "fixed"))
+            return segs
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    kw = {"neck_stop": 1e-5, "h_floor": 2e-4}
+    for name, events, limit in (
+            ("plain", None, 6e-4), ("collapse-floor", ev.EventSettings(), 6e-4),
+            ("block-floor", ev.EventSettings.from_dict({"post": {"h_floor": 1e-6}}), 1e-5)):
+        drv = _events_driver(tmp_path / name, RisingJet(), recon, events=events, **kw)
+        assert drv._neck_limit() == pytest.approx(limit, rel=1e-12, abs=0.0)
+        out = drv.run(1e-9)
+        drv.close()
+        stop = out["stop"]
+        if limit > 3e-4:
+            assert stop["reason"] == "pinch-off-approach" and stop["neck_limit"] == drv._neck_limit()
+        else:
+            assert stop["reason"] == ev.EVENT_UNHANDLED and stop["kind"] == "liquid-neck"
+            assert stop["chain"] == "open" and stop["class"] == "L-unhandled"
+
+
+def test_the_grooves_at_the_jets_bases_are_measured_against_kappa_g_delta(tmp_path):
+    """The groove around a jet's base is read with the fold limit after the cut (``groove_gap``'s
+    ``stop``, its ``groove_limit``): ``kappa_g delta`` with the block, the collapse's absolute
+    ``fold_stop`` without it."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+
+    class Groove(HeadProblem):
+        def interface_segments(self):
+            if self._cache is None:
+                chain, _ = bubble_with_head(1e-3, r_n=0.42, r_w=0.8)
+                self._cache = (0.42, chain)
+            return super().interface_segments()
+
+    for name, events, limit in (("plain", None, 1e-3), ("block", ev.EventSettings(), 5e-5)):
+        drv = _events_driver(tmp_path / name, Groove(r_n=lambda t: 0.42), recon, events=events,
+                             fold_stop=1e-3, max_steps=1)
+        apex = drv._post_cut_state()["apexes"]["bubble_top"]
+        drv.run(1e-9)
+        drv.close()
+        assert apex["groove_limit"] == pytest.approx(limit, rel=1e-12, abs=0.0)
+        assert apex["groove_gap"] == pytest.approx(0.37e-3, rel=0.01)
+
+
+def test_with_the_block_a_fresh_mesh_whose_curved_elements_fail_stops_the_run(tmp_path):
+    """The check of the curved elements (``CollapseDriver._jacobian_stop``) is among the stops of
+    an invalid state in the events branch: on the cut's mesh, which no step has run on, a check
+    that fails stops the run at once (``interface-unresolved``, trigger ``curved-jacobian``),
+    before any event."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    bad = {"reason": "interface-unresolved", "trigger": "curved-jacobian", "scaled_jacobian": 0.1}
+    for name, events in (("plain", None), ("block", ev.EventSettings())):
+        drv = _events_driver(tmp_path / name, CutProblem(), recon, events=events)
+        calls = []
+        drv._jacobian_stop = lambda: calls.append(1) or dict(bad)
+        out = drv.run(1e-9)
+        drv.close()
+        assert out["steps"] == 0 and calls == [1]
+        assert out["stop"]["reason"] == "interface-unresolved"
+        assert out["stop"]["trigger"] == "curved-jacobian"
+
+
+def test_the_guard_and_the_kink_regions_have_the_blocks_floor(tmp_path):
+    """An element of the jet's root bent by 40 degrees asks the guard for a refinement: a kink
+    region floored at ``h_floor``, and the guard's stop once its chord lies within 1.5 floors.
+    With the block's ``post.h_floor`` of delta/512 the run goes on, the kink region at that
+    floor; with the block's ``post.h_floor`` null, the collapse's delta/128, the guard of the
+    fresh mesh stops it at once (``feature-below-floor``)."""
+    from test_reconnect_geometry import _bent
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+
+    class Bent(HeadProblem):
+        def interface_segments(self):
+            segs = super().interface_segments()
+            chain, apex = bubble_with_head(1e-3, r_n=0.3)
+            P = _bent(chain.points, (apex + 200) // 2, turn_deg=40.0)
+            segs[0] = self._chain("bubble", P[:, 0].copy(), P[:, 1].copy(), ("axis", "axis"))
+            return segs
+
+    block = json.loads(json.dumps(WIRED))
+    block["post"].update(h_floor=1e-3 / 512, dt_min=1e-12)
+    collapse = json.loads(json.dumps(block))
+    collapse["post"]["h_floor"] = None
+    for name, floor in (("collapse", None), ("block", 1e-3 / 512)):
+        events = ev.EventSettings.from_dict(block if floor else collapse)
+        drv = _events_driver(tmp_path / name, Bent(r_n=lambda t: 0.3), recon, events=events,
+                             h_floor=1e-3 / 128, max_steps=1)
+        regions = {g["name"]: g for g in drv.measure()["regions"]}
+        if floor is None:  # the element lies within 1.5 floors already: no refinement, a stop
+            assert "kink_bubble" not in regions
+        else:
+            assert regions["kink_bubble"]["floor"] == floor
+            assert regions["kink_bubble"]["target"] >= floor
+        out = drv.run(1e-9)
+        drv.close()
+        stop = out["stop"]
+        if floor is None:
+            assert (stop["reason"], stop["trigger"]) == ("interface-unresolved",
+                                                         "feature-below-floor")
+            assert out["steps"] == 0 and stop["fresh"]
+        else:
+            assert stop["reason"] == "max-steps" and out["steps"] == 1
