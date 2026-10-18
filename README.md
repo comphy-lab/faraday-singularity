@@ -403,12 +403,17 @@ the run that dumped it did, unless the restart changes a key that sizes the mesh
 continues only under a case with the block. The keys of `liquid` and of `gap` are the keys of a
 class of events: once an event of the class has been made they may not change, except in a restart
 from the state before an event (`precut_e<k>`), from which they apply anew; the keys of `post` may
-change at any restart. With `post.bubble_bottom_sizing` `frozen` the bubble's bottom, far from the
-cut, is meshed never coarser than `post.bubble_bottom_size` rather than never coarser than at the
-landing (`kept`, the default), so that the bubbles of a study in `delta` are meshed alike there;
-within a few of the cut's tip sizes (`tip_size delta`) of the bottom's tip the cut's sizing of every
-end on the axis still applies, and the cut's own mesh has the size the cut keeps there from the
-landing until the first rebuild after the cut.
+change at any restart, and so may the block's own: `max_events` (1000), the most events a run makes
+over all its legs, and the test of a cascade of events at one tip (`cascade_min_interval`, 0.25,
+in `delta^2`; `cascade_ratio`, 0.7; `cascade_count`, 3). Of `post`, `keep_event_dumps` says which
+dumps of the events a run keeps (`all`, or `first<N>-last<M>`: the state before each of the first
+`N` events and both states of each of the last `M`) and `prune_gmsh` (true) deletes the meshes
+gmsh wrote for the run that no dump refers to. With `post.bubble_bottom_sizing` `frozen` the
+bubble's bottom, far from the cut, is meshed never coarser than `post.bubble_bottom_size` rather
+than never coarser than at the landing (`kept`, the default), so that the bubbles of a study in
+`delta` are meshed alike there; within a few of the cut's tip sizes (`tip_size delta`) of the
+bottom's tip the cut's sizing of every end on the axis still applies, and the cut's own mesh has the
+size the cut keeps there from the landing until the first rebuild after the cut.
 
 With the block, the stops of a state after the cut come in three ranks (`events.post_cut_events`). A
 state that is not valid stops the run: the chains not two, a spline through the nodes that contacts

@@ -51,6 +51,54 @@ def test_the_block_parses_with_its_defaults_and_round_trips():
     assert ev.EventSettings.from_dict(full.to_dict()).sha256() == full.sha256()
 
 
+def test_the_keys_of_the_runs_events_parse_with_their_defaults_and_round_trip():
+    """The block's own keys (the most events a run makes, the test of a cascade) and those of
+    post that keep the dumps of the events and prune the meshes: their defaults, and a block that
+    sets them all comes back from its JSON."""
+    s = ev.EventSettings()
+    assert (s.max_events, s.cascade_min_interval, s.cascade_ratio, s.cascade_count) == (
+        1000, 0.25, 0.7, 3)
+    assert s.post.keep_event_dumps == "all" and s.post.prune_gmsh is True
+    d = s.to_dict()
+    assert {k: d[k] for k in ev.EventSettings.KEYS} == {
+        "max_events": 1000, "cascade_min_interval": 0.25, "cascade_ratio": 0.7,
+        "cascade_count": 3}
+    full = ev.EventSettings.from_dict({"max_events": 40, "cascade_min_interval": 0.0,
+                                       "cascade_ratio": 0.5, "cascade_count": 2,
+                                       "post": {"keep_event_dumps": "first20-last8",
+                                                "prune_gmsh": False}})
+    assert ev.EventSettings.from_dict(json.loads(json.dumps(full.to_dict()))) == full
+    assert full.max_events == 40 and full.post.keep_event_dumps == "first20-last8"
+    assert not full.post.prune_gmsh and full.sha256() != s.sha256()
+    # they are keys of the leg, which any restart may change, also after events of every class
+    assert full.changed_keys(s.to_dict()) == ["cascade_count", "cascade_min_interval",
+                                              "cascade_ratio", "max_events",
+                                              "post.keep_event_dumps", "post.prune_gmsh"]
+    assert full.refused_changes(s.to_dict(), {"liquid": 3, "gap": 1}, None) == []
+    # a block recorded before they existed ran with their defaults
+    old = {k: v for k, v in s.to_dict().items() if k not in ev.EventSettings.KEYS}
+    del old["post"]["keep_event_dumps"], old["post"]["prune_gmsh"]
+    assert s.changed_keys(old) == [] and full.changed_keys(old) == full.changed_keys(s.to_dict())
+
+
+def test_the_policy_of_the_dumps_of_events_keeps_the_first_before_and_the_last_both():
+    """``post.keep_event_dumps``: ``all`` keeps both dumps of every event; ``first<N>-last<M>``
+    the state before each of the first N events and both states of each of the last M."""
+    assert ev.event_dump_policy("all") is None
+    assert ev.event_dump_policy("first20-last8") == (20, 8)
+    assert ev.event_dump_policy("first0-last0") == (0, 0)
+    both = ("precut", "postcut")
+    assert ev.event_dumps_kept([1, 2, 3], None) == {1: both, 2: both, 3: both}
+    kept = ev.event_dumps_kept(range(1, 31), (20, 8))
+    assert [k for k, v in kept.items() if v == ("precut",)] == list(range(1, 21))
+    assert [k for k, v in kept.items() if v == both] == list(range(23, 31))
+    assert [k for k, v in kept.items() if v == ()] == [21, 22]
+    # the last ones keep both, also among the first
+    kept = ev.event_dumps_kept([1, 2, 3], (2, 2))
+    assert kept == {1: ("precut",), 2: both, 3: both}
+    assert ev.event_dumps_kept([5, 6], (0, 0)) == {5: (), 6: ()}
+
+
 @pytest.mark.parametrize("block, match", [
     ({"ghost_window_end": True}, "unknown key"),
     ({"liquid": {"eps": 0.2}}, r"liquid: unknown key\(s\) eps"),
@@ -86,6 +134,15 @@ def test_the_block_parses_with_its_defaults_and_round_trips():
     ({"post": {"dt_min": 1e-12, "minimum_dt": 9e-13}}, "at most half the step-size floor"),
     ({"post": {"minimum_dt": 1e-11}}, "may not raise it"),
     ({"post": {"minimum_dt": 5e-12}}, "may not raise it"),
+    ({"post": {"keep_event_dumps": "last8"}}, "keep_event_dumps must be 'all' or"),
+    ({"post": {"keep_event_dumps": 20}}, "keep_event_dumps must be 'all' or"),
+    ({"post": {"prune_gmsh": "yes"}}, "prune_gmsh must be true or false"),
+    ({"max_events": 0}, "max_events must be a positive integer"),
+    ({"max_events": 10.0}, "max_events must be a positive integer"),
+    ({"cascade_count": True}, "cascade_count must be a positive integer"),
+    ({"cascade_min_interval": -0.1}, "cascade_min_interval must be finite and not negative"),
+    ({"cascade_ratio": 1.0}, r"cascade_ratio must lie in \(0, 1\)"),
+    ({"cascade_ratio": 0.0}, r"cascade_ratio must lie in \(0, 1\)"),
 ])
 def test_the_block_refuses_unknown_keys_and_invalid_values(block, match):
     with pytest.raises(ValueError, match=match):

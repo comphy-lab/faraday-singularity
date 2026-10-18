@@ -18,8 +18,11 @@ The block has three parts and a few keys of its own:
   ``fold_stop`` of the collapse;
 * ``post`` (:class:`PostCutSettings`): the limits and floors of the run after the cut, each by
   default the collapse's own (``h_floor``, ``rise_tol``, ``dt_min``), the floor and resolution of
-  the mesh at the necks, oomph-lib's smallest step after the cut, the open chain's neck stop and the
-  sizing of the bubble's bottom.
+  the mesh at the necks, oomph-lib's smallest step after the cut, the open chain's neck stop, the
+  sizing of the bubble's bottom, which dumps of the events the run keeps and the pruning of the
+  meshes no dump refers to;
+* of its own: the most events a run makes (``max_events``) and the test of a cascade of events at
+  one tip (``cascade_min_interval``, ``cascade_ratio``, ``cascade_count``).
 
 Which keys a restart may change: the keys of ``liquid`` and ``gap`` are the keys of their class of
 events (:meth:`EventSettings.class_keys`), fixed once an event of the class has been made, except
@@ -54,6 +57,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import asdict, dataclass, field, fields
 
 import numpy as np
@@ -201,7 +205,12 @@ class PostCutSettings:
     (``kept``), so that the bubbles of a study in ``delta`` are meshed alike, but within a few of
     the cut's tip sizes (``tip_size delta``) of the bottom's tip on the axis, where the cut's tip
     attractor still applies, and on the mesh of the cut itself, which has the size the cut keeps
-    there (``focus.kept``) until the first rebuild after it (``reconnect.feature_regions``)."""
+    there (``focus.kept``) until the first rebuild after it (``reconnect.feature_regions``).
+    ``keep_event_dumps`` says which dumps of the events made the run keeps: ``all``, or
+    ``first<N>-last<M>``, the state before each of the first ``N`` events and both states of
+    each of the last ``M`` (:func:`event_dumps_kept`; the state before an event the run stops on
+    is always kept). With ``prune_gmsh`` the meshes gmsh wrote for the run that no dump it keeps
+    refers to, and that the problem no longer holds, are deleted after every dump."""
     open_neck_stop: bool = True
     h_floor: float | None = None
     neck_floor: float | None = None
@@ -211,6 +220,8 @@ class PostCutSettings:
     minimum_dt: float | None = None
     bubble_bottom_sizing: str = "kept"
     bubble_bottom_size: float | None = None
+    keep_event_dumps: str = "all"
+    prune_gmsh: bool = True
 
     def __post_init__(self):
         _flag("post", "open_neck_stop", self.open_neck_stop)
@@ -228,6 +239,34 @@ class PostCutSettings:
                              f"step, {OOMPH_MINIMUM_DT:g} by default; it may not raise it")
         if self.dt_min is not None:
             minimum_dt_after_cut(self, self.dt_min)
+        event_dump_policy(self.keep_event_dumps)
+        _flag("post", "prune_gmsh", self.prune_gmsh)
+
+
+def event_dump_policy(value) -> tuple[int, int] | None:
+    """``post.keep_event_dumps`` as ``(N, M)`` for ``first<N>-last<M>``, None for ``all``. Raises
+    ``ValueError`` for any other value."""
+    if value == "all":
+        return None
+    match = re.fullmatch(r"first(\d+)-last(\d+)", value) if isinstance(value, str) else None
+    if match is None:
+        raise ValueError(f"collapse.{EVENTS_BLOCK}.post.keep_event_dumps must be 'all' or "
+                         "'first<N>-last<M>' (e.g. 'first20-last8')")
+    return int(match.group(1)), int(match.group(2))
+
+
+def event_dumps_kept(made, policy) -> dict[int, tuple[str, ...]]:
+    """Which dumps of the events ``made`` (their numbers ``k``) a run keeps under the policy
+    ``(N, M)`` of :func:`event_dump_policy` (None: every one): by event, ``("precut",)`` for each
+    of the first ``N`` and ``("precut", "postcut")`` for each of the last ``M``, nothing for the
+    others; ``("precut", "postcut")`` for every one without a policy."""
+    ks = sorted(int(k) for k in made)
+    if policy is None:
+        return {k: ("precut", "postcut") for k in ks}
+    first, last = policy
+    late = set(ks[-last:]) if last > 0 else set()
+    return {k: ("precut", "postcut") if k in late else ("precut",) if i < first else ()
+            for i, k in enumerate(ks)}
 
 
 def minimum_dt_after_cut(post: PostCutSettings, dt_min: float) -> float:
@@ -248,13 +287,22 @@ def minimum_dt_after_cut(post: PostCutSettings, dt_min: float) -> float:
 
 @dataclass(frozen=True)
 class EventSettings:
-    """The ``collapse.reconnect_events`` block (module docstring)."""
+    """The ``collapse.reconnect_events`` block (module docstring), with the keys of its own, of the
+    leg: the most events a run makes (``max_events``, over all its legs; the run stops resumably at
+    the next, ``max-events``) and the test of a cascade of events at one tip
+    (:class:`CascadeMonitor`: ``cascade_min_interval`` in ``delta^2``, ``cascade_ratio``,
+    ``cascade_count``)."""
     liquid: LiquidEventSettings = field(default_factory=LiquidEventSettings)
     gap: GapSettings = field(default_factory=GapSettings)
     post: PostCutSettings = field(default_factory=PostCutSettings)
+    max_events: int = 1000
+    cascade_min_interval: float = 0.25
+    cascade_ratio: float = 0.7
+    cascade_count: int = 3
 
     PARTS = {"liquid": LiquidEventSettings, "gap": GapSettings, "post": PostCutSettings}
     CLASSES = ("liquid", "gap")  # the parts whose keys are the keys of a class of events
+    KEYS = ("max_events", "cascade_min_interval", "cascade_ratio", "cascade_count")  # of the leg
 
     def __post_init__(self):
         for name, cls in self.PARTS.items():
@@ -268,16 +316,25 @@ class EventSettings:
             raise ValueError(f"collapse.{EVENTS_BLOCK}: liquid events need post.neck_floor (the "
                              "region of a neck is otherwise floored at the cut's focus size, "
                              "which cannot follow a neck to its landing below the cut radius)")
+        for name in ("max_events", "cascade_count"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"collapse.{EVENTS_BLOCK}.{name} must be a positive integer")
+        if not (_number(self.cascade_min_interval) and self.cascade_min_interval >= 0.0):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.cascade_min_interval must be finite and not "
+                             "negative (in delta^2)")
+        if not (_number(self.cascade_ratio) and 0.0 < self.cascade_ratio < 1.0):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.cascade_ratio must lie in (0, 1)")
 
     @classmethod
     def from_dict(cls, data) -> "EventSettings":
         """The block of a case, refusing keys it does not know (at every level)."""
         if not isinstance(data, dict):
             raise ValueError(f"collapse.{EVENTS_BLOCK} must be an object")
-        unknown = sorted(set(data) - set(cls.PARTS))
+        unknown = sorted(set(data) - set(cls.PARTS) - set(cls.KEYS))
         if unknown:
             raise ValueError(f"collapse.{EVENTS_BLOCK}: unknown key(s) " + ", ".join(unknown))
-        kw = {}
+        kw = {name: data[name] for name in cls.KEYS if name in data}
         for name, part in cls.PARTS.items():
             sub = data.get(name, {})
             if not isinstance(sub, dict):
@@ -291,7 +348,8 @@ class EventSettings:
         return cls(**kw)
 
     def to_dict(self) -> dict:
-        return {name: asdict(getattr(self, name)) for name in self.PARTS}
+        return {**{name: asdict(getattr(self, name)) for name in self.PARTS},
+                **{name: getattr(self, name) for name in self.KEYS}}
 
     def sha256(self) -> str:
         """The hash of the block's canonical JSON, recorded with every leg of a run."""
@@ -309,16 +367,23 @@ class EventSettings:
         key existed ran with the key's default)."""
         out = cls().to_dict()
         for name, sub in (recorded or {}).items():
-            out[name] = {**out.get(name, {}), **(sub if isinstance(sub, dict) else {})}
+            if name in cls.PARTS:
+                out[name] = {**out.get(name, {}), **(sub if isinstance(sub, dict) else {})}
+            else:
+                out[name] = sub
         return out
 
     def changed_keys(self, recorded: dict | None) -> list[str]:
-        """The dotted keys (``liquid.eps_d``) in which the block differs from a recorded one; a
-        key the record lacks counts at its default."""
+        """The keys in which the block differs from a recorded one, dotted for those of a part
+        (``liquid.eps_d``); a key the record lacks counts at its default."""
         old = self._completed(recorded or {})
         new = json.loads(json.dumps(self.to_dict()))
         out = []
         for name in sorted(set(old) | set(new)):
+            if name not in self.PARTS:
+                if name not in old or name not in new or old[name] != new[name]:
+                    out.append(name)
+                continue
             a, b = old.get(name, {}), new.get(name, {})
             out += [f"{name}.{k}" for k in sorted(set(a) | set(b), key=str)
                     if k not in a or k not in b or a[k] != b[k]]
@@ -330,7 +395,8 @@ class EventSettings:
         existed, which may take any block) that a restart may not make: those of the keys of a class
         of which ``done`` counts an event already made, unless the restart is from the state before
         an event, ``precut_e<recut_from>``, from which the class keys apply anew (events before it
-        stay as made). The keys of the leg (``post``) may change at any restart."""
+        stay as made). The keys of the leg (``post`` and the block's own, ``KEYS``) may change at
+        any restart."""
         if recorded is None or recut_from is not None:
             return []
         return [k for k in self.changed_keys(recorded)

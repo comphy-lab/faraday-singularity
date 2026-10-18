@@ -217,8 +217,12 @@ add a second top-level `cases/` tree.
   once an event of their class was made, except in a restart from the state before an event
   (`precut_e<k>`, `cut_stage` `precut-event`), from which they apply anew (`event_keys_changed_at`
   in its leg); the keys of `post` change at any restart (a key a recorded block lacks counts at its
-  default). `post.bubble_bottom_sizing` `frozen` meshes the bubble's bottom never coarser than
-  `post.bubble_bottom_size` instead of the landing focus (`reconnect.feature_regions`), except
+  default), `post.keep_event_dumps` (`all` or `first<N>-last<M>`, `events.event_dumps_kept`) and
+  `post.prune_gmsh` among them, and so do the block's own (`events.EventSettings.KEYS`:
+  `max_events`, the most events a run makes over its legs, and the cascade test
+  `cascade_min_interval`, `cascade_ratio`, `cascade_count`). `post.bubble_bottom_sizing` `frozen`
+  meshes the bubble's bottom never coarser than `post.bubble_bottom_size` instead of the landing
+  focus (`reconnect.feature_regions`), except
   within a few of the cut's tip sizes of the bottom's tip, where the cut's tip attractor at every
   axis end (`tip_size delta`) still applies, and on the cut's own mesh, which has the size the cut
   keeps there (`focus.kept`) until the first rebuild after the cut. An unknown key of the `collapse`
