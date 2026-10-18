@@ -273,37 +273,40 @@ add a second top-level `cases/` tree.
   adds to the record the base of the cut jet before the cut (`trigger.r_j`, `z_b`, `r_j_over_r_n`,
   `neck_to_base_over_r_j`), the event's `generation` at its tip, `step`, `leg`, `tau_over_delta2`,
   `t_prime_over_T` (`T = t_p - t_cut`), the `cascade` verdict, the `commit`, the ghost's start and
-  the jet after the cut (`after`), and writes a row of `events.txt`. The ghost of each removed head
-  is followed after each step (`CollapseDriver._follow_ghosts`, `events.ghost_place`): its
-  recontacts with the stump and with the far tip of the bubble (`events.ghost_recontacts`, from
-  `GHOST_SKIP_STEPS` after the cut) are flags only, in `ghost.recontacts` of the record and its
-  file, events `ghost-recontact` and rows of `drops.txt` (with one per ghost made). Every removal
-  enters the run's budget (`budget.txt`, a row per step after the cut: the mesh's volume, axial
-  momentum and kinetic energy of `chains.txt`, the removals' since the gas cut,
-  `CollapseDriver._removed`, and the sums; the volume and the momentum of each removal are hard
-  checks of its cut, within its box). The dumps of events that `post.keep_event_dumps` no longer
-  keeps are deleted as events come (`CollapseDriver._drop_event_dumps`, `dumps.dropped` in the
-  record), and with `post.prune_gmsh` the meshes of `_gmsh` that no dump of the run directory or of
-  the driver's `states` refers to (pyoomph's `get_state_file_mesh_files`) and that the problem's
-  templates do not hold, after every rotating dump and every event (`CollapseDriver._prune_meshes`,
-  none where a dump cannot be read; `testCases/test_events_fem.py` restarts the dumps kept in new
-  processes). Every other event is a resumable stop with the dump of the state before it
-  (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`, also an event of
-  its reason) besides the end state: `event-unhandled` (no handler made: the ring of a piercing, the
-  groove fill, the split of a gas neck, a liquid neck without a single head), `max-events` (the
-  event after `max_events`), `event-cascade` (`events.CascadeMonitor` judges it to shrink: an
-  interval at its tip below `cascade_min_interval delta^2`, or the last `cascade_count` pairs of
-  ratios of intervals and of head volumes below `cascade_ratio`), `liquid-cut-refused` (the problem
-  unchanged), `event-unclosed` (hard budgets that do not close: the problem holds a cut that is not
-  accepted, so the run ends on the state before it, its `end_state`, and dumps nothing more); any
-  other failure of a liquid cut fails the run. A continuation from such a dump is a post-cut restart
-  from which the keys of every class apply anew (`events.EventSettings.refused_changes`), the events
-  before it staying as made. The run's result with the block has `events` (made, by kind and tip,
-  the last, the totals removed, the cascade's verdicts, the ghosts' recontacts, the dumps and meshes
-  deleted, the event stopped on) and `window_end` (`bubble-vanishing`, also an event `window-end`),
-  which `run_status.json` also has at its top level; a run failed in a liquid cut has `event`
-  there (`run_case.event_failure_status`, the record's schema `events.EVENT_SCHEMA`). The tests of
-  the branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run
+  the jet after the cut (`after`), and writes a row of `events.txt` (`testCases/test_events_run.py`,
+  stand-ins and a stand-in cut; `testCases/test_events_run_fem.py`, two events in one finite-element
+  run, a refused cut, and a run resumed in a new process from the dump of an event a driver without
+  the handler stopped on). The ghost of each removed head is followed after each step
+  (`CollapseDriver._follow_ghosts`, `events.ghost_place`): its recontacts with the stump and with
+  the far tip of the bubble (`events.ghost_recontacts`, from `GHOST_SKIP_STEPS` after the cut) are
+  flags only, in `ghost.recontacts` of the record and its file, events `ghost-recontact` and rows of
+  `drops.txt` (with one per ghost made). Every removal enters the run's budget (`budget.txt`, a row
+  per step after the cut: the mesh's volume, axial momentum and kinetic energy of `chains.txt`, the
+  removals' since the gas cut, `CollapseDriver._removed`, and the sums; the volume and the momentum
+  of each removal are hard checks of its cut, within its box). The dumps of events that
+  `post.keep_event_dumps` no longer keeps are deleted as events come
+  (`CollapseDriver._drop_event_dumps`, `dumps.dropped` in the record), and with `post.prune_gmsh`
+  the meshes of `_gmsh` that no dump of the run directory or of the driver's `states` refers to
+  (pyoomph's `get_state_file_mesh_files`) and that the problem's templates do not hold, after every
+  rotating dump and every event (`CollapseDriver._prune_meshes`, none where a dump cannot be read;
+  `testCases/test_events_fem.py` restarts the dumps kept in new processes). Every other event is a
+  resumable stop with the dump of the state before it (`states/precut_e<k>.dump`, `cut_stage`
+  `precut-event`, the event under `event`, also an event of its reason) besides the end state:
+  `event-unhandled` (no handler made: the ring of a piercing, the groove fill, the split of a gas
+  neck, a liquid neck without a single head), `max-events` (the event after `max_events`),
+  `event-cascade` (`events.CascadeMonitor` judges it to shrink: an interval at its tip below
+  `cascade_min_interval delta^2`, or the last `cascade_count` pairs of ratios of intervals and of
+  head volumes below `cascade_ratio`), `liquid-cut-refused` (the problem unchanged),
+  `event-unclosed` (hard budgets that do not close: the problem holds a cut that is not accepted, so
+  the run ends on the state before it, its `end_state`, and dumps nothing more); any other failure
+  of a liquid cut fails the run. A continuation from such a dump is a post-cut restart from which
+  the keys of every class apply anew (`events.EventSettings.refused_changes`), the events before it
+  staying as made. The run's result with the block has `events` (made, by kind and tip, the last,
+  the totals removed, the cascade's verdicts, the ghosts' recontacts, the dumps and meshes deleted,
+  the event stopped on) and `window_end` (`bubble-vanishing`, also an event `window-end`), which
+  `run_status.json` also has at its top level; a run failed in a liquid cut has `event` there
+  (`run_case.event_failure_status`, the record's schema `events.EVENT_SCHEMA`). The tests of the
+  branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run
   directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by
   default. After the cut the driver reads its limits through accessors that return the collapse's
   own value before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`, `_fold_stop`,
