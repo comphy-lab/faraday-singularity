@@ -1265,10 +1265,10 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
     The record (schema ``faraday-event/2``: ``trigger``, ``cap`` with its ``fill``, ``removed``,
     ``transfer``, ``projection``, ``budgets``, ``closures`` with ``F3_phi``, ``ghost``, of which
     only the file holds the ``polygon``, the region removed at its start, and ``removed_total``) is
-    written to ``events/event_<k>.json`` whatever the outcome (``made``, ``refused``, ``unclosed``, ``failed`` or ``interrupted``, with
-    ``failed_at``), as :func:`cut` writes its own; a refusal leaves the problem unchanged, a failure
-    ends the run, and hard budgets that do not close (:class:`BudgetUnclosed`, a failure) end it at
-    a stop to resume from ``precut_e<k>``."""
+    written to ``events/event_<k>.json`` whatever the outcome (``made``, ``refused``, ``unclosed``,
+    ``failed`` or ``interrupted``, with ``failed_at``), as :func:`cut` writes its own; a refusal
+    leaves the problem unchanged, a failure ends the run, and hard budgets that do not close
+    (:class:`BudgetUnclosed`, a failure) end it at a stop to resume from ``precut_e<k>``."""
     out = Path(outdir)
     record: dict = {"schema": EVENT_SCHEMA, "k": int(k), "kind": request.get("kind"),
                     "class": request.get("class")}
@@ -1522,8 +1522,9 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
                           for x in ("phi_lhs", "phi_rhs", "phi_error", "phi_relative_error")}
     record["closures"] = closures
     if closures["hard"]:
+        missed = {x: closures[x] for x in closures["hard"]}
         raise BudgetUnclosed(f"the budget of the liquid cut does not close: {closures['hard']} "
-                             f"beyond their limits ({ {x: closures[x] for x in closures['hard']} })")
+                             f"beyond their limits ({missed})")
     # the removed head as the run is to follow it: moving rigidly at its mean axial speed, its rear
     # (the cap's side) retracting towards it at the capillary speed of the end of a thread
     _, segs_after = _named_chains(pb)
