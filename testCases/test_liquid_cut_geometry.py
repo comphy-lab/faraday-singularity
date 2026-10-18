@@ -361,3 +361,25 @@ def test_the_unlocated_nodes_of_a_transfer_are_those_off_every_old_element():
     far = np.array([line.distance(Point(p)) for p in cut.cap])
     assert np.all(far[got] > 0.5 * 0.7 * h) and np.all(far[~got] <= 0.5 * h)
 
+
+def test_the_polyline_budgets_of_a_box_are_those_of_a_sphere_and_a_plane():
+    """Within the half-disc of radius R about a point of the axis: a bubble that is a sphere of
+    radius a inside it holds 4/3 pi a^3 of gas and 4 pi a^2 of interface; a flat open surface
+    through the centre leaves the upper half of the ball gas, 2/3 pi R^3, and pi R^2 of interface;
+    the liquid is the rest of the ball, to the polylines' accuracy."""
+    pytest.importorskip("pyoomph")
+    from faraday_singularity import surgery
+
+    zc, R, a = 0.6, 0.1, 0.03
+    th = np.linspace(0.0, math.pi, 4001)
+    sphere = rc.Chain(np.column_stack([a * np.sin(th), zc - a * np.cos(th)]), ("axis", "axis"))
+    sphere.points[[0, -1], 0] = 0.0
+    r = np.linspace(0.0, R_C, 40001)
+    flat = rc.Chain(np.column_stack([r, np.full_like(r, zc)]), ("axis", "fixed"))
+    for chains, gas, area in (([sphere], 4.0 / 3.0 * math.pi * a**3, 4.0 * math.pi * a**2),
+                              ([flat], 2.0 / 3.0 * math.pi * R**3, math.pi * R**2)):
+        b = surgery.box_polyline_budgets(chains, zc, R, 3.0)
+        assert b["V_disc"] == pytest.approx(4.0 / 3.0 * math.pi * R**3, rel=1e-4)
+        assert b["V_gas"] == pytest.approx(gas, rel=1e-4)
+        assert b["A"] == pytest.approx(area, rel=1e-4)
+        assert b["V_liquid"] == pytest.approx(b["V_disc"] - b["V_gas"])

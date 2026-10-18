@@ -396,12 +396,152 @@ def local_kinetic_energy(problem, z_centre: float, radius: float, n: int = LOCAL
     return float(np.sum(u2 * math.pi * r * P.ravel()) * h_rho * h_th)
 
 
-def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None = None) -> dict:
+BOX_SAMPLES = 256  # points per direction of the polar grid of the budgets of a liquid cut
+
+
+def box_grid(z_centre: float, radius: float, n: int = BOX_SAMPLES) -> dict:
+    """The polar grid of the budgets within ``radius`` of the point ``(0, z_centre)`` of the
+    axis, as :func:`local_kinetic_energy` lays it over the half-disc: the midpoints of ``n x n``
+    cells in the distance ``rho`` from the centre and the angle from the axis, their places ``r``,
+    ``zz``, the volume of each cell revolved about the axis (``dV``, ``2 pi r rho drho dtheta``),
+    and the C1 cutoff ``phi`` of the box with its axial derivative ``dphi_dz``
+    (:func:`box_cutoff`)."""
+    h_rho, h_th = radius / n, math.pi / n
+    rho = (np.arange(n) + 0.5) * h_rho
+    theta = -0.5 * math.pi + (np.arange(n) + 0.5) * h_th
+    P, T = np.meshgrid(rho, theta, indexing="ij")
+    r, z = (P * np.cos(T)).ravel(), (z_centre + P * np.sin(T)).ravel()
+    phi, dphi = box_cutoff(P.ravel(), radius)
+    return {"z": float(z_centre), "R": float(radius), "n": int(n), "r": r, "zz": z,
+            "rho": P.ravel(), "dV": 2.0 * math.pi * r * P.ravel() * h_rho * h_th, "phi": phi,
+            "dphi_dz": dphi * np.sin(T).ravel()}
+
+
+def box_cutoff(rho, radius: float) -> tuple[np.ndarray, np.ndarray]:
+    """The cutoff of the box of radius ``radius`` at the distances ``rho`` from its centre and its
+    derivative in ``rho``: one within half the radius, zero beyond it, a cubic step in between
+    (continuously differentiable), so that ``v = phi e_z`` is a velocity the projection's weak form
+    holds for, up to its interpolation, wherever the box lies inside the liquid or reaches only its
+    free surfaces."""
+    t = np.clip((np.asarray(rho, dtype=float) - 0.5 * radius) / (0.5 * radius), 0.0, 1.0)
+    return 1.0 - t * t * (3.0 - 2.0 * t), -6.0 * t * (1.0 - t) / (0.5 * radius)
+
+
+def sample_fields(problem, r, z, names) -> tuple[dict, np.ndarray]:
+    """The nodal fields ``names`` of the liquid at the points ``(r, z)``, each located in the mesh
+    in one call (``nan`` where a point lies outside the liquid), and which points were found."""
+    bulk = problem.get_mesh("liquid")
+    fi = bulk.get_nodal_field_indices()
+    rows = bulk.evaluate_at_points(np.column_stack([r, z]).tolist(), lagrangian=False)
+    found = np.array([row[0] == 1.0 for row in rows], dtype=bool)
+    out = {}
+    for name in names:
+        col = 1 + fi[name]
+        out[name] = np.array([row[col] if ok else math.nan for row, ok in zip(rows, found)],
+                             dtype=float)
+    return out, found
+
+
+def box_integrals(problem, grid: dict, polygons: dict | None = None) -> dict:
+    """The axial momentum ``Pz`` and the kinetic energy ``KE`` of the liquid within the box of
+    ``grid`` (:func:`box_grid`), by the midpoint rule over its cells, points outside the liquid
+    counting zero, and the volume the found points cover (``V_grid``); for each half-section of
+    ``polygons`` (by name) the same over the cells inside it, from the same samples."""
+    import shapely
+    from shapely.geometry import Polygon
+
+    f, found = sample_fields(problem, grid["r"], grid["zz"], ("velocity_x", "velocity_y"))
+    ur, uz = np.where(found, f["velocity_x"], 0.0), np.where(found, f["velocity_y"], 0.0)
+    w = np.where(found, grid["dV"], 0.0)
+
+    def sums(mask):
+        return {"Pz": float(np.sum(w[mask] * uz[mask])),
+                "KE": float(np.sum(0.5 * w[mask] * (ur[mask] ** 2 + uz[mask] ** 2))),
+                "V_grid": float(np.sum(w[mask])), "points": int(np.count_nonzero(mask & found))}
+
+    out = {"z": grid["z"], "R": grid["R"], "n": grid["n"], **sums(np.ones(len(w), dtype=bool))}
+    for name, section in (polygons or {}).items():
+        inside = np.asarray(shapely.contains_xy(Polygon(section), grid["r"], grid["zz"]),
+                            dtype=bool)
+        out[name] = sums(inside)
+    return out
+
+
+def box_polyline_budgets(chains, z_centre: float, radius: float, reservoir_depth: float) -> dict:
+    """The volumes and the area within the half-disc of ``radius`` about ``(0, z_centre)`` from the
+    polylines of the ``chains`` (``reconnect.Chain``), clipped to it (as ``reconnect.
+    gas_volume_in_box`` clips to a box): the gas they bound (``V_gas``; the open chain closed
+    through the gas above it), the liquid (``V_liquid``, the half-disc's revolved volume, a sphere,
+    less the gas) and the area of the interface (``A``), each polyline segment revolved."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.geometry import box as shapely_box
+
+    from .reconnect import closed_section, revolved_volume
+
+    disc = Point(0.0, z_centre).buffer(radius, quad_segs=256).intersection(
+        shapely_box(0.0, z_centre - radius, radius, z_centre + radius))
+    V_disc = revolved_volume(np.asarray(disc.exterior.coords)[:-1])
+    gas = area = 0.0
+    for c in chains:
+        part = Polygon(closed_section(c.points, c.end_types, reservoir_depth)).intersection(disc)
+        for poly in getattr(part, "geoms", [part]):
+            if poly.geom_type != "Polygon" or poly.is_empty:
+                continue
+            gas += revolved_volume(np.asarray(poly.exterior.coords)[:-1])
+            gas -= sum(revolved_volume(np.asarray(h.coords)[:-1]) for h in poly.interiors)
+        line = LineString(c.points).intersection(disc)
+        for seg in getattr(line, "geoms", [line]):
+            if seg.geom_type != "LineString" or seg.is_empty:
+                continue
+            Q = np.asarray(seg.coords)
+            d = np.diff(Q, axis=0)
+            area += float(np.sum(math.pi * (Q[:-1, 0] + Q[1:, 0]) * np.hypot(d[:, 0], d[:, 1])))
+    return {"z": float(z_centre), "R": float(radius), "V_disc": V_disc, "V_gas": gas,
+            "V_liquid": V_disc - gas, "A": area}
+
+
+def _box_projection(grid: dict, before: dict, after: dict, found: np.ndarray) -> dict:
+    """What the projection changed within the box of ``grid``, from the velocity ``u~`` sampled
+    before it (``before``) and ``u+`` and the pressure impulse ``Pi`` after it, before the old
+    pressure is put back (``after``), on the same points (``found`` in the liquid both times): the
+    axial momentum and the kinetic energy there before and after (as :func:`box_integrals`), their
+    changes (``delta_Pz``, ``delta_KE``) and the identity of the cutoff ``phi``
+    (:func:`box_cutoff`), ``int (u+ - u~)_z phi dV = int Pi dphi/dz dV`` (``phi_lhs``,
+    ``phi_rhs``, ``phi_error``), which the weak form of the projection makes hold up to the
+    interpolation of ``phi e_z`` and to the quadrature of the grid."""
+    w = np.where(found, grid["dV"], 0.0)
+
+    def z(x):
+        return np.where(found, x, 0.0)
+
+    def sums(f):
+        return {"Pz": float(np.sum(w * z(f["velocity_y"]))),
+                "KE": float(np.sum(0.5 * w * (z(f["velocity_x"]) ** 2 + z(f["velocity_y"]) ** 2))),
+                "V_grid": float(np.sum(w)), "points": int(found.sum())}
+
+    du = z(after["velocity_y"]) - z(before["velocity_y"])
+    lhs = float(np.sum(w * du * grid["phi"]))
+    rhs = float(np.sum(w * z(after["pressure"]) * grid["dphi_dz"]))
+    scale = max(abs(lhs), abs(rhs), 1e-300)
+    out = {"z": grid["z"], "R": grid["R"], "n": grid["n"], "points": int(found.sum()),
+           "before": sums(before), "after": sums(after)}
+    out.update(delta_Pz=out["after"]["Pz"] - out["before"]["Pz"],
+               delta_KE=out["after"]["KE"] - out["before"]["KE"], phi_lhs=lhs, phi_rhs=rhs,
+               phi_error=lhs - rhs, phi_relative_error=(lhs - rhs) / scale,
+               max_abs_Pi=float(np.max(np.abs(z(after["pressure"])))) if found.any() else math.nan)
+    return out
+
+
+def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None = None, *,
+            box: tuple[float, float] | None = None) -> dict:
     """Steps 6-8: impulsive history, the projection, the restart of the history at ``t_cut``.
 
     Returns the projection diagnostics, filled into ``out`` as they are made, so that they survive
     a failure. Raises :class:`CutFailed` if the projection solve did not converge, remeshed, or
-    broke the energy identity."""
+    broke the energy identity. With ``box`` (``(z_centre, radius)``, a liquid cut's) the velocity is
+    sampled on the polar grid of that box (:func:`box_grid`) before the solve and again, with the
+    pressure impulse, after it and before the old pressure is put back, for what the projection
+    changed there (``out["box"]``, :func:`_box_projection`); without it nothing else is read."""
     s = settings
     pb = problem
     out = {} if out is None else out
@@ -409,6 +549,10 @@ def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None
     pb.assign_initial_values_impulsive()  # levels 1, 2 := the transferred (and filled) field
     out["before"] = before
     if s.projection:
+        grid = sampled = None
+        if box is not None:
+            grid = box_grid(*box)
+            sampled = sample_fields(pb, grid["r"], grid["zz"], ("velocity_x", "velocity_y"))
         ip, saved = _pressures(pb)
         pb._projecting = True
         try:
@@ -437,6 +581,10 @@ def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None
                    **_pressure_impulse_stats(pb))
         if not residuals or residuals[-1] > s.projection_tolerance:
             raise CutFailed(f"the projection did not converge: residuals {residuals}")
+        if grid is not None:  # u+ and Pi on the box, before the old pressure is put back
+            fields, found = sample_fields(pb, grid["r"], grid["zz"],
+                                          ("velocity_x", "velocity_y", "pressure"))
+            out["box"] = _box_projection(grid, sampled[0], fields, found & sampled[1])
         if dke < -s.energy_tolerance * before["kinetic_energy"] or \
                 abs(identity) > s.energy_tolerance * before["kinetic_energy"]:
             raise CutFailed(f"the projection broke the energy identity: delta KE {dke!r}, "
