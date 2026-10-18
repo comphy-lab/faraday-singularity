@@ -434,6 +434,7 @@ def jets(tmp_path_factory):
         with pytest.raises(surgery.CutFailed) as err:
             surgery.liquid_cut(pb, EVENTS, RECON, out / "closing", request(pb), k=1, **CUT_KW)
         res["closing"] = err.value.record
+        res["closing_error"] = (type(err.value), err.value.precut)
         res["closing_file"] = json.loads((out / "closing" / "events" / "event_001.json")
                                          .read_text())
         # a transfer that leaves more interface nodes unlocated than predicted, beyond the slack
@@ -452,6 +453,7 @@ def jets(tmp_path_factory):
                 surgery.liquid_cut(pb, EVENTS, RECON, out / "miscounted", request(pb), k=1,
                                    **CUT_KW)
         res["miscounted"] = err.value.record
+        res["miscounted_error"] = type(err.value)
     return res
 
 
@@ -577,6 +579,7 @@ def test_a_transfer_not_as_predicted_fails_the_cut_after_its_remesh(jets):
     cut at the check of its mesh, after the remesh, before the fill and the projection."""
     rec = jets["miscounted"]
     assert rec["outcome"] == "failed" and rec["failed_at"] == "mesh-check"
+    assert jets["miscounted_error"] is surgery.CutFailed
     assert "interface nodes unlocated" in rec["error"] and "projection" not in rec
     tr = rec["transfer"]
     assert tr["reported_unlocated"] == tr["predicted_unlocated"] + surgery.UNLOCATED_SLACK + 1
@@ -634,9 +637,13 @@ def test_the_cap_carries_the_old_bulk_velocity_at_its_nodes(jets):
 def test_a_projection_that_changes_the_boxs_momentum_fails_the_cut(jets):
     """With a flow that is not solenoidal the projection does work: the cutoff's identity holds with
     a pressure impulse of the size of the flow, and the momentum it changes in the box is beyond the
-    limit of the budget (F3), which fails the cut after the remesh, its record written."""
+    limit of the budget (F3), which fails the cut after the remesh as a budget that does not close
+    (``unclosed``, a stop to resume from the state before the cut), its record written."""
     rec = jets["closing"]
-    assert rec["outcome"] == "failed" and rec["failed_at"] == "postcut"
+    assert rec["outcome"] == "unclosed" and rec["failed_at"] == "postcut"
+    kind, precut = jets["closing_error"]
+    assert kind is surgery.BudgetUnclosed and issubclass(kind, surgery.CutFailed)
+    assert precut == rec["dumps"]["precut"] and Path(precut).is_file()
     assert "F3" in rec["closures"]["hard"] and rec == jets["closing_file"]
     box = rec["projection"]["box"]
     assert box["max_abs_Pi"] > 1e-3 and abs(box["phi_lhs"]) > 1e-5

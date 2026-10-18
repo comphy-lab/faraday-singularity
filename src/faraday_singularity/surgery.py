@@ -107,9 +107,10 @@ about the neck: the liquid volume and the area of the interface from the polylin
 the transfer and the fill, and after the projection (:func:`project` with ``box``, which also reads
 the identity of the box's cutoff in its weak form). The removed volume and momentum must close
 against the box's change, and the projection may change the momentum there by little
-(``HARD_CLOSURES``); the kinetic energy (the transfer's against the head's, the projection's either
-way) and the area are flagged beyond theirs, and the identity is recorded without a limit until the
-noise of the box is calibrated.
+(``HARD_CLOSURES``), or the cut is not accepted and the run is to stop resumably
+(:class:`BudgetUnclosed`); the kinetic energy (the transfer's against the head's, the projection's
+either way) and the area are flagged beyond theirs, and the identity is recorded without a limit
+until the noise of the box is calibrated.
 """
 
 from __future__ import annotations
@@ -163,6 +164,16 @@ class CutFailed(RuntimeError):
         super().__init__(message)
         self.precut = precut
         self.record = record
+
+
+class BudgetUnclosed(CutFailed):
+    """A liquid cut made through its projection whose hard budgets (``HARD_CLOSURES``) do not close
+    within their limits: the problem holds a cut that is not accepted, so that, as for
+    :class:`CutFailed`, the run ends and nothing is loaded back into the problem. The miss may be
+    the noise of the rebuild, which the floors of the limits (``liquid.sigma_V``, ``sigma_Pz``)
+    take into account only once calibrated: the run is to stop resumably, and a restart from the
+    state before the event (``precut``, ``precut_e<k>``, from which the keys of ``liquid`` apply
+    anew) cuts it again. Its record has ``outcome`` ``unclosed``."""
 
 
 # The stages of a cut before it changes the problem: any failure up to them is a refusal.
@@ -1236,7 +1247,7 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        (``dt_prev``) as the history's, the time unchanged; within the box, what it changed and the
        identity of the box's cutoff (``projection.box``).
     7. **Budgets after** and the closures (:func:`_closures`), of which the volume and the momentum
-       of the removal are hard checks; the removed head as the ghost the run is to follow
+       of the removal are hard checks (:class:`BudgetUnclosed` where they miss); the removed head as the ghost the run is to follow
        (``ghost``: its volume, momentum and kinetic energy, its mean axial speed ``U``, its
        equivalent radius, the retraction speed of its rear ``r_n^(-1/2)``, its two ends and the
        speed of the stump's tip relative to it) and the totals of the removals since the gas cut
@@ -1244,8 +1255,10 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        with it (the driver's bookkeeping) and ``postcut_e<k>`` kept.
 
     The record (schema ``faraday-event/2``) is written to ``events/event_<k>.json`` whatever the
-    outcome (``made``, ``refused``, ``failed`` or ``interrupted``, with ``failed_at``), as
-    :func:`cut` writes its own; a refusal leaves the problem unchanged, a failure ends the run."""
+    outcome (``made``, ``refused``, ``unclosed``, ``failed`` or ``interrupted``, with
+    ``failed_at``), as :func:`cut` writes its own; a refusal leaves the problem unchanged, a failure
+    ends the run, and hard budgets that do not close (:class:`BudgetUnclosed`, a failure) end it at
+    a stop to resume from ``precut_e<k>``."""
     out = Path(outdir)
     record: dict = {"schema": EVENT_SCHEMA, "k": int(k), "kind": request.get("kind"),
                     "class": request.get("class")}
@@ -1265,6 +1278,7 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
                    CutFailed(f"the liquid cut failed after changing the problem ({message})"))
             extra["traceback"] = traceback.format_exception(e)
         outcome = ("refused" if isinstance(err, CutRefused) else
+                   "unclosed" if isinstance(err, BudgetUnclosed) else
                    "failed" if isinstance(err, Exception) else "interrupted")
         failed = _jsonable({**record, "outcome": outcome, "failed_at": stage,
                             "error": f"{type(err).__name__}: {err}", **extra})
@@ -1497,8 +1511,8 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
                           for x in ("phi_lhs", "phi_rhs", "phi_error", "phi_relative_error")}
     record["closures"] = closures
     if closures["hard"]:
-        raise CutFailed(f"the budget of the liquid cut does not close: {closures['hard']} beyond "
-                        f"their limits ({ {x: closures[x] for x in closures['hard']} })")
+        raise BudgetUnclosed(f"the budget of the liquid cut does not close: {closures['hard']} "
+                             f"beyond their limits ({ {x: closures[x] for x in closures['hard']} })")
     # the removed head as the run is to follow it: moving rigidly at its mean axial speed, its rear
     # (the cap's side) retracting towards it at the capillary speed of the end of a thread
     _, segs_after = _named_chains(pb)
