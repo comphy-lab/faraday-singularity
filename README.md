@@ -407,8 +407,8 @@ restart from the state before an event (`precut_e<k>`), from which they apply an
 far from the cut, is meshed never coarser than `post.bubble_bottom_size` rather than never
 coarser than at the landing (`kept`, the default), so that the bubbles of a study in `delta` are
 meshed alike there; within a few of the cut's tip sizes (`tip_size delta`) of the bottom's tip the
-cut's sizing of every end on the axis still applies, and the cut's own mesh keeps the landing's
-size there until the first rebuild after the cut.
+cut's sizing of every end on the axis still applies, and the cut's own mesh has the size the cut
+keeps there from the landing until the first rebuild after the cut.
 
 With the block, the stops of a state after the cut come in three ranks
 (`events.post_cut_events`). A state that is not valid stops the run: the chains not two, a spline

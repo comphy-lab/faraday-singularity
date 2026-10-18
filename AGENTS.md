@@ -219,7 +219,8 @@ add a second top-level `cases/` tree.
   bubble's bottom never coarser than `post.bubble_bottom_size` instead of the landing focus
   (`reconnect.feature_regions`), except within a few of the cut's tip sizes of the bottom's tip,
   where the cut's tip attractor at every axis end (`tip_size delta`) still applies, and on the
-  cut's own mesh, which keeps the landing size until the first rebuild after the cut. An unknown key of the `collapse` block is refused with a message.
+  cut's own mesh, which has the size the cut keeps there (`focus.kept`) until the first rebuild
+  after the cut. An unknown key of the `collapse` block is refused with a message.
   With the block, `reconnect.post_cut_stops` hands over to `events.post_cut_events` (without it the
   cut's stops are untouched): invalid states first (chains not two, crossed nodes or touching chains
   raise, spline contact, and on a fresh mesh a tracked liquid neck below `liquid.resolution h_loc`,
