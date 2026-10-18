@@ -462,6 +462,56 @@ def test_the_checks_of_the_transfer_find_each_departure_from_the_plan():
             assert len(got) == 1 and found in got[0], (change, got)
 
 
+CLOSED = {"removed": {"V": 1.0, "Pz": 2.0, "KE": 3.0, "area": 5.0, "cap_area": 1.0},
+          "poly": {"before": {"V_liquid": 100.0, "A": 50.0}, "after": {"V_liquid": 99.0, "A": 46.0}},
+          "box": {"before": {"Pz": 10.0, "KE": 100.0}, "after_transfer": {"Pz": 8.0, "KE": 97.0},
+                  "after_projection": {"Pz": 8.0, "KE": 97.0}}}
+
+
+def _budgets(changes=()):
+    """The budgets of :data:`CLOSED` with ``(part, stage, key, change)`` added."""
+    import copy
+
+    b = copy.deepcopy(CLOSED)
+    for part, stage, key, change in changes:
+        b[part][stage][key] += change
+    return b["removed"], b["poly"], b["box"]
+
+
+def test_the_closures_of_a_cut_flag_each_budget_and_fail_on_the_volume_and_the_momentum():
+    """The budgets of a cut close when the box loses the removed head's volume, momentum and
+    kinetic energy in the transfer, its area by the head's less the cap's, and the projection
+    changes neither its momentum nor its energy there. Each budget beyond its limit, a multiple of
+    the head's own, is flagged alone: the volume (F1) and the momentum the transfer loses (F2) or
+    the projection changes (F3) are hard; the energy the projection changes, gained or lost (F4),
+    the area (F5) and the energy the transfer loses (F6) are flags only."""
+    pytest.importorskip("pyoomph")
+    from faraday_singularity import surgery
+
+    cl = surgery._closures(*_budgets())
+    assert cl["flags"] == cl["hard"] == [] and all(cl[k] == 0.0 for k in surgery.BUDGET_LIMITS)
+    assert set(surgery.BUDGET_LIMITS) == {"F1", "F2", "F3", "F4", "F5", "F6"}
+    assert surgery.HARD_CLOSURES == ("F1", "F2", "F3")
+    for name, changes in (
+            ("F1", [("poly", "after", "V_liquid", -0.02)]),
+            ("F2", [("box", "after_transfer", "Pz", 0.2), ("box", "after_projection", "Pz", 0.2)]),
+            ("F3", [("box", "after_projection", "Pz", 0.2)]),
+            ("F4", [("box", "after_projection", "KE", 0.4)]),
+            ("F4", [("box", "after_projection", "KE", -0.4)]),
+            ("F5", [("poly", "after", "A", -0.1)]),
+            ("F6", [("box", "after_transfer", "KE", 0.2), ("box", "after_projection", "KE", 0.2)]),
+            ("F6", [("box", "after_transfer", "KE", -0.2),
+                    ("box", "after_projection", "KE", -0.2)])):
+        cl = surgery._closures(*_budgets(changes))
+        assert cl["flags"] == [name], (name, changes, cl)
+        assert cl["hard"] == ([name] if name in surgery.HARD_CLOSURES else []), name
+        assert cl["relative"][name] > surgery.BUDGET_LIMITS[name]
+        # within its limit the same change is no flag
+        half = [(p, s, k, 0.4 * surgery.BUDGET_LIMITS[name] / cl["relative"][name] * c)
+                for p, s, k, c in changes]
+        assert surgery._closures(*_budgets(half))["flags"] == [], name
+
+
 def test_the_neck_a_request_lands_is_the_tracked_one_and_its_head_is_cut():
     """The neck of a request of the events branch (``events.event_neck``): of a landed liquid neck
     its own fields, of a fold that reaches a head (``a-head``) the fields of that head's neck; each

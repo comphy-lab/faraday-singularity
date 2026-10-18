@@ -584,15 +584,16 @@ def test_a_transfer_not_as_predicted_fails_the_cut_after_its_remesh(jets):
 
 def test_the_budgets_of_each_cut_close(jets):
     """The liquid volume in the box falls by the removed head's (F1, polylines), the axial momentum
-    by the head's (F2, the grid; the head moves away from the stump), the projection changes the
-    momentum and the kinetic energy there by little (F3, F4: the flow is solenoidal), and the area
-    of the interface by the head's less the cap's (F5); the cutoff's identity is recorded."""
+    and the kinetic energy by the head's (F2 and F6, the grid; the head moves away from the stump),
+    the projection changes the momentum and the kinetic energy there by little (F3, F4: the flow is
+    solenoidal), and the area of the interface by the head's less the cap's (F5); the cutoff's
+    identity is recorded."""
     for rec, sign in ((jets["record1"], 1.0), (jets["record2"], -1.0)):
         cl, rem = rec["closures"], rec["removed"]
         assert cl["flags"] == [] and cl["hard"] == [] and cl["sigma"] == 0.0
         assert cl["relative"]["F1"] < 2e-3 and cl["relative"]["F2"] < 1e-2
-        assert cl["relative"]["F3"] < 2e-3 and abs(cl["relative"]["F4"]) < 1e-3
-        assert cl["relative"]["F5"] < 2e-3
+        assert cl["relative"]["F3"] < 2e-3 and cl["relative"]["F4"] < 1e-3
+        assert cl["relative"]["F5"] < 2e-3 and cl["relative"]["F6"] < 1e-2
         assert sign * rem["Pz"] > 0.0 and rem["KE"] > 0.0
         assert rem["V_grid"] == pytest.approx(rem["V"], rel=0.01)
         assert rem["U"] == pytest.approx(rem["Pz"] / rem["V"])

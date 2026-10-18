@@ -252,9 +252,11 @@ add a second top-level `cases/` tree.
   `surgery.CAP_FILL_FOUND` of its samples along the cap), the projection, and the budgets within the
   box (`surgery.box_polyline_budgets`, `box_integrals`, the cutoff's identity in
   `project(..., box=)`), the volume and the momentum of the removal hard checks
-  (`surgery.HARD_CLOSURES`); its record is `events/event_<k>.json`, its dumps
-  `precut_e<k>` and `postcut_e<k>` (`testCases/test_liquid_cut_fem.py`, a synthetic state with a
-  jet on each chain). The driver has no handler yet, so every event is a resumable stop
+  (`surgery.HARD_CLOSURES`), its kinetic energy (the transfer's against the head's, the
+  projection's either way) and the area flags, the cutoff's identity recorded only; its record is
+  `events/event_<k>.json`, its dumps `precut_e<k>` and `postcut_e<k>`
+  (`testCases/test_liquid_cut_fem.py`, a synthetic state with a jet on each chain). The driver has
+  no handler yet, so every event is a resumable stop
   (`event-unhandled`, event number `k`) with the dump of the state before it
   (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`) besides the end
   state; a continuation from it is a post-cut restart from which the keys of every class apply anew

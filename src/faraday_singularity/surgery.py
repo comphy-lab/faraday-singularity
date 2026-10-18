@@ -107,7 +107,9 @@ about the neck: the liquid volume and the area of the interface from the polylin
 the transfer and the fill, and after the projection (:func:`project` with ``box``, which also reads
 the identity of the box's cutoff in its weak form). The removed volume and momentum must close
 against the box's change, and the projection may change the momentum there by little
-(``HARD_CLOSURES``); the energy, the area and the identity are recorded against their limits.
+(``HARD_CLOSURES``); the kinetic energy (the transfer's against the head's, the projection's either
+way) and the area are flagged beyond theirs, and the identity is recorded without a limit until the
+noise of the box is calibrated.
 """
 
 from __future__ import annotations
@@ -1027,10 +1029,11 @@ CAP_FILL_DENSITY = 4  # samples of the old bulk velocity per node of the new mes
 CAP_FILL_FOUND = 0.9
 CAP_NODE_TOL = 0.05  # a new interface node within this times r_n of the planned cap lies on it
 UNLOCATED_SLACK = 2  # the transfer may leave this many interface nodes more or fewer than predicted
-# the budgets of a liquid cut within its box (closures F1-F5; sigma, the box noise of an ordinary
+# the budgets of a liquid cut within its box (closures F1-F6; sigma, the box noise of an ordinary
 # rebuild, not yet calibrated, counts zero): the coefficient of each limit, and the closures of the
-# volume and the axial momentum of the removal, which are hard checks
-BUDGET_LIMITS = {"F1": 1e-2, "F2": 0.05, "F3": 0.05, "F4": 0.1, "F5": 1e-2}
+# volume and the axial momentum of the removal, which are hard checks (the kinetic energy, the area
+# and the identity of the cutoff are recorded and flagged)
+BUDGET_LIMITS = {"F1": 1e-2, "F2": 0.05, "F3": 0.05, "F4": 0.1, "F5": 1e-2, "F6": 0.05}
 HARD_CLOSURES = ("F1", "F2", "F3")
 
 
@@ -1160,29 +1163,29 @@ def transfer_problems(transfer: dict) -> list[str]:
 def _closures(removed: dict, poly: dict, box: dict) -> dict:
     """The budgets of a liquid cut within its box (``poly``: the polyline volumes and areas before
     and after the transfer; ``box``: the grid's momentum and kinetic energy before it, after the
-    transfer and the cap fill, and after the projection), each against its limit
-    (``BUDGET_LIMITS``, the box noise counting zero until calibrated): F1 the liquid volume lost
+    transfer and the cap fill, and after the projection), each against its limit, ``BUDGET_LIMITS``
+    times the head's own (the box noise counting zero until calibrated): F1 the liquid volume lost
     against the removed head's, F2 the axial momentum the transfer lost against the head's, F3 the
-    momentum the projection changed, F4 the kinetic energy it took, F5 the area of the interface
-    against the head's less the cap's. ``flags`` lists the closures beyond their limits; those of
+    momentum the projection changed, F4 the kinetic energy it changed (either way), F5 the area of
+    the interface against the head's less the cap's, F6 the kinetic energy the transfer lost
+    against the head's. ``flags`` lists the closures beyond their limits; those of
     ``HARD_CLOSURES`` among them (``hard``) fail the cut, after its remesh."""
     V, P, KE = removed["V"], removed["Pz"], removed["KE"]
     dA = removed["area"] - removed["cap_area"]
+    before, moved, after = box["before"], box["after_transfer"], box["after_projection"]
     values = {
         "F1": abs(poly["after"]["V_liquid"] - poly["before"]["V_liquid"] + V),
-        "F2": abs(box["after_transfer"]["Pz"] - box["before"]["Pz"] + P),
-        "F3": abs(box["after_projection"]["Pz"] - box["after_transfer"]["Pz"]),
-        "F4": box["after_transfer"]["KE"] - box["after_projection"]["KE"],
-        "F5": abs(poly["after"]["A"] - poly["before"]["A"] + dA)}
-    limits = {"F1": BUDGET_LIMITS["F1"] * V, "F2": BUDGET_LIMITS["F2"] * abs(P),
-              "F3": BUDGET_LIMITS["F3"] * abs(P), "F4": BUDGET_LIMITS["F4"] * KE,
-              "F5": BUDGET_LIMITS["F5"] * abs(dA)}
+        "F2": abs(moved["Pz"] - before["Pz"] + P),
+        "F3": abs(after["Pz"] - moved["Pz"]),
+        "F4": abs(after["KE"] - moved["KE"]),
+        "F5": abs(poly["after"]["A"] - poly["before"]["A"] + dA),
+        "F6": abs(moved["KE"] - before["KE"] + KE)}
+    scale = {"F1": V, "F2": abs(P), "F3": abs(P), "F4": KE, "F5": abs(dA), "F6": KE}
+    limits = {k: BUDGET_LIMITS[k] * scale[k] for k in values}
     flags = [k for k in values if not values[k] <= limits[k]]
-    return {**values, "limits": limits, "relative": {
-        "F1": values["F1"] / V if V else math.nan, "F2": values["F2"] / abs(P) if P else math.nan,
-        "F3": values["F3"] / abs(P) if P else math.nan, "F4": values["F4"] / KE if KE else math.nan,
-        "F5": values["F5"] / abs(dA) if dA else math.nan},
-        "flags": flags, "hard": [k for k in flags if k in HARD_CLOSURES], "sigma": 0.0}
+    return {**values, "limits": limits,
+            "relative": {k: values[k] / scale[k] if scale[k] else math.nan for k in values},
+            "flags": flags, "hard": [k for k in flags if k in HARD_CLOSURES], "sigma": 0.0}
 
 
 def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, request: dict, *,
