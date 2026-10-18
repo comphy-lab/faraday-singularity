@@ -526,8 +526,11 @@ after the cut with the liquid of the mesh (its volume, axial momentum and kineti
 (each head's at its cut, whose volume and momentum the cut checks against the change within its
 box) and their sums. Under `post.keep_event_dumps` `first<N>-last<M>` the dumps of the events made
 that the policy no longer keeps are deleted as the events come (`dumps.dropped` in their records).
-The run stops resumably, with the dump of the state before the event, which is always kept, at the
-event after `max_events` (`max-events`), at one that the cascade test of its tip judges to shrink
+With `post.prune_gmsh` the run deletes, after every dump and every event, the meshes gmsh wrote for
+it that no dump in its directory refers to and that the problem no longer holds, so that every dump
+kept restarts with its mesh (nothing is deleted where a dump cannot be read). The run stops
+resumably, with the dump of the state before the event, which is always kept, at the event after
+`max_events` (`max-events`), at one that the cascade test of its tip judges to shrink
 (`event-cascade`: an interval since the last at the tip below `cascade_min_interval delta^2`, or
 `cascade_count` successive ratios of the intervals and of the heads' volumes, each below
 `cascade_ratio`; a cascade that grows, or stays stationary, is recorded), at a cut refused before it

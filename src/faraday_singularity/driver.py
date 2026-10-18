@@ -275,7 +275,9 @@ reset_after_event`), whose stops it checks again, as those of any mesh freshly b
 other event, the event after ``max_events``, one the cascade test of its tip judges to shrink
 (``events.CascadeMonitor``), a cut refused and one whose hard budgets do not close it stops
 resumably, with the dump of the state before the event (``precut_e<k>``). ``events.txt`` holds a
-row per event made.
+row per event made. The dumps of the events are kept as ``post.keep_event_dumps`` says, and with
+``post.prune_gmsh`` the meshes no dump refers to are deleted after every dump and every event
+(:meth:`CollapseDriver._prune_meshes`).
 
 Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore` restores
 (``surgery.restore_cut``), only into a driver whose reconnect settings are those of the cut but for
@@ -286,6 +288,7 @@ continues in the post-cut mode.
 from __future__ import annotations
 
 import contextlib
+import glob
 import json
 import math
 import time
@@ -688,6 +691,7 @@ class CollapseDriver:
         # the making hands its record (_meet_event, _on_event_made)
         self._event_rows = self._drops = self._budget = None
         self._dumps_dropped = 0  # the dumps of events the policy deleted (post.keep_event_dumps)
+        self._meshes_pruned = 0  # the files of meshes no dump refers to deleted (post.prune_gmsh)
         self._event_before: tuple | None = None
         self._event_after: dict | None = None
         if events is not None:
@@ -1825,6 +1829,65 @@ class CollapseDriver:
             old = st.states.pop(0)
             for f in (old, old.with_suffix(".json")):
                 f.unlink(missing_ok=True)
+        self._prune_meshes()  # with the events block only
+
+    def _live_mesh_files(self) -> set:
+        """The mesh files the problem's mesh templates were built from (pyoomph's ``_meshfile``,
+        which the next dump refers to), resolved."""
+        out = set()
+        templates = list(getattr(self.pb, "_meshtemplate_list", None) or [])
+        active = getattr(self.pb, "active_mesh_template", None)
+        if active is not None:
+            templates.append(active())
+        for t in templates:
+            get = getattr(t, "_get_template", None)
+            for x in (t, get() if get is not None else None):
+                f = getattr(x, "_meshfile", None)
+                if f:
+                    out.add(Path(f).resolve())
+        return out
+
+    def _prune_meshes(self) -> int:
+        """After a cut with the events block and ``post.prune_gmsh``: delete the meshes gmsh wrote
+        for the run (``_gmsh`` of the problem's output directory, each ``.msh`` with the files of
+        its stem) that no dump refers to (a dump refers to the ``.msh`` its mesh was built from,
+        pyoomph's ``get_state_file_mesh_files``: every dump in the output directory and in its
+        subdirectories, and in the driver's ``states``) and that the problem does not hold
+        (:meth:`_live_mesh_files`), so that a restart from any dump kept still finds its mesh.
+        Nothing is deleted where the mesh the problem holds or any dump cannot be read. Returns the
+        files deleted."""
+        if self.events is None or not self.events.post.prune_gmsh or self._cut_record() is None:
+            return 0
+        where = getattr(self.pb, "get_output_directory", None)
+        if where is None:  # no finite-element problem
+            return 0
+        root = Path(where())
+        gmsh = root / "_gmsh"
+        live = self._live_mesh_files()
+        if not gmsh.is_dir() or not live:
+            return 0
+        from pyoomph.output.states import get_state_file_mesh_files
+
+        kept = set(live)
+        dumps = set(root.glob("*.dump")) | set(root.glob("*/*.dump")) | set(
+            (self.outdir / "states").glob("*.dump"))
+        for dump in dumps:
+            try:
+                kept.update(Path(f).resolve() for f in get_state_file_mesh_files(str(dump)))
+            except (OSError, RuntimeError, ValueError):
+                return 0
+        removed = 0
+        for msh in sorted(gmsh.glob("*.msh")):
+            if msh.resolve() in kept:
+                continue
+            for f in sorted(gmsh.glob(glob.escape(msh.stem) + ".*")):
+                if f != msh:
+                    f.unlink(missing_ok=True)
+                    removed += 1
+            msh.unlink(missing_ok=True)  # last: a stem with its .msh is pruned again if need be
+            removed += 1
+        self._meshes_pruned += removed
+        return removed
 
     def restore(self, meta: dict):
         """Resume the driver bookkeeping from a state dump's metadata."""
@@ -2064,6 +2127,7 @@ class CollapseDriver:
         if isinstance(made.get("ghost"), dict):
             self._write_drop_row(made, "free")
         self._drop_event_dumps()
+        self._prune_meshes()
         self._commit_post_cut(m)
         return m, None
 
@@ -2279,7 +2343,7 @@ class CollapseDriver:
                 "ghost_recontacts": {kind: sum(
                     1 for e in made for x in (e.get("ghost") or {}).get("recontacts") or ()
                     if x.get("kind") == kind) for kind in ("rear", "front")},
-                "dumps_dropped": self._dumps_dropped,
+                "dumps_dropped": self._dumps_dropped, "meshes_pruned": self._meshes_pruned,
                 "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
                                                          "handler")}
                          if stop.get("reason") in EVENT_STOPS else None)}

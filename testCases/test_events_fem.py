@@ -9,6 +9,8 @@
 * with the block the same run goes through the stops of the events branch, and oomph-lib's
   smallest step is lowered after the cut (``post.minimum_dt``), but not before it; a restart from
   its postcut dump checks the loaded mesh as a fresh one and takes its steps;
+* with the block the meshes no dump refers to are pruned (``post.prune_gmsh``), the rows of the
+  run unchanged, and the dumps kept restart with their meshes in new processes;
 * oomph-lib's smallest step (``DTSF_minimum_dt``) on a one-unknown problem: at its default of
   1e-12 an accepted step of 1e-13 ends the solve (its next candidate, four times the step, lies
   below it), and so does a step of 1e-12 that fails, which is not halved; lowered, the first is
@@ -217,6 +219,61 @@ def test_with_the_block_the_run_after_a_cut_lowers_oomph_libs_smallest_step(tmp_
     result = json.loads((again / "result.json").read_text())
     assert result["stop"]["reason"] == "max-steps" and result["steps"] == 3
     assert result["minimum_dt"] == 1e-16
+
+
+def _mesh_files(run: Path) -> tuple[set, set]:
+    """The meshes in a run's ``_gmsh`` and those its dumps refer to (pyoomph's
+    ``get_state_file_mesh_files``), resolved."""
+    from pyoomph.output.states import get_state_file_mesh_files
+
+    meshes = {p.resolve() for p in (run / "_gmsh").glob("*.msh")}
+    referred = set()
+    for dump in (run / "states").glob("*.dump"):
+        referred |= {Path(f).resolve() for f in get_state_file_mesh_files(str(dump))}
+    return meshes, referred
+
+
+def test_with_the_block_the_meshes_no_dump_refers_to_are_pruned_and_every_dump_restarts(tmp_path):
+    """With the block (``post.prune_gmsh``, the default) the run after the cut of the synthetic
+    cavity, rebuilt at every step and keeping its two latest rotating dumps, deletes the meshes of
+    the dumps rotated out: every mesh left is one a dump refers to (or the one the problem was
+    built from at the start), and fewer are left than the run built; the rows of the run are those
+    of the same run without pruning, which keeps every mesh. In a new process the state the run
+    ended on and the state after the cut, each with its mesh, restart and take their steps."""
+    collapse = dict(COLLAPSE, state_keep=2)
+    spec = {"physics": fem.PHYSICS, "mesh": fem.MESH, "cut": CUT, "collapse": collapse,
+            "events": {}}
+    runs = {name: _run(ROOT / "src", tmp_path / name, dict(spec, events=block))
+            for name, block in (("pruned", {}), ("kept", {"post": {"prune_gmsh": False}}))}
+    results = {name: json.loads((run / "result.json").read_text()) for name, run in runs.items()}
+    for result in results.values():
+        assert result["stop"]["reason"] == "max-steps" and result["steps"] == 6
+        assert result["remesh_count"] >= 3  # the cut's and at least two rebuilds
+    assert results["kept"]["events"]["meshes_pruned"] == 0
+    assert results["pruned"]["events"]["meshes_pruned"] > 0
+    meshes, referred = _mesh_files(runs["pruned"])
+    first = (runs["pruned"] / "_gmsh" / "FaradayCylinderMesh.msh").resolve()
+    assert meshes - {first} <= referred and referred <= meshes
+    all_meshes, _ = _mesh_files(runs["kept"])
+    assert len(meshes) < len(all_meshes)
+    assert not [p for p in (runs["pruned"] / "_gmsh").iterdir()
+                if p.with_suffix(".msh").resolve() not in meshes]  # no sidecar left alone
+    for name in ("chains.txt", "budget.txt"):
+        assert (runs["pruned"] / name).read_text() == (runs["kept"] / name).read_text(), name
+    a, b = ((runs[x] / "collapse.txt").read_text().splitlines() for x in ("pruned", "kept"))
+    wall = a[0][2:].split("\t").index("wall")
+    assert [r.split("\t")[:wall] for r in a] == [r.split("\t")[:wall] for r in b]
+    # every dump kept restarts in a new process: the end state and the state after the cut
+    end = Path(results["pruned"]["stop"]["end_state"])
+    (postcut,) = (runs["pruned"] / "states").glob("postcut_*.dump")
+    for name, state in (("end", end if end.is_absolute() else runs["pruned"].parent / end),
+                        ("postcut", postcut)):
+        more = dict(collapse, max_steps=json.loads(state.with_suffix(".json").read_text())["step"]
+                    + 2)
+        again = _run(ROOT / "src", tmp_path / f"again-{name}",
+                     dict(spec, collapse=more, restart=str(state.resolve())))
+        result = json.loads((again / "result.json").read_text())
+        assert result["stop"]["reason"] == "max-steps" and result["steps"] == more["max_steps"]
 
 
 ODE_RUN = """
