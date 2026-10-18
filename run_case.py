@@ -84,7 +84,10 @@ block (``CUT_EVENTS_DERIVED_KEYS``), and a post-cut continuation, which may add 
 refused before any output. A state written with the block continues only under a case with it, and
 the keys of a class of events of which the state has made one must be those it recorded, unless the
 state is the one before an event (``precut_e<k>``), from which they apply anew
-(``_check_events``). ``parameters.json`` and the manifest record the block (``reconnect_events``).
+(``_check_events``). ``parameters.json`` and the manifest record the block (``reconnect_events``),
+and ``run_status.json`` the events the run made and the end of its window (``events``,
+``window_end``, from the driver's result), or, for a run that failed in the cut of a liquid neck it
+made, that event (``event``).
 An unknown key of the ``collapse`` block is refused with a message before any output, as is an
 invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
 or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
@@ -133,8 +136,9 @@ if "OMPI_MCA_btl" not in os.environ and (_btl := _shared_memory_btl()) is not No
 
 from faraday_singularity.driver import CollapseDriver, CollapseSettings, check_landing  # noqa: E402
 from faraday_singularity.cases import validate_case  # noqa: E402
-from faraday_singularity.events import (EVENTS_BLOCK, PRECUT_EVENT, EventSettings,  # noqa: E402
-                                        events_done, minimum_dt_after_cut, split_events_block)
+from faraday_singularity.events import (EVENT_SCHEMA, EVENTS_BLOCK, PRECUT_EVENT,  # noqa: E402
+                                        EventSettings, events_done, minimum_dt_after_cut,
+                                        split_events_block)
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import create_run_manifest, pyoomph_revision  # noqa: E402
@@ -485,6 +489,21 @@ def cut_failure_status(error) -> dict:
             "diagnostics": "cut_diagnostics.json", "precut": precut}
 
 
+def event_failure_status(error) -> dict | None:
+    """The ``event`` block of ``run_status.json`` for a run that failed in the cut of a liquid neck
+    the driver made within it (``surgery.CutFailed`` from ``surgery.liquid_cut``, whose record has
+    the schema of an event, ``events.EVENT_SCHEMA``): the event's number, kind, class, outcome and
+    stage reached, its record and the ``precut_e<k>`` dump; None for any other failure."""
+    record = getattr(error, "record", None)
+    if not isinstance(record, dict) or record.get("schema") != EVENT_SCHEMA:
+        return None
+    k = record.get("k")
+    return {"k": k, "kind": record.get("kind"), "class": record.get("class"),
+            "outcome": record.get("outcome"), "failed_at": record.get("failed_at"),
+            "record": f"events/event_{int(k):03d}.json" if isinstance(k, int) else None,
+            "precut": getattr(error, "precut", None)}
+
+
 def write_json(path: Path, data: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
@@ -755,6 +774,9 @@ def main() -> int:
                     if cut_error is None:
                         problem.start_diagnostics(args.outdir / "diagnostics.txt")
                         status["collapse"] = driver.run(tol)
+                        if events is not None:  # the events after the cut, and the window
+                            for key in ("events", "window_end"):
+                                status[key] = status["collapse"].get(key)
                 finally:
                     driver.close()
         status["state"] = "completed"
@@ -766,6 +788,9 @@ def main() -> int:
         counts = getattr(driver, "distortion_counts", None)
         if counts is not None:  # the rebuilds element distortion asked for before the failure
             status.update(counts())
+        event = event_failure_status(exc)
+        if event is not None:  # a liquid cut within the run failed
+            status["event"] = event
         write_json(args.outdir / "run_status.json", status)
         raise
     finally:

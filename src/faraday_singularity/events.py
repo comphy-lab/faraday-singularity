@@ -437,6 +437,7 @@ def split_events_block(collapse: dict) -> tuple[dict, dict | None]:
 # handler, and stops on one that has none yet, resumably (EVENT_UNHANDLED)
 EVENT_REQUEST = "event-request"
 EVENT_UNHANDLED = "event-unhandled"
+EVENT_SCHEMA = "faraday-event/2"  # the schema of an event's record (events/event_<k>.json)
 # the handler of each class of event (None: none, an unhandled event or one to be designed when it
 # occurs), by class and not by kind: a liquid neck without a single head, with one too large, or
 # met with liquid events off (L-unhandled) has none, whatever found it

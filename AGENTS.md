@@ -299,12 +299,14 @@ add a second top-level `cases/` tree.
   other failure of a liquid cut fails the run. A continuation from such a dump is a post-cut restart
   from which the keys of every class apply anew (`events.EventSettings.refused_changes`), the events
   before it staying as made. The run's result with the block has `events` (made, by kind and tip,
-  the last, the totals removed, the cascade's verdicts, the ghosts' recontacts, the event stopped
-  on) and `window_end` (`bubble-vanishing`, also an event `window-end`). The tests of the branch on
-  the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run directories
-  (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by default.
-  After the cut the driver reads its limits through accessors that return the collapse's own value
-  before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`, `_fold_stop`,
+  the last, the totals removed, the cascade's verdicts, the ghosts' recontacts, the dumps and meshes
+  deleted, the event stopped on) and `window_end` (`bubble-vanishing`, also an event `window-end`),
+  which `run_status.json` also has at its top level; a run failed in a liquid cut has `event`
+  there (`run_case.event_failure_status`, the record's schema `events.EVENT_SCHEMA`). The tests of
+  the branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run
+  directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by
+  default. After the cut the driver reads its limits through accessors that return the collapse's
+  own value before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`, `_fold_stop`,
   `_neck_limit`): `post.h_floor` (focus floor, feature regions, guard, kink regions, the open
   chain's neck limit), `post.rise_tol`, `post.dt_min`, `gap.kappa_g delta` (also the groove gaps of
   `chains.txt`), `post.neck_floor` and `post.neck_elements_per_scale` (the neck regions of

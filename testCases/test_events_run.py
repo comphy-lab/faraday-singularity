@@ -582,3 +582,92 @@ def test_the_dumps_of_the_events_are_kept_as_the_policy_says(tmp_path, monkeypat
     drv, out, _ = _run(tmp_path / "all", monkeypatch, RegrowingHead(period=3e-6), max_steps=20)
     assert len(list((tmp_path / "all" / "states").glob("p*cut_e*.dump"))) == 2 * len(drv.pb.events)
     assert out["events"]["dumps_dropped"] == 0
+
+
+# --- the runner: run_status.json --------------------------------------------------------------
+
+RUNNER = """
+import json, shutil, sys, types
+sys.path.insert(0, sys.argv[1])
+RESULT = json.loads(sys.argv[5])
+import run_case
+import pyoomph.output.states as states
+
+states.copy_state_file = lambda src, dst: shutil.copyfile(src, dst)  # a stand-in dump
+
+
+class Problem:
+    remesh_count = 0
+    def __init__(self, nd, **kw): pass
+    def set_output_directory(self, path): pass
+    def __enter__(self): return self
+    def __exit__(self, *exc): return False
+    def initialise(self): pass
+    def load_state(self, path): pass
+    def start_diagnostics(self, path): pass
+    def close_diagnostics(self): pass
+
+
+class Failed(RuntimeError):
+    def __init__(self, message, precut=None, record=None):
+        super().__init__(message)
+        self.precut, self.record = precut, record
+
+
+class Driver:
+    def __init__(self, problem, settings, outdir, **kw):
+        assert "events" in kw and "reconnect" in kw
+    def restore(self, meta): pass
+    def run(self, tol):
+        if "fail" in RESULT:
+            raise Failed("the liquid cut failed", "states/precut_e003.dump", RESULT["fail"])
+        return RESULT
+    def close(self): pass
+
+
+sys.modules["faraday_singularity.problem"] = types.SimpleNamespace(FaradayProblem=Problem)
+run_case.CollapseDriver = Driver
+sys.argv = ["run_case.py", sys.argv[2], "--outdir", sys.argv[3], "--restart-from", sys.argv[4]]
+run_case.main()
+"""
+
+
+def test_the_runner_records_the_events_the_window_and_a_failed_liquid_cut(tmp_path):
+    """A post-cut continuation under a case with the block: ``run_status.json`` holds the events
+    the run made and the end of its window from the driver's result (``events``, ``window_end``),
+    and, for a run that failed in the cut of a liquid neck it made, that event (``event``: its
+    number, kind, class, outcome, stage, record and the dump of the state before it)."""
+    import subprocess
+
+    from test_events_plumbing import _cut_case
+    from test_runner import ROOT as RUNNER_ROOT
+    from test_runner_manifest import RECON, _parent_run, _write_meta
+
+    case = _cut_case(reconnect_events=LIQUID)
+    state, _ = _parent_run(tmp_path, case=case)
+    _write_meta(state, cut={"delta": RECON.delta, "t_cut": 0.5 - 0.5e-4,
+                            "settings": RECON.to_dict()},
+                events_settings=ev.EventSettings.from_dict(LIQUID).to_dict(), events=[], legs=[])
+    case_path = tmp_path / "parent-case.json"
+    events = {"made": 2, "by_kind": {"liquid-neck": 2}}
+    window = {"reason": "bubble-vanishing", "tau": 1e-5, "tau_p": 2e-5}
+    done = {"stop": {"reason": "bubble-vanishing", "window_end": True}, "steps": 7,
+            "events": events, "window_end": window}
+    record = {"schema": ev.EVENT_SCHEMA, "k": 3, "kind": "a-head", "class": "A-head",
+              "outcome": "failed", "failed_at": "mesh-check"}
+    statuses = {}
+    for name, result in (("done", done), ("failed", {"fail": record})):
+        out = tmp_path / name
+        proc = subprocess.run([sys.executable, "-c", RUNNER, str(RUNNER_ROOT), str(case_path),
+                               str(out), str(state), json.dumps(result)], capture_output=True,
+                              text=True, timeout=120, check=False)
+        statuses[name] = json.loads((out / "run_status.json").read_text())
+        assert (proc.returncode == 0) == (name == "done"), proc.stderr[-3000:]
+    status = statuses["done"]
+    assert status["state"] == "completed" and status["events"] == events
+    assert status["window_end"] == window and "event" not in status
+    status = statuses["failed"]
+    assert status["state"] == "failed" and "the liquid cut failed" in status["detail"]
+    assert status["event"] == {"k": 3, "kind": "a-head", "class": "A-head", "outcome": "failed",
+                               "failed_at": "mesh-check", "record": "events/event_003.json",
+                               "precut": "states/precut_e003.dump"}

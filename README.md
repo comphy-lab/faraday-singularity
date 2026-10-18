@@ -537,10 +537,12 @@ resumably, with the dump of the state before the event, which is always kept, at
 changed anything (`liquid-cut-refused`) and at one whose hard budgets do not close
 (`event-unclosed`), after which the problem holds a cut that is not accepted: the run then ends on
 the state before the event (`end_state`) and dumps nothing more. Any other failure of a cut fails
-the run. With the block the result in `run_status.json` has `events` (the events made, by kind and
-by tip, the last, the totals removed, the cascade's verdicts, the ghosts' recontacts and the event
-the run stopped on) and `window_end` (the end of the window the run stopped at, the bubble
-emptying).
+the run. With the block `run_status.json` has, in its `collapse` record and at its top level,
+`events` (the events made, by kind and by tip, the last, the totals removed, the cascade's
+verdicts, the ghosts' recontacts, the dumps and meshes deleted and the event the run stopped on)
+and `window_end` (the end of the window the run stopped at, the bubble emptying); a run that failed
+in a liquid cut records that event (`event`: its number, kind, class, outcome, the stage it failed
+at, its record and the dump of the state before it).
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus

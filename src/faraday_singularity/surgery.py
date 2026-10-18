@@ -133,6 +133,7 @@ from pyoomph.equations.topological_changes import AxisymmetricReconnection
 from pyoomph.expressions import div, evaluate_in_past, testfunction, var, weak
 from pyoomph.generic.codegen import Equations
 
+from .events import EVENT_SCHEMA  # the schema of an event's record, events/event_<k>.json
 from .mesh import CutSizing, Focus, FocusRegion
 from .reconnect import (Chain, ReconnectSettings, chain_volumes, cut_geometry, gas_volume_in_box,
                         in_cut_radii, kept_region, liquid_axis_spans, neck_radius, orient_chain,
@@ -1028,7 +1029,6 @@ def restore_cut(problem, record: dict) -> None:
 
 # --- the cut of a liquid neck after the gas cut ---------------------------------------------------
 
-EVENT_SCHEMA = "faraday-event/2"
 # the kinds of event a liquid cut is made for, and the class of each (events.post_cut_events)
 LIQUID_CUT_CLASSES = {"liquid-neck": "L", "a-head": "A-head"}
 # the stages of a liquid cut before it changes the problem: any failure up to them is a refusal
