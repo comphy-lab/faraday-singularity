@@ -961,8 +961,9 @@ def truncate_chain(named, neck: dict, *, eta: float, elements_per_scale: float,
     checks["backtrack_limit"] = CAP_BACKTRACK * r_n
     if not checks["backtrack"] <= checks["backtrack_limit"]:
         failed.append("backtrack")
-    # (iii) no knife-edge angle about the splice
-    around = np.vstack([body[CAP_ANGLE_NODES:0:-1], body[:1], cap[:CAP_ANGLE_NODES]])
+    # (iii) no knife-edge angle about the splice: the inner angles of the polyline from one node
+    # beyond CAP_ANGLE_NODES before the splice to one beyond as many after it
+    around = np.vstack([body[CAP_ANGLE_NODES + 1:0:-1], body[:1], cap[:CAP_ANGLE_NODES + 1]])
     angles = interior_angles(around)
     checks.update(min_angle=float(angles.min()) if len(angles) else math.nan,
                   min_angle_limit=min_angle)

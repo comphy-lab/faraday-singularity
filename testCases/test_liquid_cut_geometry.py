@@ -226,6 +226,32 @@ def test_a_cap_on_a_neck_whose_nodes_lie_far_apart_is_refused():
     assert err.value.checks["points"] < ev.CAP_MIN_POINTS
 
 
+def test_the_angles_about_the_splice_are_read_over_four_nodes_on_either_side():
+    """A radial spike (an inner angle of about 19 degrees) at the fourth node from the neck on the
+    side kept makes a knife-edge angle within the window of check (iii), CAP_ANGLE_NODES nodes on
+    either side of the splice: the cap is refused; at the fifth node, outside it, the cut is made."""
+    bubble, _ = stops.bubble_with_head(1e-3, r_n=0.09)
+    named = (("bubble", bubble), ("open", stops.cavity()))
+    i = _neck(named, "bubble")["index"]
+    assert ev.CAP_ANGLE_NODES == 4
+    for k, refused in ((ev.CAP_ANGLE_NODES, True), (ev.CAP_ANGLE_NODES + 1, False)):
+        P = bubble.points.copy()
+        j = i - k  # the head of the bubble's top lies after its neck: the side kept runs back
+        P[j, 0] += 3.0 * np.hypot(*(P[j + 1] - P[j - 1]))
+        assert rc.interior_angles(P[j - 1:j + 2])[0] < 30.0
+        spiked = (("bubble", rc.Chain(P, bubble.end_types)), ("open", stops.cavity()))
+        neck = _neck(spiked, "bubble")
+        assert neck["index"] == i
+        if refused:
+            with pytest.raises(ev.CapRefused) as err:
+                ev.truncate_chain(spiked, neck, **CUT)
+            assert err.value.checks["failed"] == ["angle"]
+            assert err.value.checks["min_angle"] < 30.0
+        else:
+            cut = ev.truncate_chain(spiked, neck, **CUT)
+            assert cut.checks["failed"] == [] and cut.checks["min_angle"] >= 30.0
+
+
 def test_the_cut_of_a_neck_is_the_same_in_units_of_delta_at_every_delta():
     """The jet, its neck and its node spacing scaled with delta by 2^-k (k = 0..7) inside a bubble
     and a cavity of fixed size: the same cap and removed region in units of delta."""
