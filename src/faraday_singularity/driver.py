@@ -1834,9 +1834,8 @@ class CollapseDriver:
         the hash of the block and the keys in which it differs from the block the state was written
         with (``changed``; for a state written without the block, ``added``, from the block's
         defaults), oomph-lib's smallest step it sets (``minimum_dt``, :meth:`_lower_minimum_dt`),
-        and, from the state
-        before an event, the event from which the keys of its class apply anew
-        (``event_keys_changed_at``)."""
+        and, from the state before an event, that event (``from_event_state``) and, where the keys
+        of its class change, the event from which they apply anew (``event_keys_changed_at``)."""
         st = self.state
         leg = {"leg": len(st.legs), "start": start, "step": st.step, "time": m["time"],
                **self._taus(m["time"]), **self.leg_info, "settings_sha256": self.events.sha256(),
