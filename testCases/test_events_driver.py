@@ -229,6 +229,15 @@ def test_the_limits_after_the_cut_are_the_blocks_and_before_it_the_collapses(tmp
     assert drv._fold_stop() == pytest.approx(0.05 * 1e-3) and drv._neck_limit() == 1e-4
     regions = {g["name"]: g for g in drv.measure()["regions"]}
     assert all(g["floor"] in (1e-7, recon.focus_size * 1e-3) for g in regions.values())
+    # the leg records them, resolved, and in units of delta (lengths) and delta^2 (times)
+    limits = drv.state.legs[0]["limits"]
+    assert limits == {"delta": 1e-3, "h_floor": 1e-7, "neck_floor": 2e-7, "rise_tol": 1e-8,
+                      "fold_stop": 0.05 * 1e-3, "neck_limit": 1e-4, "dt_min": 1e-5,
+                      "minimum_dt": 1e-12, "in_delta": limits["in_delta"]}  # 1e-8 capped
+    assert limits["in_delta"] == {"h_floor": 1e-7 / 1e-3, "neck_floor": 2e-7 / 1e-3,
+                                  "rise_tol": 1e-8 / 1e-3, "fold_stop": 0.05 * 1e-3 / 1e-3,
+                                  "neck_limit": 1e-4 / 1e-3, "dt_min": 1e-5 / 1e-3**2,
+                                  "minimum_dt": 1e-12 / 1e-3**2}
     out = drv.run(1e-9)
     drv.close()
     assert out["stop"] == {**out["stop"], "reason": "dt-floor"} and out["steps"] == 0

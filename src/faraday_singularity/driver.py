@@ -926,6 +926,25 @@ class CollapseDriver:
         self.pb.DTSF_minimum_dt = value
         return value
 
+    def _leg_limits(self) -> dict:
+        """After a cut with the block: the limits and floors a leg runs with, each the block's
+        ``post`` key or the collapse's own (the floor of the necks' regions the cut's focus size
+        without ``post.neck_floor``), and ``in_delta``, the lengths in units of the cut radius and
+        the times in units of its square: a study in ``delta`` then shows which of them it scaled
+        with ``delta``, a key no case set staying at its absolute value."""
+        delta = self.reconnect.delta
+        cut = self._cut_record()
+        post = self.events.post
+        neck_floor = (self.reconnect.focus_size * float(cut.get("rmin") or cut["delta"])
+                      if post.neck_floor is None else post.neck_floor)
+        lengths = {"h_floor": self._h_floor(), "neck_floor": neck_floor,
+                   "rise_tol": self._rise_tol(), "fold_stop": self._fold_stop(),
+                   "neck_limit": self._neck_limit()}
+        times = {"dt_min": self._dt_min(), "minimum_dt": self._minimum_dt()}
+        return {"delta": delta, **lengths, **times,
+                "in_delta": {**{k: v / delta for k, v in lengths.items()},
+                             **{k: v / delta**2 for k, v in times.items()}}}
+
     def _neck_limit(self) -> float:
         """The open chain's neck stop, ``max(neck_stop, neck_stop_elements h_floor)``, with the
         floor of :meth:`_h_floor`."""
@@ -1854,8 +1873,9 @@ class CollapseDriver:
         the hash of the block and the keys in which it differs from the block the state was written
         with (``changed``; for a state written without the block, ``added``, from the block's
         defaults), oomph-lib's smallest step it sets (``minimum_dt``, :meth:`_lower_minimum_dt`;
-        ``minimum_dt_ulps``, that step over the spacing of doubles at the leg's time), and, from the
-        state before an event, that event (``from_event_state``) and, where the keys
+        ``minimum_dt_ulps``, that step over the spacing of doubles at the leg's time), the limits
+        and floors it runs with (``limits``, :meth:`_leg_limits`), and, from the state before an
+        event, that event (``from_event_state``) and, where the keys
         of its class change, the event from which they apply anew (``event_keys_changed_at``)."""
         st = self.state
         minimum_dt = self._lower_minimum_dt()
@@ -1864,7 +1884,7 @@ class CollapseDriver:
                "changed": [], "added": False, "minimum_dt": minimum_dt,
                # oomph-lib's smallest step in units of the spacing of doubles at the leg's time:
                # a step of a few of them no longer advances the time by itself
-               "minimum_dt_ulps": _in_ulps(minimum_dt, m["time"])}
+               "minimum_dt_ulps": _in_ulps(minimum_dt, m["time"]), "limits": self._leg_limits()}
         if meta is not None:
             recorded = meta.get("events_settings")
             leg["added"] = recorded is None
