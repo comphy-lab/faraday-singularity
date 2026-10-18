@@ -1117,11 +1117,10 @@ def _closures(removed: dict, poly: dict, box: dict) -> dict:
     and after the transfer; ``box``: the grid's momentum and kinetic energy before it, after the
     transfer and the cap fill, and after the projection), each against its limit
     (``BUDGET_LIMITS``, the box noise counting zero until calibrated): F1 the liquid volume lost
-    against the removed head's,
-    F2 the axial momentum the transfer lost against the head's, F3 the momentum the projection
-    changed, F4 the kinetic energy it took, F5 the area of the interface against the head's less
-    the cap's. ``flags`` lists the closures beyond their limits; those of ``HARD_CLOSURES`` among
-    them refuse the cut."""
+    against the removed head's, F2 the axial momentum the transfer lost against the head's, F3 the
+    momentum the projection changed, F4 the kinetic energy it took, F5 the area of the interface
+    against the head's less the cap's. ``flags`` lists the closures beyond their limits; those of
+    ``HARD_CLOSURES`` among them (``hard``) fail the cut, after its remesh."""
     V, P, KE = removed["V"], removed["Pz"], removed["KE"]
     dA = removed["area"] - removed["cap_area"]
     values = {
