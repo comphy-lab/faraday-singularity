@@ -451,6 +451,48 @@ def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None
     return out
 
 
+def park_plan(problem, plan, old_zeta_table, *, rmin: float) -> None:
+    """Park a surgery plan built by the project (``events.build_liquid_plan``) on the mesh template,
+    as pyoomph's reconnection handler parks its own (``AxisymmetricReconnection.
+    after_newton_solve``): with the names of the interface and of its axis read in the
+    interface's scope, the old chart as the table the transfer looks the old nodes up in, and
+    ``rmin`` as the cut radius, of which the corner nodes of the new interface may lie at most
+    twice from an old one to take its interface fields. The next remesh (``force_remesh``) builds
+    the plan's chains and transfers the fields through its chart; nothing may solve in between,
+    since the handler drops a parked plan at every Newton solve."""
+    recon = problem.recon
+    if recon is None:
+        raise RuntimeError("the problem was not made with reconnect settings")
+    tree = problem.get_mesh(INTERFACE).get_eqtree()
+    if not any(e is recon for e in tree._equations):
+        raise RuntimeError("the reconnection handler is not an equation of the free surface")
+    template = problem.get_mesh("liquid")._templatemesh
+    with tree._on_this_domain():
+        cg = recon.get_current_code_generator()
+        iname = cg.get_full_name()
+        try:
+            _, axis_name = recon.get_interface_and_axisymm_name()
+        except RuntimeError:
+            axis_name = None
+        try:
+            _, opposite_axis = recon.get_opposite_and_opposite_axisymm_name()
+        except RuntimeError:
+            opposite_axis = None
+        try:
+            opposite = cg._get_opposite_interface()
+            opposite_interface = None if opposite is None else opposite.get_full_name()
+        except RuntimeError:
+            opposite_interface = None
+        scale = problem.get_scaling("spatial")
+    recon._pending_on = (template, iname)
+    template._set_pending_surgery_plan(iname, plan, {
+        "spatial_scale": scale, "interface_name": iname, "axis_name": axis_name,
+        "opposite_axis_name": opposite_axis, "opposite_interface_name": opposite_interface,
+        "old_zeta_table": np.asarray(old_zeta_table, dtype=float), "rmin_nd": float(rmin),
+        "distmin_nd": None})
+    problem._domains_to_remesh.add(template)
+
+
 def orient_interface_chart(problem) -> None:
     """Chart each chain from its end nearest a far point below the wall: the open chain from the
     wall, a chain from axis to axis from its lower end. ``x+`` cannot orient the latter."""

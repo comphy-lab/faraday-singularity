@@ -992,3 +992,186 @@ def truncate_chain(named, neck: dict, *, eta: float, elements_per_scale: float,
                      L_rem=float(np.max(np.abs(removed[:, 1] - z_n))), z_tip_old=z_tip_old,
                      z_tip_new=z_tip_new, checks=checks)
 
+
+# --- the plan of a liquid cut, for pyoomph's transfer ---------------------------------------------
+
+CHART_ORDER = ("open", "bubble")  # the old chart, and its table, run over the open chain first
+CHART_GAP = 1.0  # each chain's chart starts this far beyond the end of the one before it
+
+
+def interface_chart(named) -> dict[str, np.ndarray]:
+    """The chart of the plan of a liquid cut on the old chains (``(name, chain)`` pairs, ``open``
+    and ``bubble``): the arclength along each chain from its far end, the open chain from its end on
+    the wall and a chain from the axis to the axis from its lower end (as ``surgery.
+    orient_interface_chart`` orders the problem's chart), each chain from ``CHART_GAP`` beyond the
+    end of the one before it in ``CHART_ORDER``, so that the ranges of the chains are disjoint. By
+    chain name, for the nodes in the order of the chain."""
+    from .reconnect import FIXED
+
+    chains = dict(named)
+    out, start = {}, 0.0
+    for name in CHART_ORDER:
+        if name not in chains:
+            continue
+        c = chains[name]
+        P = np.asarray(c.points, dtype=float)
+        seg = np.hypot(*np.diff(P, axis=0).T)
+        if c.end_types[0] == FIXED:
+            last = False
+        elif c.end_types[1] == FIXED:
+            last = True  # the wall end is the last node
+        else:  # a chain from the axis to the axis: from its lower end
+            last = bool(P[-1, 1] < P[0, 1])
+        if last:
+            zeta = start + np.concatenate([np.cumsum(seg[::-1])[::-1], [0.0]])
+        else:
+            zeta = start + np.concatenate([[0.0], np.cumsum(seg)])
+        out[name] = zeta
+        start = float(zeta.max()) + CHART_GAP
+    if set(chains) - set(out):
+        raise ValueError(f"a plan charts only the chains {CHART_ORDER}, not {sorted(chains)}")
+    return out
+
+
+@dataclass
+class LiquidPlan:
+    """The plan of a liquid cut (:func:`build_liquid_plan`): pyoomph's ``SurgeryPlan`` (``plan``),
+    the old chart as a table ``(r, z, zeta)`` of every node of the old chains, open chain first
+    (``table``), the new chains as the mesh is built on them (``chains``, by name, in the order of
+    the old ones), and the range of the chart the cap takes (``cap_zeta``, the neck's and the node's
+    two beyond it on the head's side)."""
+    plan: object
+    table: np.ndarray
+    chains: dict
+    cap_zeta: tuple
+
+
+def build_liquid_plan(named, cut: LiquidCut, reservoir_depth: float) -> LiquidPlan:
+    """The plan of the cut ``cut`` (:func:`truncate_chain`) of one of the old chains ``named``
+    (``(name, chain)`` pairs; the chain positions those of the interface nodes, which the table
+    must match), for pyoomph's remesh and transfer as its planner would park it: a ``NewChain`` per
+    chain, open chain first, each ordered by its chart (increasing), the nodes it keeps with their
+    old chart and the index of their row in the table (``origin``), the cap's points (``origin``
+    -1) with a strictly increasing ramp of the chart from the neck's to that of the node two beyond
+    it on the head's side, so that the interface's own fields of the cap come from the old surface
+    just beyond the neck; the gas spans of the axis as ``surgery.cut`` sets them, the gas volumes of
+    the chains before and after (the gas gains the removed volume, ``volume_lost_by_removal``) and
+    one event, a pinch at the neck's height. Raises :class:`CapRefused` unless the chart of every
+    new chain is strictly increasing and the ranges of the chains are disjoint."""
+    from pyoomph.meshes.axisymm_topology import NewChain, ReconnectionEvent, SurgeryPlan
+
+    from .reconnect import FIXED, Chain, chain_volumes
+
+    chains = dict(named)
+    chart = interface_chart(named)
+    order = [name for name in CHART_ORDER if name in chains]
+    offsets, k = {}, 0
+    for name in order:
+        offsets[name] = k
+        k += len(chains[name].points)
+    table = np.vstack([np.column_stack([np.asarray(chains[name].points, dtype=float),
+                                        chart[name]]) for name in order])
+    zc = chart[cut.chain]
+    n_old = len(zc)
+    beyond = cut.index + (2 if cut.end == -1 else -2)
+    beyond = min(max(beyond, 0), n_old - 1)
+    z0, z1 = float(zc[cut.index]), float(zc[beyond])
+    new_chains, built, failed = [], {}, []
+    for name in order:
+        c = chains[name]
+        if name == cut.chain:
+            P = np.asarray(cut.points, dtype=float)
+            origin = np.asarray(cut.origin, dtype=int)
+            zeta = np.empty(len(P))
+            kept = origin >= 0
+            zeta[kept] = zc[origin[kept]]
+            # the cap from the neck to its tip: the chart ramps by arclength from z0 to z1
+            cap = np.vstack([[cut.r_n, cut.z_n], cut.cap])
+            arc = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(cap, axis=0).T))])
+            ramp = z0 + (z1 - z0) * arc[1:] / arc[-1]
+            ramp[-1] = z1
+            zeta[~kept] = ramp if cut.end == -1 else ramp[::-1]
+            rows = np.where(kept, origin + offsets[name], -1)
+        else:
+            P = np.asarray(c.points, dtype=float)
+            zeta = np.asarray(chart[name], dtype=float)
+            rows = np.arange(len(P)) + offsets[name]
+        seg = np.hypot(*np.diff(P, axis=0).T)
+        sizes = 2.0 * np.r_[seg[0], 0.5 * (seg[:-1] + seg[1:]), seg[-1]]
+        ends = tuple(c.end_types)
+        reservoir = tuple(reservoir_depth if e == FIXED else None for e in ends)
+        built[name] = Chain(P.copy(), ends)
+        if zeta[-1] < zeta[0]:  # ordered by its chart
+            P, zeta, rows, sizes = P[::-1], zeta[::-1], rows[::-1], sizes[::-1]
+            ends, reservoir = ends[::-1], reservoir[::-1]
+        if not np.all(np.diff(zeta) > 0.0):
+            failed.append(name)
+        new_chains.append(NewChain(points=P.copy(), sizes=sizes.copy(), zeta=zeta.copy(),
+                                   origin=rows.copy(), end_types=ends, reservoir=reservoir))
+    ranges = sorted((float(nc.zeta[0]), float(nc.zeta[-1])) for nc in new_chains)
+    if failed or any(a[1] >= b[0] for a, b in zip(ranges, ranges[1:])):
+        raise CapRefused("the chart of the plan of the liquid cut is not strictly increasing on "
+                         f"every chain, with disjoint ranges ({failed or ranges})",
+                         {"failed": ["chart"], "chart_ranges": ranges})
+    olds = [chains[name] for name in order]
+    news = [built[name] for name in order]
+    spans = np.array([[c.points[0, 1], c.points[-1, 1] + (reservoir_depth if c.is_open else 0.0)]
+                      for c in news])
+    plan = SurgeryPlan(events=[ReconnectionEvent("pinch", float(cut.z_n))], new_chains=new_chains,
+                       axis_spans_inside=spans, axis_spans_outside=np.zeros((0, 2)),
+                       fragment_volumes_before=chain_volumes(olds, reservoir_depth),
+                       fragment_volumes_after=chain_volumes(news, reservoir_depth),
+                       volume_lost_by_removal=float(cut.V_rem))
+    return LiquidPlan(plan=plan, table=table, chains=built, cap_zeta=(z0, z1))
+
+
+# pyoomph's transfer places a new interface node on the old interface by projection onto the old
+# element nearest it, accepted within this fraction of that element's size (the larger extent of
+# its bounding box; pointlocator max_projection_offset_factor); farther from every old element it
+# blends the two nearest old nodes instead
+PROJECTION_OFFSET = 0.5
+
+
+def predict_unlocated(nodes, old_chains, *, factor: float = PROJECTION_OFFSET,
+                      neighbours: int = 16) -> np.ndarray:
+    """Which of the new interface nodes ``nodes`` (``(M, 2)``) pyoomph's transfer will not place on
+    the old interface (``old_chains``: the old chains' nodes, each a chain of quadratic elements,
+    vertex, midside node, vertex): those farther than ``factor`` times its size from every old
+    element (the distance to its two chords; the size the larger extent of the bounding box of its
+    three nodes), among the elements of the ``neighbours`` old nodes nearest each node."""
+    from scipy.spatial import cKDTree
+
+    X = np.asarray(nodes, dtype=float).reshape(-1, 2)
+    elems = []
+    for P in old_chains:
+        P = np.asarray(P, dtype=float).reshape(-1, 2)
+        if len(P) < 2:
+            continue
+        idx = 2 * np.arange((len(P) - 1) // 2)
+        if len(idx):
+            elems.append(np.stack([P[idx], P[idx + 1], P[idx + 2]], axis=1))
+        if (len(P) - 1) % 2:  # an even count: the last segment as an element of its own
+            elems.append(np.stack([P[-2:-1], 0.5 * (P[-2:-1] + P[-1:]), P[-1:]], axis=1))
+    if not elems or not len(X):
+        return np.zeros(len(X), dtype=bool)
+    E = np.concatenate(elems)  # (n_e, 3, 2)
+    size = np.max(np.ptp(E, axis=1), axis=1)
+    nodes_of = E.reshape(-1, 2)  # node 3e + j of element e
+    tree = cKDTree(nodes_of)
+    k = min(neighbours, len(nodes_of))
+    _, near = tree.query(X, k=k)
+    near = np.asarray(near).reshape(len(X), k)
+    cand = near // 3  # the element of each near node
+    located = np.zeros(len(X), dtype=bool)
+    for col in range(k):
+        e = cand[:, col]
+        best = np.full(len(X), np.inf)
+        for a, b in ((0, 1), (1, 2)):
+            A, B = E[e, a], E[e, b]
+            d = B - A
+            L2 = np.maximum(np.einsum("ij,ij->i", d, d), 1e-300)
+            t = np.clip(np.einsum("ij,ij->i", X - A, d) / L2, 0.0, 1.0)
+            best = np.minimum(best, np.hypot(*(X - A - t[:, None] * d).T))
+        located |= best <= factor * size[e]
+    return ~located
+

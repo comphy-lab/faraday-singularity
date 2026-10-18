@@ -269,3 +269,95 @@ def test_the_necks_of_the_stop_states_of_runs_after_a_cut_are_cut_cleanly(run):
             assert cut.summary()["tip_shift"] == pytest.approx(cut.L_rem - eta * neck["r_n"],
                                                               rel=1e-9)
 
+
+# --- the plan of a liquid cut ---------------------------------------------------------------------
+
+
+def test_the_plan_charts_every_old_node_and_ramps_the_chart_over_the_cap():
+    """The plan of a cut of either chain, for pyoomph's transfer: the table holds every old node of
+    both chains, open chain first, with its chart (the arclength from the wall end of the open
+    chain, from the lower end of the bubble, the bubble's range beyond the open chain's); each new
+    chain is ordered by its chart, strictly increasing, the nodes it keeps carry their table row
+    and chart, and the cap's points ramp the chart from the neck's to that of the node two beyond it
+    on the head's side; the gas gains the removed volume; the axis spans are those of the new
+    tips."""
+    pytest.importorskip("pyoomph")
+    d = 1e-3
+    bubble, _ = stops.bubble_with_head(d, r_n=0.09)
+    cavity = stops.cavity_with_head(d, r_n=0.09)
+    named = (("bubble", bubble), ("open", cavity))
+    chart = ev.interface_chart(named)
+    n_open = len(cavity.points)
+    assert chart["open"][-1] == 0.0 and np.all(np.diff(chart["open"]) < 0.0)
+    assert chart["bubble"][0] == pytest.approx(chart["open"][0] + ev.CHART_GAP, abs=1e-15)
+    assert np.all(np.diff(chart["bubble"]) > 0.0)
+    for name in ("bubble", "open"):
+        neck = _neck(named, name)
+        cut = ev.truncate_chain(named, neck, **CUT)
+        lp = ev.build_liquid_plan(named, cut, 3.0)
+        plan, table = lp.plan, lp.table
+        assert table.shape == (n_open + len(bubble.points), 3)
+        assert np.array_equal(table[:n_open, :2], cavity.points)
+        assert np.array_equal(table[n_open:, :2], bubble.points)
+        assert np.array_equal(table[:n_open, 2], chart["open"])
+        assert np.array_equal(table[n_open:, 2], chart["bubble"])
+        assert [e.kind for e in plan.events] == ["pinch"] and plan.events[0].z_center == cut.z_n
+        assert plan.volume_lost_by_removal == cut.V_rem
+        k = 0 if name == "open" else 1
+        gained = np.array(plan.fragment_volumes_after) - np.array(plan.fragment_volumes_before)
+        assert gained[k] == pytest.approx(cut.V_rem, rel=1e-9) and gained[1 - k] == 0.0
+        ranges = []
+        for nc, other in zip(plan.new_chains, ("open", "bubble")):
+            zeta, rows = np.asarray(nc.zeta), np.asarray(nc.origin)
+            assert np.all(np.diff(zeta) > 0.0) and len(nc.points) == len(zeta) == len(rows)
+            kept = rows >= 0
+            assert np.array_equal(np.asarray(nc.points)[kept], table[rows[kept], :2])
+            assert np.array_equal(zeta[kept], table[rows[kept], 2])
+            ranges.append((zeta[0], zeta[-1]))
+            # the mesh is built on the plan's chain as the project orients it
+            again = rc.orient_chain(nc.points, R_C, 1e-7 * R_C)
+            assert np.array_equal(again.points, lp.chains[other].points)
+            if other != name:
+                assert np.all(kept) and len(rows) == len(dict(named)[other].points)
+                continue
+            z0, z1 = lp.cap_zeta
+            i = neck["index"]
+            assert z0 == chart[name][i] and z1 == chart[name][i + (2 if name == "bubble" else -2)]
+            assert np.count_nonzero(~kept) == len(cut.cap)
+            ramp = zeta[~kept]
+            assert np.all((ramp > min(z0, z1)) & (ramp <= max(z0, z1)))
+        assert ranges[0][1] < ranges[1][0]
+        tips = [z for c in lp.chains.values() for _, z in c.axis_ends()]
+        spans = rc.liquid_axis_spans(tips)
+        assert len(spans) == 2 and cut.z_tip_new in {a for s in spans for a in s}
+        assert plan.axis_spans_inside.shape == (2, 2)
+
+
+def test_the_unlocated_nodes_of_a_transfer_are_those_off_every_old_element():
+    """pyoomph places a new interface node on the old interface by projection within half the size
+    of the old element nearest it (the larger extent of its bounding box): nodes off the old chain
+    by 0.4 of the size are placed, by 0.6 not; of the cap of a cut, the points that leave the neck
+    are placed on the neck's surface, the rest are not."""
+    t = np.linspace(0.0, 0.5 * math.pi, 401)  # 200 quadratic elements on a quarter circle
+    old = np.column_stack([np.cos(t), np.sin(t)])
+    size = np.max(np.ptp(np.stack([old[0:-2:2], old[1:-1:2], old[2::2]], axis=1), axis=1), axis=1)
+    e = np.arange(50, 150)
+    mid = old[2 * e + 1]  # the midside nodes, where the chords lie closest to the arc
+    for f, unlocated in ((0.0, False), (0.4, False), (0.6, True)):
+        got = ev.predict_unlocated(mid * (1.0 + f * size[e])[:, None], [old])
+        assert np.all(got == unlocated), f
+    bubble, _ = stops.bubble_with_head(1e-3, r_n=0.09)
+    named = (("bubble", bubble), ("open", stops.cavity()))
+    neck = _neck(named, "bubble")
+    cut = ev.truncate_chain(named, neck, **CUT)
+    got = ev.predict_unlocated(cut.cap, [c.points for _, c in named])
+    # one run from the neck's surface to the tip, most of the cap
+    assert got[-1] and not got[0] and np.all(np.diff(got.astype(int)) >= 0)
+    assert got.sum() > 0.5 * len(got)
+    from shapely.geometry import LineString, Point
+
+    line = LineString(bubble.points)
+    h = 2.0 * np.hypot(*(bubble.points[neck["index"] + 1] - bubble.points[neck["index"]]))
+    far = np.array([line.distance(Point(p)) for p in cut.cap])
+    assert np.all(far[got] > 0.5 * 0.7 * h) and np.all(far[~got] <= 0.5 * h)
+
