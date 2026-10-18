@@ -245,8 +245,8 @@ add a second top-level `cases/` tree.
   `annular-contact-approach`, then the groove closest to its limit (`groove`), then `gas-neck`,
   `bridge-closing`, `chain-contact`. Heads and tracked necks: `events.head_sides`, `liquid_necks`,
   `head_of_fold`. The keys of `liquid` also set the cut of a neck that lands under them
-  (`surgery.liquid_cut`, which refuses a request made under others), which the driver does not make
-  yet (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`, `restart`, and the noise of the
+  (`surgery.liquid_cut`, which refuses a request made under others), which the driver makes within
+  the run (below) (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`, `restart`, and the noise of the
   box in an ordinary rebuild that floors the limits of its budgets, `sigma_V`, `sigma_Pz`,
   `sigma_KE`, `surgery.NOISE_FLOORS`, none until calibrated; class keys like the rest of `liquid`):
   the head removed and the stump capped at the neck (`events.truncate_chain`, refused unless its
@@ -263,12 +263,31 @@ add a second top-level `cases/` tree.
   resume from `precut_e<k>` under calibrated floors), its kinetic energy (the transfer's against the
   head's, the projection's either way) and the area flags, the cutoff's identity recorded only; its
   record is `events/event_<k>.json`, its dumps `precut_e<k>` and `postcut_e<k>`
-  (`testCases/test_liquid_cut_fem.py`, a synthetic state with a jet on each chain). The driver has
-  no handler yet, so every event is a resumable stop
-  (`event-unhandled`, event number `k`) with the dump of the state before it
-  (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`) besides the end
-  state; a continuation from it is a post-cut restart from which the keys of every class apply anew
-  (`events.EventSettings.refused_changes`), the events before it staying as made. The tests of the
+  (`testCases/test_liquid_cut_fem.py`, a synthetic state with a jet on each chain). The driver
+  makes the liquid cut of an `L` or `A-head` event within the run (`CollapseDriver._meet_event`, at
+  the stop checks of the loop's top, after a step and after a rebuild; `events.IMPLEMENTED_HANDLERS`)
+  with the run's last step as the history's, and goes on from the fresh mesh, whose stops it checks
+  again as those of a mesh freshly built (`reset_after_event`: no new cycle, the births, series,
+  holds and last step kept; the scale's growth limit, the cut tip's apex history and its chain's
+  kink region dropped; event `liquid-cut`, a `liquid-cut` profile); it adds to the record the base
+  of the cut jet before the cut (`trigger.r_j`, `z_b`, `r_j_over_r_n`, `neck_to_base_over_r_j`),
+  the event's `generation` at its tip, `step`, `leg`, `tau_over_delta2`, `t_prime_over_T` (`T =
+  t_p - t_cut`), the `cascade` verdict, the `commit`, the ghost's start and the jet after the cut
+  (`after`), and writes a row of `events.txt`. Every other event is a resumable stop with the dump
+  of the state before it (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under
+  `event`, also an event of its reason) besides the end state: `event-unhandled` (no handler made:
+  the ring of a piercing, the groove fill, the split of a gas neck, a liquid neck without a single
+  head), `max-events` (the event after `max_events`), `event-cascade` (`events.CascadeMonitor`
+  judges it to shrink: an interval at its tip below `cascade_min_interval delta^2`, or the last
+  `cascade_count` pairs of ratios of intervals and of head volumes below `cascade_ratio`),
+  `liquid-cut-refused` (the problem unchanged), `event-unclosed` (hard budgets that do not close:
+  the problem holds a cut that is not accepted, so the run ends on the state before it, its
+  `end_state`, and dumps nothing more); any other failure of a liquid cut fails the run. A
+  continuation from such a dump is a post-cut restart from which the keys of every class apply anew
+  (`events.EventSettings.refused_changes`), the events before it staying as made. The run's result
+  with the block has `events` (made, by kind and tip, the last, the totals removed, the cascade's
+  verdicts, the event stopped on) and `window_end` (`bubble-vanishing`, also an event
+  `window-end`). The tests of the
   branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run
   directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by
   default. After the cut the driver reads its limits through accessors that return the collapse's

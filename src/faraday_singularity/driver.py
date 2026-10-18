@@ -266,6 +266,17 @@ post-cut one, on both chains (below). In addition:
   (``kinks``);
 * landing states and the stop state are not kept (one cut per run).
 
+With the events block (``events.EventSettings``) the stops after a cut are those of the events
+branch (``events.post_cut_events``), and every change of topology is an event the stops request.
+At each check of the stops (the loop's top, after a step, after a rebuild) the run meets the
+request (:meth:`CollapseDriver._meet_event`): the cut of a landed liquid neck it makes
+(``surgery.liquid_cut``), and goes on from the fresh mesh (:meth:`CollapseDriver.
+reset_after_event`), whose stops it checks again, as those of any mesh freshly built; on every
+other event, the event after ``max_events``, one the cascade test of its tip judges to shrink
+(``events.CascadeMonitor``), a cut refused and one whose hard budgets do not close it stops
+resumably, with the dump of the state before the event (``precut_e<k>``). ``events.txt`` holds a
+row per event made.
+
 Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore` restores
 (``surgery.restore_cut``), only into a driver whose reconnect settings are those of the cut but for
 ``tau_end`` (``reconnect.CONTINUATION_KEYS``), which a continuation may raise; the run then
@@ -286,8 +297,11 @@ import numpy as np
 from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_disc_points,
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
-from .events import (EVENT_REQUEST, EVENT_UNHANDLED, PRECUT_EVENT, SIZING_KEYS, EventSettings,
-                     events_done, fold_stop_after_cut, minimum_dt_after_cut)
+from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, EVENT_STOPS,
+                     EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, IMPLEMENTED_HANDLERS,
+                     LIQUID_CUT_REFUSED, PRECUT_EVENT, SIZING_KEYS, CascadeMonitor, EventSettings,
+                     event_neck, event_tip, events_done, fold_stop_after_cut,
+                     minimum_dt_after_cut)
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -520,6 +534,39 @@ CHAIN_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "z_bubble_bottom", "w_bub
 # chains.txt columns written as integers (NaN where the state has no bubble)
 INT_CHAIN_COLUMNS = ("step", "courant_chain", "remesh_count") + tuple(
     f"jet_born_{tip}" for tip in JET_TIPS)
+# after a cut with the events block: events.txt, a row per event the run makes (its record is
+# events/event_<k>.json): the closures F1-F6 relative to the removed head's own, the jet's base
+# before the event and after it, the interval since the event before at its tip and the verdict of
+# the cascade, the totals of the removals since the gas cut
+EVENT_COLUMNS = ("k", "step", "time", "tau", "tau_p", "tau_over_delta2", "kind", "class", "chain",
+                 "tip", "generation", "r_n", "s", "r_n_over_s", "z_n", "z_tip_old", "z_tip_new",
+                 "eta", "V_rem", "Pz_rem", "KE_rem", "U_ghost", "du_stump", "r_j", "z_b",
+                 "r_j_over_r_n", "neck_to_base_over_r_j", "r_j_after", "Re_n", "We_n", "F1", "F2",
+                 "F3", "F4", "F5", "F6", "phi_relative_error", "predicted_unlocated",
+                 "reported_unlocated", "dt_history", "interval_over_delta2", "events_per_T",
+                 "cascade", "V_removed_total", "Pz_removed_total", "KE_removed_total", "wall")
+
+
+def _table_cell(v) -> str:
+    """A cell of the tables of the events: numbers as collapse.txt writes them, text as it is."""
+    if v is None:
+        return "nan"
+    if isinstance(v, (bool, np.bool_)):
+        return str(int(v))
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    if isinstance(v, (float, np.floating)):
+        return f"{float(v):.12e}"
+    return str(v)
+
+
+def _finite(x):
+    """A number of a record, None where it is not finite (as the cut's records have it)."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
 
 
 @dataclass
@@ -625,6 +672,14 @@ class CollapseDriver:
             self._chains = open(self.outdir / "chains.txt", "w", buffering=1)
             self._chains.write("# " + "\t".join(CHAIN_COLUMNS) + "\n")
         self._events = open(self.outdir / "events.jsonl", "w", buffering=1)
+        # with the events block: a row per event the run makes (events.txt), and what an event in
+        # the making hands its record (_meet_event, _on_event_made)
+        self._event_rows = None
+        self._event_before: tuple | None = None
+        self._event_after: dict | None = None
+        if events is not None:
+            self._event_rows = open(self.outdir / "events.txt", "w", buffering=1)
+            self._event_rows.write("# " + "\t".join(EVENT_COLUMNS) + "\n")
         (self.outdir / "collapse_settings.json").write_text(
             json.dumps(asdict(settings), indent=2) + "\n")
 
@@ -633,6 +688,8 @@ class CollapseDriver:
         self._events.close()
         if self._chains is not None:
             self._chains.close()
+        if self._event_rows is not None:
+            self._event_rows.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
             disarm = getattr(self.pb, "disarm_inverted_element_remesh", None)
             if disarm is not None:
@@ -759,8 +816,8 @@ class CollapseDriver:
         s = self.s
         fresh = self._fresh_mesh()
         if self.events is not None:
-            # the events branch: invalid states, the end of the window, then the events, of which
-            # none has a handler yet (a resumable stop, _unhandled_event)
+            # the events branch: invalid states, the end of the window, then the events, each a
+            # request (reason event-request) the run meets with its handler (_meet_event)
             stop = post_cut_stops(chains, CutGeometry(**cut["geometry"]), self.reconnect,
                                   cut["sizing"]["h_tip"], neck_elements=s.neck_stop_elements,
                                   fold_ratio=s.fold_ratio, fold_stop=s.fold_stop,
@@ -769,8 +826,6 @@ class CollapseDriver:
                                                         "refine_ratio": s.refine_ratio},
                                   events=self.events,
                                   invalid=self._jacobian_stop if fresh else None)
-            if stop is not None and stop["reason"] == EVENT_REQUEST:
-                stop = self._unhandled_event(stop)
             if stop is not None:
                 stop.update(self._taus(self._t()))
             return stop
@@ -786,19 +841,26 @@ class CollapseDriver:
             stop.update(self._taus(self._t()))
         return stop
 
-    def _unhandled_event(self, request: dict) -> dict:
-        """The stop of an event that has no handler yet (``events.post_cut_events``' request):
-        ``event-unhandled``, with the event's number ``k`` (one more than the events made) and
+    def _event_stop(self, reason: str, request: dict, **extra) -> dict:
+        """The stop of the run at an event (``events.post_cut_events``' request; ``reason`` one of
+        ``events.EVENT_STOPS``), with the event's number ``k`` (one more than the events made) and
         what found it; at the end of the run the state is kept as the state before the event,
-        ``precut_e<k>`` (``run``), from which a run continues once the event's handler exists."""
+        ``precut_e<k>`` (``run``), unless the cut of the event kept it already, from which a run
+        continues (with the event's handler, once one exists)."""
         out = {key: v for key, v in request.items() if key != "reason"}
-        return {"reason": EVENT_UNHANDLED, "k": len(self._made_events()) + 1, **out}
+        return {"reason": reason, "k": len(self._made_events()) + 1, **out, **extra}
+
+    def _unhandled_event(self, request: dict) -> dict:
+        """The stop of an event whose handler the driver does not make
+        (``events.IMPLEMENTED_HANDLERS``): ``event-unhandled``, a resumable stop."""
+        return self._event_stop(EVENT_UNHANDLED, request)
 
     def _keep_event_state(self, stop: dict) -> Path:
-        """The dump of the state before an unhandled event (``precut_e<k>``, outside the rotation,
-        ``cut_stage`` ``precut-event``, with the event as the stop found it): a continuation from
-        it meets the event again, with its handler once one exists, and the keys of every class
-        of events apply anew from it (``events.EventSettings.refused_changes``)."""
+        """The dump of the state before an event the run stops on (``precut_e<k>``, outside the
+        rotation, ``cut_stage`` ``precut-event``, with the event as the stop found it): a
+        continuation from it meets the event again, with its handler once one exists, and the
+        keys of every class of events apply anew from it (``events.EventSettings.
+        refused_changes``)."""
         k = int(stop["k"])
         event = {key: v for key, v in stop.items() if key != "reason"}
         return self.keep_state(self.outdir / "states" / f"precut_e{k:03d}.dump",
@@ -1897,6 +1959,200 @@ class CollapseDriver:
         st.legs.append(leg)
         self._event("leg", m, **{k: v for k, v in leg.items() if k not in ("time", "step")})
 
+    # --- after a cut: the events the run makes ------------------------------------------------
+
+    def _cascade(self) -> CascadeMonitor:
+        """The monitor of the cascades of the events the run has made, at each tip on the axis
+        (``events.CascadeMonitor``, with ``T = t_p - t_cut``), from their records."""
+        t_cut, t_p = self._cut_times()
+        return CascadeMonitor.for_run(self.events, self.reconnect.delta, T=t_p - t_cut,
+                                      records=self._made_events())
+
+    def _meet_event(self, m: dict, request: dict) -> tuple[dict, dict | None]:
+        """Meet an event the stops of the measured state ``m`` request (``events.
+        post_cut_events``, with the block): ``(m, stop)`` for an event the run stops on, ``(m_new,
+        None)`` for one made, from whose fresh mesh the run goes on (``m_new``, its measurement,
+        which the caller checks for every stop again, as on any mesh freshly built).
+
+        1. An event whose handler the driver does not make (``events.IMPLEMENTED_HANDLERS``) is a
+           resumable stop (``event-unhandled``), and so is the event after ``max_events`` made
+           (``max-events``) and one that the cascade test of its tip judges to shrink
+           (``event-cascade``, ``events.CascadeMonitor``, with the volume of the head the request
+           names), each with the dump of the state before it (``run``).
+        2. The liquid cut (``surgery.liquid_cut``), with the run's last step as the history's,
+           the elements per scale after the cut and the floor ``post.h_floor``: a refusal, which
+           leaves the problem unchanged, stops the run resumably (``liquid-cut-refused``), and so
+           do hard budgets that do not close (``event-unclosed``), whose problem holds a cut that
+           is not accepted and is dumped no more; any other failure of the cut ends the run as a
+           failed one, raised.
+        3. The driver's bookkeeping of the cut made (:meth:`_on_event_made`), its row of
+           ``events.txt``, and the commit of the jets' bases and the kink regions on the fresh
+           mesh (:meth:`_commit_post_cut`)."""
+        if request.get("handler") not in IMPLEMENTED_HANDLERS:
+            return m, self._unhandled_event(request)
+        if len(self._made_events()) >= self.events.max_events:
+            return m, self._event_stop(EVENT_LIMIT, request, max_events=self.events.max_events)
+        neck = event_neck(request)
+        tip = event_tip(neck)
+        verdict = self._cascade().check(tip, m["time"], float(neck.get("head_volume", math.nan)))
+        if verdict["verdict"] == "shrink":
+            return m, self._event_stop(EVENT_CASCADE, request, cascade=verdict)
+        from .surgery import BudgetUnclosed, CutRefused, liquid_cut
+
+        st, r = self.state, self.reconnect
+        k = len(self._made_events()) + 1
+        eps = self.s.elements_per_scale if r.elements_per_scale is None else r.elements_per_scale
+        dt_prev = st.dt_prev if st.dt_prev else float(self._cut_record()["settings"]["dt0"])
+        self._event_before, self._event_after = (m, tip, verdict), None
+        try:
+            made = liquid_cut(self.pb, self.events, r, self.outdir, request, k=k,
+                              dt_prev=dt_prev, elements_per_scale=eps, h_floor=self._h_floor(),
+                              driver=self, on_made=self._on_event_made)
+        except (CutRefused, BudgetUnclosed) as e:
+            rec = getattr(e, "record", None) or {}
+            reason = LIQUID_CUT_REFUSED if isinstance(e, CutRefused) else EVENT_UNCLOSED
+            extra = {"hard": (rec.get("closures") or {}).get("hard")} if reason == \
+                EVENT_UNCLOSED else {}
+            return m, self._event_stop(reason, request, precut=e.precut,
+                                       failed_at=rec.get("failed_at"),
+                                       error=rec.get("error", f"{type(e).__name__}: {e}"),
+                                       record=f"events/event_{k:03d}.json", **extra)
+        finally:
+            self._event_before = None
+        m = self._event_after
+        self._write_event_row(made)
+        self._commit_post_cut(m)
+        return m, None
+
+    def _on_event_made(self, rec: dict):
+        """The driver's bookkeeping of a liquid cut made (``surgery.liquid_cut``'s ``on_made``,
+        before the state after it is kept and its record written), into its record: what the
+        driver measured of the state before it, the base of the jet whose neck it cut
+        (``trigger``: ``r_j``, ``z_b``, ``r_j_over_r_n`` and ``neck_to_base_over_r_j``, the
+        neck's distance from the base in jet radii), the event's place in the run (``generation``
+        at its tip, ``step``, ``leg``, ``tau_over_delta2``, ``t_prime_over_T`` with ``T = t_p -
+        t_cut``, the ``cascade`` verdict, the source ``commit``, ``dt.before``), the start of its
+        ghost (``step0``, ``tip``, ``far_tip``, ``recontacts``); then :meth:`reset_after_event`,
+        and the jet of the cut tip on the fresh mesh (``after``)."""
+        m, tip, verdict = self._event_before
+        st, delta = self.state, self.reconnect.delta
+        jet = m if tip == "cavity_tip" else (m.get("tips") or {}).get(tip, {})
+        r_j, z_b = float(jet.get("r_j", math.nan)), float(jet.get("z_b", math.nan))
+        trig = rec.setdefault("trigger", {})
+        r_n = float(trig.get("r_n") or math.nan)
+        z_n = float(trig.get("z_n") if trig.get("z_n") is not None else math.nan)
+        trig.update(r_j=_finite(r_j), z_b=_finite(z_b),
+                    r_j_over_r_n=_finite(r_j / r_n) if r_n > 0.0 else None,
+                    neck_to_base_over_r_j=_finite(abs(z_n - z_b) / r_j) if r_j > 0.0 else None)
+        t_cut, t_p = self._cut_times()
+        T, tau_p = t_p - t_cut, rec.get("tau_p")
+        rec.update(generation=verdict["generation"], step=st.step, leg=len(st.legs) - 1,
+                   tau_over_delta2=_finite(float(rec["tau"]) / delta**2),
+                   t_prime_over_T=(_finite(float(tau_p) / T) if tau_p is not None
+                                   and math.isfinite(T) and T != 0.0 else None),
+                   cascade={key: _finite(v) if isinstance(v, float) else v
+                            for key, v in verdict.items()},
+                   commit=self.leg_info.get("commit"))
+        rec.setdefault("dt", {})["before"] = _finite(st.dt_prev)
+        if isinstance(rec.get("ghost"), dict):
+            rec["ghost"].update(step0=st.step, tip=tip, far_tip=FAR_TIPS.get(tip),
+                                recontacts=[])
+        m_new = self.reset_after_event(rec)
+        after = m_new if tip == "cavity_tip" else (m_new.get("tips") or {}).get(tip, {})
+        rec["after"] = {key: _finite(after.get(key, math.nan))
+                        for key in ("r_j", "z_b", "Q_j", "V_j")}
+        rec["after"]["jet_born"] = bool(after.get("jet_born", False))
+        self._event_after = m_new
+
+    def reset_after_event(self, record: dict) -> dict:
+        """Restart the bookkeeping that the rebuild of an event invalidates (a liquid cut,
+        ``record`` its record) and measure the fresh mesh. Unlike :meth:`reset_after_cut` it starts
+        no new cycle: the cycle, the births of the jets (of the cavity's tip and the bubble's), the
+        singular-time series, the neck samples, the last step (the history's step of the cut,
+        from which the step limits follow) and the holds of the rebuilds are kept. The growth
+        limit of the local scale and the rate limit of the step restart (``ell_prev``,
+        ``t_prev``), and the radius of the cut tip's jet base (``apex_history``) and the kink
+        region of its chain are dropped; the fresh mesh is measured, the event recorded (event
+        ``liquid-cut``), the jets of the bubble's tips tracked and a profile written (reason
+        ``liquid-cut``). The remesh check of the step is not made on the fresh mesh, from which
+        the run steps as from the cut's."""
+        st = self.state
+        st.ell_prev = st.t_prev = math.nan
+        st.apex_history.pop(record.get("tip"), None)
+        st.kinks.pop(record.get("chain"), None)
+        self._checks_pending = False
+        m = self.measure()
+        k, removed = record.get("k"), record.get("removed") or {}
+        trig = record.get("trigger") or {}
+        self._event("liquid-cut", m, k=k, kind=record.get("kind"),
+                    **{"class": record.get("class")}, chain=record.get("chain"),
+                    tip=record.get("tip"), generation=record.get("generation"),
+                    r_n=trig.get("r_n"), s=trig.get("s"), r_j_before=trig.get("r_j"),
+                    V_rem=removed.get("V"), Pz_rem=removed.get("Pz"), KE_rem=removed.get("KE"),
+                    cascade=(record.get("cascade") or {}).get("verdict"),
+                    record=f"events/event_{int(k):03d}.json")
+        self._track_tips(m, snapshot=False)
+        self._snapshot(m, "liquid-cut")
+        return m
+
+    def _write_event_row(self, rec: dict):
+        """The row of ``events.txt`` of an event made (its record)."""
+        trig, cap = rec.get("trigger") or {}, rec.get("cap") or {}
+        removed, ghost = rec.get("removed") or {}, rec.get("ghost") or {}
+        closures = rec.get("closures") or {}
+        rel, phi = closures.get("relative") or {}, closures.get("F3_phi") or {}
+        tr, casc, total = rec.get("transfer") or {}, rec.get("cascade") or {}, \
+            rec.get("removed_total") or {}
+        values = {"k": rec.get("k"), "step": rec.get("step"), "time": rec.get("t"),
+                  "tau": rec.get("tau"), "tau_p": rec.get("tau_p"),
+                  "tau_over_delta2": rec.get("tau_over_delta2"), "kind": rec.get("kind"),
+                  "class": rec.get("class"), "chain": rec.get("chain"), "tip": rec.get("tip"),
+                  "generation": rec.get("generation"),
+                  **{key: trig.get(key) for key in ("r_n", "s", "r_n_over_s", "z_n", "r_j", "z_b",
+                                                    "r_j_over_r_n", "neck_to_base_over_r_j",
+                                                    "Re_n", "We_n")},
+                  "z_tip_old": cap.get("z_tip_old"), "z_tip_new": cap.get("z_tip_new"),
+                  "eta": cap.get("eta"), "V_rem": removed.get("V"), "Pz_rem": removed.get("Pz"),
+                  "KE_rem": removed.get("KE"), "U_ghost": ghost.get("U"),
+                  "du_stump": ghost.get("du_stump"),
+                  "r_j_after": (rec.get("after") or {}).get("r_j"),
+                  **{f: rel.get(f) for f in ("F1", "F2", "F3", "F4", "F5", "F6")},
+                  "phi_relative_error": phi.get("phi_relative_error"),
+                  "predicted_unlocated": tr.get("predicted_unlocated"),
+                  "reported_unlocated": tr.get("reported_unlocated"),
+                  "dt_history": (rec.get("dt") or {}).get("history"),
+                  "interval_over_delta2": casc.get("interval_over_delta2"),
+                  "events_per_T": casc.get("events_per_T"), "cascade": casc.get("verdict"),
+                  "V_removed_total": total.get("V"), "Pz_removed_total": total.get("Pz"),
+                  "KE_removed_total": total.get("KE"), "wall": rec.get("wall_seconds")}
+        self._event_rows.write("\t".join(_table_cell(values.get(c)) for c in EVENT_COLUMNS)
+                               + "\n")
+
+    def _events_summary(self, stop: dict) -> dict:
+        """After a cut with the block: the events of the run's result (``run_status.json``): how
+        many were made, by kind and by tip, the last, the totals of the removals since the gas
+        cut, the cascade's verdict at each tip, and the event the run stopped on, if any."""
+        made = self._made_events()
+
+        def count(key):
+            out: dict = {}
+            for e in made:
+                out[str(e.get(key))] = out.get(str(e.get(key)), 0) + 1
+            return out
+
+        liquid = [e for e in made if e.get("kind") in EVENT_CLASSES["liquid"]]
+        last = made[-1] if made else None
+        return {"made": len(made), "max_events": self.events.max_events,
+                "by_kind": count("kind"), "by_tip": count("tip"),
+                "last": None if last is None else {key: last.get(key) for key in (
+                    "k", "kind", "class", "chain", "tip", "t", "tau", "tau_p")},
+                "removed_total": {key: sum(float((e.get("removed") or {}).get(key) or 0.0)
+                                           for e in liquid) for key in ("V", "Pz", "KE")},
+                "cascade": {tip: v["verdict"] for tip, v in self._cascade().verdicts().items()},
+                "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
+                                                         "handler")}
+                         if stop.get("reason") in EVENT_STOPS else None)}
+
     def _neck_sample(self, m: dict):
         """Offer the measured neck to the series from which :meth:`pinch_time` fits; no neck
         clears it, and a restart does not offer the dumped state again."""
@@ -2050,6 +2306,10 @@ class CollapseDriver:
             self._arm_post_cut_nets()
         while True:
             found = self._stop(m)
+            if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
+                m, found = self._meet_event(m, found)
+                if found is None:  # made: every stop again on the fresh mesh
+                    continue
             if found is not None:
                 stop = found
                 break
@@ -2166,6 +2426,11 @@ class CollapseDriver:
             # checks of the step, which a restart from it makes first (resume_at)
             self._keep_landings(m)
             found = self._stop(m)
+            if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
+                m, found = self._meet_event(m, found)
+                if found is None:  # made: its rebuild stands for the one a stop cancelled
+                    self._distortion_skipped = 0
+                    continue
             if found is not None:
                 if self._distortion_skipped:  # the rebuild of this step, cancelled by this stop
                     found["distortion_rebuild_skipped"] = self._distortion_skipped
@@ -2176,17 +2441,32 @@ class CollapseDriver:
             else:
                 self._maybe_snapshot(m)
             m, found = self._remesh_checks(m)
+            if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
+                m, found = self._meet_event(m, found)
+                if found is None:
+                    continue
             if found is not None:
                 stop = found
                 break
             self._commit_post_cut(m)
             if self._t() - st.last_state_t >= self._state_interval():
                 self.save_state()
+        # with the events block, a cut whose hard budgets do not close leaves the problem holding
+        # a cut that is not accepted: nothing more is read from it, and the run ends on the state
+        # before the event, which the cut kept
+        unclosed = stop.get("reason") == EVENT_UNCLOSED
         if r is not None:  # after a cut the state the run ends on is a dump too
-            self._commit_post_cut(m)
-            if stop.get("reason") == EVENT_UNHANDLED:  # with the events block only
-                stop["precut"] = str(self._keep_event_state(stop))
-            stop["end_state"] = str(self._save_end_state())
+            if not unclosed:
+                self._commit_post_cut(m)
+            if stop.get("reason") in EVENT_STOPS:  # with the events block only
+                if not stop.get("precut"):  # unless the cut of the event kept it
+                    stop["precut"] = str(self._keep_event_state(stop))
+                self._event(stop["reason"], m, k=stop["k"], kind=stop.get("kind"),
+                            **{"class": stop.get("class")}, handler=stop.get("handler"),
+                            precut=stop["precut"])
+            if stop.get("window_end"):  # with the events block only
+                self._event("window-end", m, reason=stop["reason"])
+            stop["end_state"] = stop["precut"] if unclosed else str(self._save_end_state())
         if self.keep_stop_state and stop.get("trigger") == "neck-radius":
             # the measured state of an accepted step: a landing state for a reconnection
             stop["kept_state"] = str(self.keep_state(
@@ -2194,7 +2474,8 @@ class CollapseDriver:
                 pinch=self.pinch_time()))
         self._landings_left(m, stop)
         self._event("stop", m, **stop)
-        self._snapshot(m, "stop")
+        if not unclosed:
+            self._snapshot(m, "stop")
         out = {"stop": stop, "steps": st.step, "remesh_count": pb.remesh_count,
                "jet_born": st.born, "max_axis_curvature_before_birth": st.max_curvature,
                "max_axis_curvature_time": st.max_curvature_time, "snapshots": st.snapshots,
@@ -2207,6 +2488,10 @@ class CollapseDriver:
                           "inverted_element_remesh": self._nets_armed,
                           "inverted_element_remeshes": self._inversion_remeshes,
                           "axis_midside_repairs": getattr(pb, "axis_repairs_total", 0)}
+            if self.events is not None:  # only with the block: other results keep their keys
+                out["events"] = self._events_summary(stop)
+                out["window_end"] = ({"reason": stop["reason"], **self._taus(m["time"])}
+                                     if stop.get("window_end") else None)
         return out
 
     @contextlib.contextmanager

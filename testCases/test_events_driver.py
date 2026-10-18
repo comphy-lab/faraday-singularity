@@ -59,20 +59,24 @@ def test_without_the_block_the_neck_of_a_jet_below_delta_stops_the_run_at_once(t
 
 def test_an_event_without_a_handler_stops_the_run_resumably(tmp_path, monkeypatch):
     """With liquid events the neck of the hanging jet is followed until it lands (after the first
-    step, at 0.09 delta with a head 0.5 delta wide); the event has no handler yet: the run stops on
-    it (``event-unhandled``, event 1, kind ``liquid-neck``) and keeps the state before it,
+    step, at 0.09 delta with a head 0.5 delta wide); with a head too large to delete
+    (``max_head_volume`` 2 s^3) the event has no handler (``L-unhandled``): the run stops on it
+    (``event-unhandled``, event 1, kind ``liquid-neck``) and keeps the state before it,
     ``precut_e001`` (``cut_stage`` ``precut-event``), besides the end state. A continuation from
     that dump is admitted after the cut, may change the keys of every class, and meets the
     event again at once while it has no handler."""
     recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
-    events = ev.EventSettings.from_dict(LIQUID)
+    big = {"liquid": {"enabled": True, "max_head_volume": 2.0},
+           "post": {"open_neck_stop": False, "neck_floor": 2e-6}}
+    events = ev.EventSettings.from_dict(big)
     run = tmp_path / "run"
     out = _events_driver(run, HeadProblem(), recon, events=events, state_keep=10).run(1e-9)
     stop = out["stop"]
     assert stop["reason"] == ev.EVENT_UNHANDLED and out["steps"] == 1
     assert (stop["kind"], stop["class"], stop["handler"], stop["k"]) == (
-        "liquid-neck", "L", "liquid-cut", 1)
+        "liquid-neck", "L-unhandled", None, 1)
     assert stop["chain"] == "bubble" and stop["ratio"] == pytest.approx(0.9, rel=1e-3)
+    assert stop["status"] == "head-too-large"
     precut, end = Path(stop["precut"]), Path(stop["end_state"])
     assert precut.name == "precut_e001.dump" and precut.is_file() and end.is_file()
     meta = json.loads(precut.with_suffix(".json").read_text())
@@ -80,11 +84,15 @@ def test_an_event_without_a_handler_stops_the_run_resumably(tmp_path, monkeypatc
     assert meta["event"]["kind"] == "liquid-neck" and meta["event"]["index"] == stop["index"]
     assert meta["events"] == [] and meta["events_settings"] == events.to_dict()
     assert meta["step"] == 1 and meta["resume_at"] == "remesh-check"
-    assert [e["event"] for e in _events(run)][-1] == "stop"
+    lines = _events(run)
+    assert [e["event"] for e in lines][-2:] == [ev.EVENT_UNHANDLED, "stop"]
+    assert lines[-2]["k"] == 1 and lines[-2]["precut"] == stop["precut"]
+    assert out["events"]["made"] == 0 and out["events"]["stop"]["reason"] == ev.EVENT_UNHANDLED
+    assert out["window_end"] is None
     # the runner admits a continuation from it (the parent's records, as run_case writes them)
     case = json.loads(json.dumps(CASE))
     case["collapse"].update(reconnect=dict(RECON.to_dict(), delta=1e-3, dt0=1e-6),
-                            reconnect_events=LIQUID)
+                            reconnect_events=big)
     case_path = tmp_path / "case.json"
     case_path.write_text(json.dumps(case))
     digest = hashlib.sha256(case_path.read_bytes()).hexdigest()
@@ -96,7 +104,8 @@ def test_an_event_without_a_handler_stops_the_run_resumably(tmp_path, monkeypatc
     assert _admit(precut, case, case_path)[1] == "post-cut"
     eps = json.loads(json.dumps(case))
     eps["case_id"] = "sigterm-eps"
-    eps["collapse"]["reconnect_events"] = {"liquid": {"enabled": True, "eps_d": 0.1},
+    eps["collapse"]["reconnect_events"] = {"liquid": {"enabled": True, "max_head_volume": 2.0,
+                                                      "eps_d": 0.1},
                                            "post": {"open_neck_stop": False, "neck_floor": 2e-6}}
     eps_path = tmp_path / "eps.json"
     eps_path.write_text(json.dumps(eps))
@@ -157,7 +166,7 @@ def test_a_restart_meets_a_dumped_mesh_no_step_ran_on_as_fresh(tmp_path, monkeyp
     drv, res = again("finer", finer)
     assert drv.state.legs[-1]["changed"] == ["post.neck_floor"] and res["steps"] >= 1
     # a mesh a step has run on stays stepped on
-    later = _events_driver(tmp_path / "later", HeadProblem(), recon,
+    later = _events_driver(tmp_path / "later", HeadProblem(r_n=lambda t: 0.3), recon,
                            events=ev.EventSettings.from_dict(LIQUID), state_dt=0.0)
     later.run(1e-9)
     later.close()

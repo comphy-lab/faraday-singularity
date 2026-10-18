@@ -439,20 +439,22 @@ that reaches the head of a tracked neck lands that neck at once if `r_n <= liqui
 With `liquid.enabled` false a liquid neck is met at the cut's own test of a second pinch-off
 instead. Each event names the handler of its class (`events.HANDLERS`); a landed neck without a
 single head or with one too large, or met with liquid events off, whose head is then never
-classified, is of class `L-unhandled`, which has none. No event has a handler yet: the run stops on
-the first (`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of
-its class) and keeps the state before it as `states/precut_e<k>.dump` (`cut_stage` `precut-event`),
-besides the state it ends on; a continuation from it meets the event again, and its handler once one
-exists. The keys of `liquid` also set the cut of a landed neck, which the driver does not make yet:
-the cap that closes the stump (`liquid.cap`, `hemispheroid`, of height `liquid.cap_height`, 1, in
-neck radii and at most one), the velocity of the cap's nodes (`liquid.cap_fill`: `sample`, the old
-bulk velocity at their places, or `transfer`, what pyoomph's transfer gives them, an arm only), the
-projection after the cut (`liquid.projection`, true) and the first step after it (`liquid.restart`,
-null for the cut's `restart`), and the radius of the budgets of the cut (`liquid.box_radius`, 4:
-within `max(box_radius delta, 2 L_rem)` of the neck, `L_rem` the reach of the removed head along
-the axis) with the floors of their limits (`liquid.sigma_V`, `sigma_Pz`, `sigma_KE`, 0: the noise of
-the box in an ordinary rebuild, of its liquid volume, axial momentum and kinetic energy, in the
-solver's units, none until calibrated).
+classified, is of class `L-unhandled`, which has none. The run makes the cut of a landed liquid
+neck, `L` or `A-head` (below), within itself and goes on; it stops on any other event, resumably
+(`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of its class:
+the ring of a piercing, the fill of a groove and the split of a gas neck are still to be built),
+and keeps the state before it as `states/precut_e<k>.dump` (`cut_stage` `precut-event`), besides
+the state it ends on; a continuation from it meets the event again, and its handler once one
+exists. The keys of `liquid` also set the cut of a landed neck: the cap that closes the stump
+(`liquid.cap`, `hemispheroid`, of height `liquid.cap_height`, 1, in neck radii and at most one), the
+velocity of the cap's nodes (`liquid.cap_fill`: `sample`, the old bulk velocity at their places, or
+`transfer`, what pyoomph's transfer gives them, an arm only), the projection after the cut
+(`liquid.projection`, true) and the first step after it (`liquid.restart`, null for the cut's
+`restart`), and the radius of the budgets of the cut (`liquid.box_radius`, 4: within `max(box_radius
+delta, 2 L_rem)` of the neck, `L_rem` the reach of the removed head along the axis) with the floors
+of their limits (`liquid.sigma_V`, `sigma_Pz`, `sigma_KE`, 0: the noise of the box in an ordinary
+rebuild, of its liquid volume, axial momentum and kinetic energy, in the solver's units, none until
+calibrated).
 
 **The cut of a liquid neck** (`surgery.liquid_cut`) removes the head of a neck that lands under its
 own `liquid` keys (a request made under others is refused) and closes the stump at the neck by a
@@ -487,18 +489,43 @@ energy the projection changes either way (a tenth of the head's, or three times 
 area (a hundredth of the head's less the cap's) are flagged beyond their limits, and the identity is
 recorded without a limit until the noise of the box is calibrated (`closures`). The record
 (`events/event_<k>.json`, schema `faraday-event/2`) holds the trigger with the neck's Reynolds and
-Weber numbers (and the base of the jet, `r_j`, `z_b` and `r_j_over_r_n`, which the driver is to
-add), the cap with its fill and the elements per neck radius it was built with (`cap.fill`,
-`cap.elements_per_scale`), the removed head (volume, axial momentum, kinetic energy, areas and
-reach), the head as the ghost a run is to follow (its polygon, in the file only, its mean axial
-speed, equivalent radius, the retraction speed `r_n^(-1/2)` of its rear and its two ends), the
-totals of the removals since the gas cut (`removed_total`), the transfer, the projection and the
-budgets, and the states before and after the cut are kept (`states/precut_e<k>.dump`,
-`states/postcut_e<k>.dump`). A refusal leaves the problem unchanged; a failure after the remesh ends
-the run, and so do hard budgets that do not close, but as a stop to resume (`outcome` `unclosed`,
-`surgery.BudgetUnclosed`): a restart from `precut_e<k>`, under calibrated noise floors, cuts again.
-The tests make it on a synthetic state with a jet on each chain
-(`testCases/test_liquid_cut_fem.py`).
+Weber numbers (and the base of the jet whose neck it cut, `r_j`, `z_b`, `r_j_over_r_n` and the
+neck's distance from the base in jet radii, which the driver adds), the cap with its fill and the
+elements per neck radius it was built with (`cap.fill`, `cap.elements_per_scale`), the removed head
+(volume, axial momentum, kinetic energy, areas and reach), the head as the ghost a run is to follow
+(its polygon, in the file only, its mean axial speed, equivalent radius, the retraction speed
+`r_n^(-1/2)` of its rear and its two ends), the totals of the removals since the gas cut
+(`removed_total`), the transfer, the projection and the budgets, and the states before and after the
+cut are kept (`states/precut_e<k>.dump`, `states/postcut_e<k>.dump`). A refusal leaves the problem
+unchanged; a failure after the remesh ends the run, and so do hard budgets that do not close, but as
+a stop to resume (`outcome` `unclosed`, `surgery.BudgetUnclosed`): a restart from `precut_e<k>`,
+under calibrated noise floors, cuts again. The tests make it on a synthetic state with a jet on each
+chain (`testCases/test_liquid_cut_fem.py`).
+
+**The events within the run.** At each check of its stops (before a step, after it and after a
+rebuild) the run meets an event with a handler it makes, the cut of a landed liquid neck, by
+making it: with its last step as the history's step of the cut, it removes the head, measures the
+fresh mesh and checks its stops again as those of a mesh freshly built, then goes on from it. No new
+cycle begins: the births of the jets, the series of the singular time, the holds of the rebuilds and
+the last step are kept, while the growth limit of the local scale, the history of the cut tip's jet
+base and the kink region of its chain restart. The driver adds to the event's record what it
+measured of the state before it (the cut jet's base), the event's generation at its tip, its step
+and leg, its times in units of `delta^2` and of `T = t_p - t_cut`, the verdict of the cascade test,
+the source commit, the start of the ghost and the cut jet after the cut (`after`); `events.jsonl`
+gets an event `liquid-cut`, `profiles/` a profile, and `events.txt` a row per event (the trigger,
+the cap, the removed head and its ghost, the jet's base before and after, the closures relative to
+the head's own, the transfer, the interval since the event before at its tip, the cascade's verdict,
+the totals removed). The run stops resumably, with the dump of the state before the event, at the
+event after `max_events` (`max-events`), at one that the cascade test of its tip judges to shrink
+(`event-cascade`: an interval since the last at the tip below `cascade_min_interval delta^2`, or
+`cascade_count` successive ratios of the intervals and of the heads' volumes, each below
+`cascade_ratio`; a cascade that grows, or stays stationary, is recorded), at a cut refused before
+it changed anything (`liquid-cut-refused`) and at one whose hard budgets do not close
+(`event-unclosed`), after which the problem holds a cut that is not accepted: the run then ends on
+the state before the event (`end_state`) and dumps nothing more. Any other failure of a cut fails
+the run. With the block the result in `run_status.json` has `events` (the events made, by kind and
+by tip, the last, the totals removed, the cascade's verdicts and the event the run stopped on) and
+`window_end` (the end of the window the run stopped at, the bubble emptying).
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus

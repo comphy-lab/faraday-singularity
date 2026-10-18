@@ -1,12 +1,17 @@
 """Contract tests of the events a run after the cut makes with the events block
 (``collapse.reconnect_events``): the tip of an event, the monitor of a cascade of events at a tip
-and the ghosts of the removed heads (``events.py``). No finite-element problem is built."""
+and the ghosts of the removed heads (``events.py``), and the collapse driver that makes the events
+within its run, on stand-in problems whose chains are prescribed (``test_bookkeeping.
+CutProblem``) and a stand-in of the liquid cut. No finite-element problem is built."""
 
 from __future__ import annotations
 
+import itertools
+import json
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -140,3 +145,338 @@ def test_a_ghost_flags_the_stump_that_catches_it_and_the_far_tip_it_reaches_once
                 far_tip=None)
     assert ev.ghost_recontacts(up, 1.0, 100, {"cavity_tip": 0.21}) == []
     assert [x["kind"] for x in ev.ghost_recontacts(up, 1.0, 100, {"cavity_tip": 1e3})] == ["rear"]
+
+
+# --- the events the driver makes within a run, on stand-ins ---------------------------------------
+
+LIQUID = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False, "neck_floor": 2e-6}}
+
+
+class RegrowingHead:
+    """A stand-in problem (``test_bookkeeping.CutProblem``) whose bubble is
+    ``test_events_stops.bubble_with_head`` at delta = 1e-3, a jet hanging from its top whose neck
+    is 0.3 delta wide until ``period`` after its last cut and 0.09 delta from then on, landed
+    (eps_d 0.2 of a head 0.5 delta wide). The stand-in's cut (:func:`fake_surgery`) restores the
+    neck, but keeps the head."""
+
+    def __new__(cls, period=5e-6, **kw):
+        from test_bookkeeping import CutProblem
+        from test_events_stops import bubble_with_head
+
+        class Problem(CutProblem):
+            def __init__(self):
+                super().__init__(**kw)
+                self.period, self.last_cut, self._heads = period, 0.0, {}
+
+            def r_n(self):
+                return 0.3 if self.t - self.last_cut < self.period else 0.09
+
+            def interface_segments(self):
+                r_n = self.r_n()
+                if r_n not in self._heads:
+                    self._heads[r_n] = bubble_with_head(1e-3, r_n=r_n)[0]
+                segs = super().interface_segments()
+                P = self._heads[r_n].points
+                segs[0] = self._chain("bubble", P[:, 0].copy(), P[:, 1].copy(), ("axis", "axis"))
+                return segs
+
+        return Problem()
+
+
+def fake_surgery(*, refuse=(), refuse_late=(), unclosed=(), fail=(), keep_neck=False,
+                 ghost=None):
+    """A stand-in of ``surgery`` for the driver's liquid cuts on stand-in problems: the state
+    before the cut kept as the real cut keeps it, the neck restored (but with ``keep_neck``), a
+    rebuild counted, a record of the real one's form handed to ``on_made``, the state after it kept
+    and the record written; or, for the event numbers in ``refuse`` (at admission) and
+    ``refuse_late`` (once the state before it is kept), a refusal, in ``unclosed`` hard budgets that
+    do not close, in ``fail`` a failure after the rebuild. ``ghost`` sets fields of the ghost."""
+    import json as _json
+
+    class CutRefused(RuntimeError):
+        def __init__(self, message, record=None, precut=None):
+            super().__init__(message)
+            self.record, self.precut = record, precut
+
+    class CutFailed(RuntimeError):
+        def __init__(self, message, precut=None, record=None):
+            super().__init__(message)
+            self.precut, self.record = precut, record
+
+    class BudgetUnclosed(CutFailed):
+        pass
+
+    calls = []
+
+    def liquid_cut(problem, events, reconnect, outdir, request, *, k, dt_prev,
+                   elements_per_scale, h_floor, driver=None, on_made=None, log=print):
+        calls.append({"k": k, "dt_prev": dt_prev, "elements_per_scale": elements_per_scale,
+                      "h_floor": h_floor, "kind": request["kind"]})
+        t = problem.get_current_time()
+        neck = ev.event_neck(request)
+        record = {"schema": "faraday-event/2", "k": k, "kind": request["kind"],
+                  "class": request["class"]}
+        if k in refuse:
+            raise CutRefused("refused for the test", {**record, "outcome": "refused",
+                                                      "failed_at": "admission",
+                                                      "error": "CutRefused: for the test"})
+        precut = str(driver.keep_state(Path(outdir) / "states" / f"precut_e{k:03d}.dump",
+                                       cut_stage=ev.PRECUT_EVENT,
+                                       event={**{x: v for x, v in request.items()
+                                                 if x != "reason"}, "k": k}))
+        if k in refuse_late:
+            raise CutRefused("refused late", {**record, "outcome": "refused",
+                                              "failed_at": "caps"}, precut)
+        problem.remesh_count += 1  # the rebuild of the cut
+        if k in unclosed:
+            raise BudgetUnclosed("unclosed for the test", precut,
+                                 {**record, "outcome": "unclosed", "failed_at": "postcut",
+                                  "closures": {"hard": ["F1"]}})
+        if k in fail:
+            raise CutFailed("failed for the test", precut, {**record, "outcome": "failed"})
+        if not keep_neck:
+            problem.last_cut = t
+        d, V = float(neck["direction"]), float(neck["head_volume"])
+        tip = ev.event_tip(neck)
+        z_new = neck["z_n"] + d * neck["r_n"]
+        record.update(t=t, tau=t - problem.cut["t_cut"], tau_p=t - problem.cut["pinch"]["t_p"],
+                      chain=neck["chain"], tip=tip,
+                      trigger={**neck, "eps_d": events.liquid.eps_d, "Re_n": 15.0,
+                               "We_n": 27.0, "r_n_over_s": neck["r_n"] / neck["s"]},
+                      cap={"eta": 1.0, "z_tip_old": neck["z_tip"], "z_tip_new": z_new},
+                      removed={"V": V, "Pz": 50.0 * d * V, "KE": 1250.0 * V},
+                      ghost={"V": V, "Pz": 50.0 * d * V, "KE": 1250.0 * V, "U": 50.0 * d,
+                             "a": (0.75 * V / math.pi) ** (1 / 3), "v_ret": 20.0,
+                             "direction": d, "t0": t, "z_front0": neck["z_tip"],
+                             "z_rear0": z_new, "du_stump": 1.0, "status": "free",
+                             **(ghost or {})},
+                      closures={"relative": {f"F{j}": 1e-3 * j for j in range(1, 7)},
+                                "F3_phi": {"phi_relative_error": 1e-4}, "flags": [], "hard": []},
+                      transfer={"predicted_unlocated": 3, "reported_unlocated": 3},
+                      dt={"history": dt_prev}, dumps={"precut": precut}, outcome="made",
+                      wall_seconds=0.5)
+        before = [e for e in problem.events if e.get("kind") in ev.EVENT_CLASSES["liquid"]]
+        record["removed_total"] = {"events": len(before) + 1, **{
+            x: sum(e["removed"][x] for e in before) + record["removed"][x]
+            for x in ("V", "Pz", "KE")}}
+        problem.events = list(problem.events) + [record]
+        on_made(record)
+        record["dumps"]["postcut"] = str(driver.keep_state(
+            Path(outdir) / "states" / f"postcut_e{k:03d}.dump", cut_stage="postcut-event",
+            event_k=k))
+        path = Path(outdir) / "events" / f"event_{k:03d}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        full = dict(record, ghost=dict(record["ghost"], polygon=[[0.0, 1.0], [1e-4, 1.0]]))
+        path.write_text(_json.dumps(full))
+        return record
+
+    return SimpleNamespace(liquid_cut=liquid_cut, CutRefused=CutRefused, CutFailed=CutFailed,
+                           BudgetUnclosed=BudgetUnclosed, calls=calls,
+                           restore_cut=lambda problem, record: setattr(problem, "cut", record))
+
+
+def _rows(path: Path) -> list[dict]:
+    lines = path.read_text().splitlines()
+    head = lines[0][2:].split("\t")
+    return [dict(zip(head, line.split("\t"))) for line in lines[1:]]
+
+
+def _run(tmp_path, monkeypatch, problem, *, block=None, surgery=None, **kw):
+    """A run after a cut at delta = 1e-3 of the stand-in ``problem`` with the events block (the
+    liquid one by default) and a stand-in ``surgery``; returns the driver, its result and the
+    stand-in."""
+    from test_events_plumbing import _events_driver
+
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    surgery = surgery or fake_surgery()
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", surgery)
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    events = ev.EventSettings.from_dict(LIQUID if block is None else block)
+    drv = _events_driver(tmp_path, problem, recon, events=events,
+                         leg_info={"commit": "c" * 40}, **{"max_steps": 12, **kw})
+    out = drv.run(1e-9)
+    drv.close()
+    return drv, out, surgery
+
+
+def _jsonl(path: Path) -> list[dict]:
+    return [json.loads(x) for x in path.read_text().splitlines()]
+
+
+def test_the_driver_makes_each_event_and_goes_on_from_the_fresh_mesh(tmp_path, monkeypatch):
+    """The neck of the hanging jet lands 5e-6 after its last cut: the run makes each event
+    (the stand-in's liquid cut, with the run's last step as the history's and the floors after
+    the cut), re-measures the fresh mesh, checks its stops as those of a mesh freshly built and
+    goes on to its step limit. Each record gets the driver's bookkeeping (the jet's base before
+    the cut, the event's generation at its tip, step, leg, times in delta units, the cascade's
+    verdict, the commit, the ghost's start, the jet after it); events.txt holds a row per event,
+    events.jsonl a liquid-cut line, profiles/ a profile; the state after each cut is dumped with
+    the bookkeeping reset, its mesh fresh, no remesh check pending."""
+    drv, out, surgery = _run(tmp_path, monkeypatch, RegrowingHead())
+    assert out["stop"]["reason"] == "max-steps" and out["steps"] == 12
+    made = drv.pb.events
+    assert len(made) >= 2 and [e["k"] for e in made] == list(range(1, len(made) + 1))
+    assert [c["k"] for c in surgery.calls] == [e["k"] for e in made]
+    for c in surgery.calls:
+        assert c["elements_per_scale"] == 8.0 and c["h_floor"] == drv._h_floor()
+        assert c["dt_prev"] > 0.0
+    times = [e["t"] for e in made]
+    assert all(b - a == pytest.approx(5e-6, rel=0.5) for a, b in itertools.pairwise(times))
+    for j, e in enumerate(made, start=1):
+        assert (e["tip"], e["chain"], e["generation"]) == ("bubble_top", "bubble", j)
+        assert e["leg"] == 0 and e["commit"] == "c" * 40
+        assert e["tau_over_delta2"] == pytest.approx(e["tau"] / 1e-6)
+        assert e["t_prime_over_T"] == pytest.approx(e["tau_p"] / (-1e-6 - 0.0))
+        assert e["cascade"]["generation"] == j
+        assert e["cascade"]["verdict"] == ("first" if j == 1 else "undetermined")
+        trig = e["trigger"]
+        assert trig["r_j"] > 0.0 and trig["r_j_over_r_n"] == pytest.approx(trig["r_j"]
+                                                                           / trig["r_n"])
+        assert trig["neck_to_base_over_r_j"] > 0.0
+        assert e["dt"]["before"] == e["dt"]["history"] > 0.0
+        g = e["ghost"]
+        assert (g["tip"], g["far_tip"], g["recontacts"]) == ("bubble_top", "bubble_bottom", [])
+        assert g["step0"] == e["step"]
+        assert e["after"]["jet_born"] is True and e["after"]["r_j"] > 0.0
+        meta = json.loads(Path(e["dumps"]["postcut"]).with_suffix(".json").read_text())
+        assert meta["mesh_fresh"] is True and "resume_at" not in meta
+        assert math.isnan(meta["ell_prev"]) and [x["k"] for x in meta["events"]] == list(
+            range(1, j + 1))
+    rows = _rows(tmp_path / "events.txt")
+    assert [int(r["k"]) for r in rows] == [e["k"] for e in made]
+    assert rows[0]["kind"] == "liquid-neck" and rows[0]["tip"] == "bubble_top"
+    assert float(rows[1]["interval_over_delta2"]) == pytest.approx(
+        (times[1] - times[0]) / 1e-6)
+    assert float(rows[0]["F3"]) == pytest.approx(3e-3) and rows[0]["cascade"] == "first"
+    lines = _jsonl(tmp_path / "events.jsonl")
+    cuts = [x for x in lines if x["event"] == "liquid-cut"]
+    assert [x["k"] for x in cuts] == [e["k"] for e in made]
+    assert all(x["record"] == f"events/event_{x['k']:03d}.json" for x in cuts)
+    shots = [json.loads(p.read_text().splitlines()[0][2:])
+             for p in (tmp_path / "profiles").glob("profile_*[0-9].txt")]
+    assert sum(s["reason"] == "liquid-cut" for s in shots) == len(made)
+    summary = out["events"]
+    assert summary["made"] == len(made) and summary["by_tip"] == {"bubble_top": len(made)}
+    assert summary["removed_total"]["V"] == pytest.approx(sum(e["removed"]["V"] for e in made))
+    assert summary["last"]["k"] == len(made) and summary["stop"] is None
+    assert summary["cascade"] == {"bubble_top": made[-1]["cascade"]["verdict"]}
+    assert out["window_end"] is None
+
+
+def test_the_fresh_mesh_of_an_event_is_checked_as_a_freshly_built_one(tmp_path, monkeypatch):
+    """After each event the stops of the fresh mesh are those of a mesh freshly built (the guard's
+    limits there and the check of its curved elements), before the run steps from it."""
+    import faraday_singularity.driver as module
+
+    calls = []
+    real = module.post_cut_stops
+
+    def spy(*args, **kw):
+        calls.append((kw["guard"]["fresh"], kw["invalid"] is not None))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(module, "post_cut_stops", spy)
+    drv, out, _ = _run(tmp_path, monkeypatch, RegrowingHead(), max_steps=6)
+    assert drv.pb.events and out["stop"]["reason"] == "max-steps"
+    assert calls.count((True, True)) >= 1 + len(drv.pb.events)
+
+
+def test_the_run_stops_resumably_on_the_event_after_the_most_it_may_make(tmp_path, monkeypatch):
+    """With max_events 1 the second landing stops the run (``max-events``, event 2) with the dump
+    of the state before it, from which a run with a larger max_events goes on."""
+    block = {**LIQUID, "max_events": 1}
+    _, out, surgery = _run(tmp_path, monkeypatch, RegrowingHead(), block=block)
+    stop = out["stop"]
+    assert stop["reason"] == ev.EVENT_LIMIT and stop["k"] == 2 and stop["max_events"] == 1
+    assert [c["k"] for c in surgery.calls] == [1]
+    precut = Path(stop["precut"])
+    assert precut.name == "precut_e002.dump" and Path(stop["end_state"]).is_file()
+    meta = json.loads(precut.with_suffix(".json").read_text())
+    assert meta["cut_stage"] == ev.PRECUT_EVENT and meta["event"]["k"] == 2
+    assert [e["k"] for e in meta["events"]] == [1]
+    assert out["events"]["stop"]["reason"] == ev.EVENT_LIMIT
+    assert _jsonl(tmp_path / "events.jsonl")[-2]["event"] == ev.EVENT_LIMIT
+
+
+def test_events_at_one_tip_that_come_ever_faster_stop_the_run_as_a_cascade(tmp_path,
+                                                                           monkeypatch):
+    """A cut that leaves the neck landed: the fresh mesh lands it again at once, an interval of
+    zero at the tip, below cascade_min_interval delta^2: a shrinking cascade, the run stops
+    resumably (``event-cascade``, with the verdict) before making it."""
+    surgery = fake_surgery(keep_neck=True)
+    drv, out, _ = _run(tmp_path, monkeypatch, RegrowingHead(), surgery=surgery)
+    stop = out["stop"]
+    assert stop["reason"] == ev.EVENT_CASCADE and stop["k"] == 2
+    assert stop["cascade"]["verdict"] == "shrink" and stop["cascade"]["interval"] == 0.0
+    assert [c["k"] for c in surgery.calls] == [1] and len(drv.pb.events) == 1
+    assert Path(stop["precut"]).name == "precut_e002.dump"
+    assert out["events"]["stop"]["reason"] == ev.EVENT_CASCADE
+
+
+def test_a_refused_cut_stops_the_run_resumably_and_changes_nothing(tmp_path, monkeypatch):
+    """A cut refused at admission: the run stops (``liquid-cut-refused``, with the stage and the
+    error of the cut's record), keeps the state before the event and ends on it; one refused once
+    the state before it is kept names that dump instead of keeping another."""
+    drv, out, _ = _run(tmp_path / "a", monkeypatch, RegrowingHead(),
+                       surgery=fake_surgery(refuse=(1,)))
+    stop = out["stop"]
+    assert stop["reason"] == ev.LIQUID_CUT_REFUSED and stop["k"] == 1
+    assert stop["failed_at"] == "admission" and "for the test" in stop["error"]
+    assert stop["record"] == "events/event_001.json" and drv.pb.events == []
+    assert Path(stop["precut"]).name == "precut_e001.dump" and Path(stop["end_state"]).is_file()
+    drv, out, _ = _run(tmp_path / "b", monkeypatch, RegrowingHead(),
+                       surgery=fake_surgery(refuse_late=(1,)))
+    stop = out["stop"]
+    assert stop["reason"] == ev.LIQUID_CUT_REFUSED and stop["failed_at"] == "caps"
+    kept = sorted(p.name for p in (tmp_path / "b" / "states").glob("precut_e*.dump"))
+    assert kept == ["precut_e001.dump"] and Path(stop["precut"]).name == kept[0]
+
+
+def test_a_cut_whose_budgets_do_not_close_ends_the_run_on_the_state_before_it(tmp_path,
+                                                                             monkeypatch):
+    """Hard budgets that do not close (``event-unclosed``): the problem holds a cut that is not
+    accepted, so the run ends on the state before the event, which the cut kept (``end_state``),
+    and dumps nothing more; any other failure of the cut fails the run."""
+    _, out, _ = _run(tmp_path / "a", monkeypatch, RegrowingHead(),
+                     surgery=fake_surgery(unclosed=(1,)))
+    stop = out["stop"]
+    assert stop["reason"] == ev.EVENT_UNCLOSED and stop["hard"] == ["F1"]
+    assert stop["end_state"] == stop["precut"] and Path(stop["precut"]).is_file()
+    dumps = sorted(p.name for p in (tmp_path / "a" / "states").glob("*.dump"))
+    assert dumps == ["precut_e001.dump"] + [p for p in dumps if p.startswith("state_")]
+    steps = [json.loads(p.read_text())["step"]
+             for p in (tmp_path / "a" / "states").glob("state_*.json")]
+    assert steps and max(steps) < out["steps"]  # no dump of the state the cut left
+    shots = [json.loads(p.read_text().splitlines()[0][2:])["reason"]
+             for p in (tmp_path / "a" / "profiles").glob("profile_*[0-9].txt")]
+    assert "stop" not in shots
+    surgery = fake_surgery(fail=(1,))
+    with pytest.raises(RuntimeError, match="failed for the test"):
+        _run(tmp_path / "b", monkeypatch, RegrowingHead(), surgery=surgery)
+
+
+def test_a_restart_from_the_state_after_an_event_goes_on_with_its_cascade(tmp_path,
+                                                                        monkeypatch):
+    """From the dump of the state after the first event, a restart meets the next landing as the
+    event after it (k = 2, the second generation at its tip, its interval from the first)."""
+    from test_bookkeeping import _settings
+
+    from faraday_singularity.driver import CollapseDriver
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    drv, _, _ = _run(tmp_path / "a", monkeypatch, RegrowingHead(), max_steps=8)
+    first = drv.pb.events[0]
+    meta = json.loads(Path(first["dumps"]["postcut"]).with_suffix(".json").read_text())
+    pb = RegrowingHead()
+    pb.t, pb.last_cut = meta["time"], first["t"]
+    surgery = fake_surgery()
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", surgery)
+    again = CollapseDriver(pb, _settings(t_end=1.0, dt_max=1.0, max_steps=meta["step"] + 8),
+                           tmp_path / "b", reconnect=ReconnectSettings(delta=1e-3, dt0=1e-6),
+                           events=ev.EventSettings.from_dict(LIQUID))
+    again.restore(meta)
+    again.run(1e-9)
+    again.close()
+    assert [e["k"] for e in pb.events][:2] == [1, 2] and pb.events[1]["generation"] == 2
+    assert pb.events[1]["cascade"]["interval"] == pytest.approx(pb.events[1]["t"] - first["t"])

@@ -439,10 +439,22 @@ EVENT_REQUEST = "event-request"
 EVENT_UNHANDLED = "event-unhandled"
 # the handler of each class of event (None: none, an unhandled event or one to be designed when it
 # occurs), by class and not by kind: a liquid neck without a single head, with one too large, or
-# met with liquid events off (L-unhandled) has none, whatever found it. The driver has no handler
-# yet, so every event is a resumable stop
+# met with liquid events off (L-unhandled) has none, whatever found it
 HANDLERS = {"W1": "ring", "L": "liquid-cut", "A-head": "liquid-cut", "L-unhandled": None,
             "A-groove": "groove-fill", "G": "n-chain-split", "B": None, "X": None}
+# the handlers the driver makes within the run (surgery.liquid_cut); an event whose handler is
+# another, or none, is a resumable stop (EVENT_UNHANDLED)
+IMPLEMENTED_HANDLERS = ("liquid-cut",)
+# the stops of a run at an event, each with the dump of the state before the event (precut_e<k>),
+# from which a run resumes: an event without a handler; a cascade of events that shrink (the
+# CascadeMonitor); the most events (max_events); a liquid cut refused before anything changed;
+# one whose hard budgets do not close (surgery.BudgetUnclosed), which leaves the problem holding a
+# cut that is not accepted, so that the state before it is the run's end state
+EVENT_CASCADE = "event-cascade"
+EVENT_LIMIT = "max-events"
+LIQUID_CUT_REFUSED = "liquid-cut-refused"
+EVENT_UNCLOSED = "event-unclosed"
+EVENT_STOPS = (EVENT_UNHANDLED, EVENT_CASCADE, EVENT_LIMIT, LIQUID_CUT_REFUSED, EVENT_UNCLOSED)
 HEAD_SIDE_TOL = 0.05  # a head lies on one side of its neck's height to within this * r_n
 
 
