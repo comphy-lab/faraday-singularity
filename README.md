@@ -524,12 +524,14 @@ each ghost made). Every removal enters the budget of the run: `budget.txt` has a
 after the cut with the liquid of the mesh (its volume, axial momentum and kinetic energy, as in
 `chains.txt`), the volume, momentum and kinetic energy the events have removed since the gas cut
 (each head's at its cut, whose volume and momentum the cut checks against the change within its
-box) and their sums. The run stops resumably, with the dump of the state before the event, at the
+box) and their sums. Under `post.keep_event_dumps` `first<N>-last<M>` the dumps of the events made
+that the policy no longer keeps are deleted as the events come (`dumps.dropped` in their records).
+The run stops resumably, with the dump of the state before the event, which is always kept, at the
 event after `max_events` (`max-events`), at one that the cascade test of its tip judges to shrink
 (`event-cascade`: an interval since the last at the tip below `cascade_min_interval delta^2`, or
 `cascade_count` successive ratios of the intervals and of the heads' volumes, each below
-`cascade_ratio`; a cascade that grows, or stays stationary, is recorded), at a cut refused before
-it changed anything (`liquid-cut-refused`) and at one whose hard budgets do not close
+`cascade_ratio`; a cascade that grows, or stays stationary, is recorded), at a cut refused before it
+changed anything (`liquid-cut-refused`) and at one whose hard budgets do not close
 (`event-unclosed`), after which the problem holds a cut that is not accepted: the run then ends on
 the state before the event (`end_state`) and dumps nothing more. Any other failure of a cut fails
 the run. With the block the result in `run_status.json` has `events` (the events made, by kind and

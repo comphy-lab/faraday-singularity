@@ -300,8 +300,8 @@ from .episodes import ETA_HYS, EpisodeTracker
 from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, EVENT_STOPS,
                      EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, IMPLEMENTED_HANDLERS,
                      LIQUID_CUT_REFUSED, PRECUT_EVENT, SIZING_KEYS, CascadeMonitor, EventSettings,
-                     event_neck, event_tip, events_done, fold_stop_after_cut, ghost_place,
-                     ghost_recontacts, minimum_dt_after_cut)
+                     event_dump_policy, event_dumps_kept, event_neck, event_tip, events_done,
+                     fold_stop_after_cut, ghost_place, ghost_recontacts, minimum_dt_after_cut)
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -687,6 +687,7 @@ class CollapseDriver:
         # with the events block: a row per event the run makes (events.txt), and what an event in
         # the making hands its record (_meet_event, _on_event_made)
         self._event_rows = self._drops = self._budget = None
+        self._dumps_dropped = 0  # the dumps of events the policy deleted (post.keep_event_dumps)
         self._event_before: tuple | None = None
         self._event_after: dict | None = None
         if events is not None:
@@ -2062,8 +2063,34 @@ class CollapseDriver:
         self._write_event_row(made)
         if isinstance(made.get("ghost"), dict):
             self._write_drop_row(made, "free")
+        self._drop_event_dumps()
         self._commit_post_cut(m)
         return m, None
+
+    def _drop_event_dumps(self) -> list[str]:
+        """Under ``post.keep_event_dumps`` ``first<N>-last<M>`` (``events.event_dumps_kept``,
+        over the events of every leg): delete the dumps of the events made that the policy no
+        longer keeps, of those this run wrote (``states/precut_e<k>``, ``postcut_e<k>``), noting
+        them in the event's record (``dumps.dropped``). Returns the dumps deleted."""
+        policy = event_dump_policy(self.events.post.keep_event_dumps)
+        if policy is None:
+            return []
+        made = self._made_events()
+        kept = event_dumps_kept([e["k"] for e in made], policy)
+        out = []
+        for e in made:
+            k = int(e["k"])
+            for stage in ("precut", "postcut"):
+                path = self.outdir / "states" / f"{stage}_e{k:03d}.dump"
+                if stage in kept.get(k, ()) or not path.is_file():
+                    continue
+                for f in (path, path.with_suffix(".json")):
+                    f.unlink(missing_ok=True)
+                dumps = e.setdefault("dumps", {})
+                dumps["dropped"] = sorted(set(dumps.get("dropped") or []) | {stage})
+                out.append(str(path))
+        self._dumps_dropped += len(out)
+        return out
 
     def _on_event_made(self, rec: dict):
         """The driver's bookkeeping of a liquid cut made (``surgery.liquid_cut``'s ``on_made``,
@@ -2252,6 +2279,7 @@ class CollapseDriver:
                 "ghost_recontacts": {kind: sum(
                     1 for e in made for x in (e.get("ghost") or {}).get("recontacts") or ()
                     if x.get("kind") == kind) for kind in ("rear", "front")},
+                "dumps_dropped": self._dumps_dropped,
                 "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
                                                          "handler")}
                          if stop.get("reason") in EVENT_STOPS else None)}

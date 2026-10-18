@@ -554,3 +554,29 @@ def test_the_budget_of_the_run_holds_the_liquid_of_the_mesh_and_every_removal(tm
         assert steps[e["step"]] < j and steps.get(e["step"] + 1, j) >= j
     assert out["events"]["removed_total"] == pytest.approx(
         {x: sum(e["removed"][x] for e in made) for x in ("V", "Pz", "KE")})
+
+
+def test_the_dumps_of_the_events_are_kept_as_the_policy_says(tmp_path, monkeypatch):
+    """``post.keep_event_dumps`` ``first1-last1``: of the events made the state before the first
+    and both states of the last are kept, the others deleted as the events come and noted in their
+    records (``dumps.dropped``); ``all`` keeps every one."""
+    block = {"liquid": LIQUID["liquid"], "post": {**LIQUID["post"],
+                                                  "keep_event_dumps": "first1-last1"}}
+    drv, out, _ = _run(tmp_path / "policy", monkeypatch, RegrowingHead(period=3e-6), block=block,
+                       max_steps=20)
+    made = drv.pb.events
+    assert len(made) >= 3
+    states = tmp_path / "policy" / "states"
+    names = sorted(p.name for p in states.glob("p*cut_e*.dump"))
+    last = made[-1]["k"]
+    assert names == sorted({"precut_e001.dump", f"precut_e{last:03d}.dump",
+                            f"postcut_e{last:03d}.dump"})
+    assert not [p for p in states.glob("p*cut_e*.json")
+                if p.with_suffix(".dump").name not in names]
+    assert made[0]["dumps"]["dropped"] == ["postcut"]
+    assert all(e["dumps"]["dropped"] == ["postcut", "precut"] for e in made[1:-1])
+    assert "dropped" not in made[-1]["dumps"]
+    assert out["events"]["dumps_dropped"] == 1 + 2 * (len(made) - 2)
+    drv, out, _ = _run(tmp_path / "all", monkeypatch, RegrowingHead(period=3e-6), max_steps=20)
+    assert len(list((tmp_path / "all" / "states").glob("p*cut_e*.dump"))) == 2 * len(drv.pb.events)
+    assert out["events"]["dumps_dropped"] == 0

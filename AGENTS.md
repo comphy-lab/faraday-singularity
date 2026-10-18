@@ -281,24 +281,26 @@ add a second top-level `cases/` tree.
   enters the run's budget (`budget.txt`, a row per step after the cut: the mesh's volume, axial
   momentum and kinetic energy of `chains.txt`, the removals' since the gas cut,
   `CollapseDriver._removed`, and the sums; the volume and the momentum of each removal are hard
-  checks of its cut, within its box). Every other event is a resumable stop with the dump of the
-  state before it (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`,
-  also an event of its reason) besides the end state: `event-unhandled` (no handler made: the ring
-  of a piercing, the groove fill, the split of a gas neck, a liquid neck without a single head),
-  `max-events` (the event after `max_events`), `event-cascade` (`events.CascadeMonitor` judges it to
-  shrink: an interval at its tip below `cascade_min_interval delta^2`, or the last `cascade_count`
-  pairs of ratios of intervals and of head volumes below `cascade_ratio`), `liquid-cut-refused` (the
-  problem unchanged), `event-unclosed` (hard budgets that do not close: the problem holds a cut that
-  is not accepted, so the run ends on the state before it, its `end_state`, and dumps nothing more);
-  any other failure of a liquid cut fails the run. A continuation from such a dump is a post-cut
-  restart from which the keys of every class apply anew (`events.EventSettings.refused_changes`),
-  the events before it staying as made. The run's result with the block has `events` (made, by kind
-  and tip, the last, the totals removed, the cascade's verdicts, the ghosts' recontacts, the event
-  stopped on) and `window_end` (`bubble-vanishing`, also an event `window-end`). The tests of the
-  branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run
-  directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by
-  default. After the cut the driver reads its limits through accessors that return the collapse's
-  own value before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`, `_fold_stop`,
+  checks of its cut, within its box). The dumps of events that `post.keep_event_dumps` no longer
+  keeps are deleted as events come (`CollapseDriver._drop_event_dumps`, `dumps.dropped` in the
+  record). Every other event is a resumable stop with the dump of the state before it
+  (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`, also an event of
+  its reason) besides the end state: `event-unhandled` (no handler made: the ring of a piercing, the
+  groove fill, the split of a gas neck, a liquid neck without a single head), `max-events` (the
+  event after `max_events`), `event-cascade` (`events.CascadeMonitor` judges it to shrink: an
+  interval at its tip below `cascade_min_interval delta^2`, or the last `cascade_count` pairs of
+  ratios of intervals and of head volumes below `cascade_ratio`), `liquid-cut-refused` (the problem
+  unchanged), `event-unclosed` (hard budgets that do not close: the problem holds a cut that is not
+  accepted, so the run ends on the state before it, its `end_state`, and dumps nothing more); any
+  other failure of a liquid cut fails the run. A continuation from such a dump is a post-cut restart
+  from which the keys of every class apply anew (`events.EventSettings.refused_changes`), the events
+  before it staying as made. The run's result with the block has `events` (made, by kind and tip,
+  the last, the totals removed, the cascade's verdicts, the ghosts' recontacts, the event stopped
+  on) and `window_end` (`bubble-vanishing`, also an event `window-end`). The tests of the branch on
+  the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run directories
+  (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by default.
+  After the cut the driver reads its limits through accessors that return the collapse's own value
+  before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`, `_fold_stop`,
   `_neck_limit`): `post.h_floor` (focus floor, feature regions, guard, kink regions, the open
   chain's neck limit), `post.rise_tol`, `post.dt_min`, `gap.kappa_g delta` (also the groove gaps of
   `chains.txt`), `post.neck_floor` and `post.neck_elements_per_scale` (the neck regions of
