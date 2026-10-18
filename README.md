@@ -408,10 +408,12 @@ through the nodes that contacts itself, on a freshly built mesh a tracked liquid
 and the check of the curved elements. The bubble emptying (below `bubble_stop` of its volume at the
 cut) ends the window (`bubble-vanishing`, with `window_end`). Every change of topology is then an
 event, in this order: the bubble's two tips within `delta` of each other, the downward jet piercing
-the bubble (`piercing`); a landed liquid neck (`liquid-neck`); the fold closest to its limit
-(`a-head` or `groove`); a gas neck (`gas-neck`); the bridge closing (`bridge-closing`) and the
-chains approaching (`chain-contact`). A fold at the scale of the mesh (`contact` `kink`) is no
-event: it stops the run as the cut's own stops do. A neck on the liquid side is followed from
+the bubble (`piercing`); a landed liquid neck (`liquid-neck`); a closing fold, one that lands the
+neck of a head it reaches (`a-head`) on either chain before any closing groove (`groove`, the one
+closest to its limit), each head's own fold searched apart from the fold of its chain so that a
+closer fold elsewhere hides none; a gas neck (`gas-neck`); the bridge closing (`bridge-closing`)
+and the chains approaching (`chain-contact`). A fold at the scale of the mesh (`contact` `kink`)
+is no event: it stops the run as the cut's own stops do. A neck on the liquid side is followed from
 `liquid.track_depth` (0.05) below its shoulder. Its head is the side of it whose far end lies on the
 axis, that holds neither the wall end nor the bubble's widest point, lies on one side of the neck's
 height and bounds a simple section of at most `liquid.max_head_volume` (20) times the cube of its

@@ -219,11 +219,13 @@ add a second top-level `cases/` tree.
   `L-unhandled`) in the order `piercing` (W1, the bubble's tips within `delta`), `liquid-neck` (L,
   landed at `r_n <= eps_d s`, nearest first; `L-unhandled` without a single head or with one beyond
   `max_head_volume s^3`, and with liquid events off at the cut's second-pinch test, its head never
-  classified), the fold closest to `max(kappa_g delta, fold_stop_elements h_elem)` (`a-head` when
-  it reaches the head of a tracked neck with `r_n <= eps_max s`, `L-unhandled` for a head too
-  large, else `groove`; a fold at the scale of the mesh, `contact` `kink`, is no event but the
-  cut's own `self-contact-approach` or `annular-contact-approach`), `gas-neck`, `bridge-closing`,
-  `chain-contact`. Heads and tracked necks:
+  classified), a closing fold, below `max(kappa_g delta, fold_stop_elements h_elem)`, among the
+  fold of each chain and that of each tracked head (`events.head_fold`, so that a closer fold
+  elsewhere on its chain hides none): first one that reaches the head of a tracked neck with
+  `r_n <= eps_max s` on either chain (`a-head`, `L-unhandled` for a head too large; the narrowest
+  `r_n/s` first), then one at the scale of the mesh (`contact` `kink`), no event but the cut's own
+  `self-contact-approach` or `annular-contact-approach`, then the groove closest to its limit
+  (`groove`), then `gas-neck`, `bridge-closing`, `chain-contact`. Heads and tracked necks:
   `events.head_sides`, `liquid_necks`, `head_of_fold`. The driver has no handler yet, so every event
   is a resumable stop (`event-unhandled`, event number `k`) with the dump of the state before it
   (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`) besides the end

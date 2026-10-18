@@ -385,6 +385,56 @@ def head_of_fold(pair, necks: list[dict]) -> dict | None:
     return min(hits, key=lambda x: x["r_n"] / x["s"]) if hits else None
 
 
+def head_fold(points, head, exclude: int, *, ratio: float, stop: float, stop_elements: float,
+              search_factor: float):
+    """The fold of a chain among the pairs with a node on a head (``head``, the node range
+    ``[lo, hi]`` of :func:`liquid_necks`, but its neck ``exclude``), selected as
+    :func:`~faraday_singularity.selfcontact.fold_gap` selects the fold of the whole chain: the
+    pairs it examines (within the search radius ``search_factor max(stop, 2 stop_elements
+    spacing)`` of the node of the larger spacing), a fold where ``ratio D`` is below the arclength
+    between them, the smallest ``D / max(stop, stop_elements (spacing_i + spacing_j))``. A closer
+    fold elsewhere on the chain, which ``fold_gap`` selects instead, hides none on the head. Returns
+    a ``selfcontact.FoldGap`` (``NO_FOLD`` without one)."""
+    from scipy.spatial import cKDTree
+
+    from .selfcontact import NO_FOLD, FoldGap
+
+    P = np.asarray(points, dtype=float)
+    n = len(P)
+    lo, hi = int(head[0]), int(head[1])
+    on = np.zeros(n, dtype=bool)
+    on[max(lo, 0):hi + 1] = True
+    on[int(exclude)] = False
+    nodes = np.flatnonzero(on)
+    if n < 3 or not len(nodes):
+        return NO_FOLD
+    ds = np.hypot(*np.diff(P, axis=0).T)
+    arc = np.concatenate([[0.0], np.cumsum(ds)])
+    spacing = np.empty(n)
+    spacing[0], spacing[-1] = ds[0], ds[-1]
+    spacing[1:-1] = 0.5 * (ds[:-1] + ds[1:])
+    radii = search_factor * np.maximum(stop, 2.0 * stop_elements * spacing)
+    # the pairs within the radius of their head node, and within that of their other node
+    near = cKDTree(P).query_ball_point(P[nodes], radii[nodes])
+    i = np.repeat(nodes, [len(x) for x in near])
+    j = np.concatenate(near).astype(int) if len(i) else np.zeros(0, dtype=int)
+    reach = cKDTree(P[nodes]).query_ball_point(P, radii)
+    j2 = np.repeat(np.arange(n), [len(x) for x in reach])
+    i2 = nodes[np.concatenate(reach).astype(int)] if len(j2) else np.zeros(0, dtype=int)
+    i, j = np.concatenate([i, i2]), np.concatenate([j, j2])
+    D = np.hypot(*(P[i] - P[j]).T)
+    keep = (i != j) & (D <= np.maximum(radii[i], radii[j]))
+    fold = keep & (ratio * D < np.abs(arc[i] - arc[j]))
+    if not fold.any():
+        return NO_FOLD
+    score = D / np.maximum(stop, stop_elements * (spacing[i] + spacing[j]))
+    k = np.flatnonzero(fold)[np.argmin(score[fold])]
+    a, b = sorted((int(i[k]), int(j[k])))
+    m = 0.5 * (P[a] + P[b])
+    return FoldGap(float(np.hypot(*(P[a] - P[b]))), float(m[0]), float(m[1]), (a, b),
+                   float(arc[b] - arc[a]), float(spacing[a] + spacing[b]), False)
+
+
 def _neck_fields(x: dict) -> dict:
     keys = ("chain", "index", "r_n", "z_n", "depth", "shoulder", "h_loc", "s", "ratio", "status",
             "head", "side", "direction", "z_tip", "head_volume", "head_volume_over_s3")
@@ -418,16 +468,18 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
        (``piercing``, class ``W1``); a landed liquid neck, the one nearest its landing first
        (``liquid-neck``: class ``L``, or ``L-unhandled`` where the neck has no single head or one
        too large; with ``liquid.enabled`` false, a liquid neck at the cut's secondary-pinch test
-       instead, ``L-unhandled``, its head never classified); the fold closest to its limit
-       ``max(kappa_g delta, fold_stop_elements h_elem)`` (``gap``), which lands the neck of a head
-       it reaches when ``r_n <= eps_max s`` (``a-head``, class ``A-head``, or ``L-unhandled`` for
-       a head too large) and is otherwise a closing groove (``groove``, class ``A-groove``, with
-       the head's neck as ``a_head`` where one is reached and the jet whose base the pair
-       straddles), but a fold at the scale of the mesh (``contact`` ``kink``) is no event and stops
-       the run as the cut's stops do (``self-contact-approach``, or ``annular-contact-approach``
-       across the base of a jet, trigger ``fold-gap``); a gas neck at the cut's secondary-pinch
-       test (``gas-neck``, class ``G``); the bridge closing (``bridge-closing``, ``B``) and the
-       chains approaching (``chain-contact``, ``X``)."""
+       instead, ``L-unhandled``, its head never classified); a closing fold, one whose gap lies
+       below ``max(kappa_g delta, fold_stop_elements h_elem)`` (``gap``), among the fold of each
+       chain and that of each tracked head (:func:`head_fold`): first one that reaches the head of
+       a tracked neck with ``r_n <= eps_max s`` and lands that neck (``a-head``, class ``A-head``,
+       or ``L-unhandled`` for a head too large; the narrowest ``r_n/s`` first), on either chain,
+       then one at the scale of the mesh (``contact`` ``kink``), which is no event and stops the
+       run as the cut's stops do (``self-contact-approach``, or ``annular-contact-approach``
+       across the base of a jet, trigger ``fold-gap``), then the closing groove closest to its
+       limit (``groove``, class ``A-groove``, with the head's neck as ``a_head`` where one is
+       reached); each with the jet whose base its pair straddles; a gas neck at the cut's
+       secondary-pinch test (``gas-neck``, class ``G``); the bridge closing (``bridge-closing``,
+       ``B``) and the chains approaching (``chain-contact``, ``X``)."""
     from .reconnect import (Chain, chains_disjoint, chain_necks, edge_reading, fold_contact,
                             interface_guard, revolved_volume, spline_contact_stop)
     from .selfcontact import InterfaceSelfIntersection, fold_gap
@@ -509,13 +561,27 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
         found = secondary("liquid")
         if found is not None:  # no head classified: none to cut
             return _request("liquid-neck", "L-unhandled", detected_by="secondary-pinch", **found)
-    closing = []
-    for name, fold in folds:
+    # the closing folds: the one of each chain (fold_gap's, closest to its limit) and, so that a
+    # closer fold elsewhere on its chain hides none, the one of each tracked head
+    closing = {}
+
+    def offer(name, fold):
         fold_limit = max(stop_abs, fold_stop_elements * fold.h_elem)
         if math.isfinite(fold.gap) and fold.gap < fold_limit:
-            closing.append((fold.gap / fold_limit, name, fold, fold_limit))
-    if closing:  # the fold closest to its limit, on either chain
-        _, name, fold, fold_limit = min(closing, key=lambda x: x[0])
+            closing.setdefault((name, tuple(fold.pair)), (fold.gap / fold_limit, name, fold,
+                                                          fold_limit))
+
+    for name, fold in folds:
+        offer(name, fold)
+    points = {name: c.points for name, c in named}
+    for x in necks:
+        if x.get("head") is not None:
+            offer(x["chain"], head_fold(points[x["chain"]], x["head"], x["index"],
+                                        ratio=fold_ratio, stop=stop_abs,
+                                        stop_elements=fold_stop_elements,
+                                        search_factor=fold_search))
+    lands, kinks, grooves = [], [], []
+    for score, name, fold, fold_limit in closing.values():
         rec = {"chain": name, "contact": fold_contact(fold.arc, fold.h_elem),
                "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
                "fold_h_elem": fold.h_elem, "fold_limit": fold_limit,
@@ -531,16 +597,23 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
             # a contact at the scale of the mesh, not a groove of the resolved surface: no event
             # (nothing to fill or cut), the stop of the cut's own stops
             reason = "self-contact-approach" if jet is None else "annular-contact-approach"
-            return {"reason": reason, "trigger": "fold-gap", **rec}
-        head = head_of_fold(fold.pair, [x for x in necks if x["chain"] == name]) \
-            if ls.enabled else None
+            kinks.append((score, {"reason": reason, "trigger": "fold-gap", **rec}))
+            continue
+        head = head_of_fold(fold.pair, [x for x in necks if x["chain"] == name])
         if head is not None:
             rec["a_head"] = {**_neck_fields(head), "r_n_over_s": head["r_n"] / head["s"],
                              "eps_max": ls.eps_max}
             if head["r_n"] <= ls.eps_max * head["s"]:  # the head's neck lands
-                return _request("a-head", "A-head" if head["status"] == "head" else "L-unhandled",
-                                **rec)
-        return _request("groove", "A-groove", **rec)
+                lands.append(((head["r_n"] / head["s"], score), head, rec))
+                continue
+        grooves.append((score, rec))
+    if lands:  # a fold that lands a head's neck before any groove, the narrowest r_n/s first
+        _, head, rec = min(lands, key=lambda x: x[0])
+        return _request("a-head", "A-head" if head["status"] == "head" else "L-unhandled", **rec)
+    if kinks:
+        return min(kinks, key=lambda x: x[0])[1]
+    if grooves:  # the groove closest to its limit, on either chain
+        return _request("groove", "A-groove", **min(grooves, key=lambda x: x[0])[1])
     found = secondary("gas")
     if found is not None:
         return _request("gas-neck", "G", **found)

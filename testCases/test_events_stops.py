@@ -334,6 +334,67 @@ def test_a_fold_closes_at_kappa_g_delta_and_one_that_reaches_a_head_lands_its_ne
     assert req["kind"] == "groove" and req["fold_limit"] == 1e-4 and "a_head" not in req
 
 
+def _finger(chain, z_at, *, w=2e-4, L=2e-3, h=1e-4):
+    """The bubble chain with a gas finger ``L`` long and ``w`` wide (node spacing ``h``) out of its
+    lower sphere at the node nearest the height ``z_at``: a fold of the resolved surface, far from
+    the jet, narrower relative to its limit than the groove around the jet. Returns the chain and
+    the number of nodes it adds."""
+    P = chain.points
+    lower = np.arange(len(P)) < len(P) // 2
+    k = int(np.argmin(np.where(lower, np.abs(P[:, 1] - z_at), np.inf)))
+    t = P[k + 1] - P[k - 1]
+    t /= np.hypot(*t)
+    out = np.array([t[1], -t[0]]) * (1.0 if t[1] > 0 else -1.0)  # into the liquid, r growing
+    base = P[k]
+    side1 = [base - 0.5 * w * t + x * out for x in np.arange(h, L, h)]
+    tip = [base + L * out + 0.5 * w * (math.cos(a) * t + math.sin(a) * out)
+           for a in np.linspace(math.pi, 0.0, 5)[1:-1]]
+    side2 = [base + 0.5 * w * t + x * out for x in np.arange(L, 0.5 * h, -h)]
+    Q = np.vstack([P[:k], [base - 0.5 * w * t], side1, tip, side2, [base + 0.5 * w * t],
+                   P[k + 1:]])
+    return rc.Chain(Q, chain.end_types), len(Q) - len(P)
+
+
+def test_a_fold_that_lands_a_head_comes_before_any_groove_on_either_chain():
+    """Spec order: a fold that reaches the head of a tracked neck with r_n/s <= eps_max (A-head)
+    before any closing groove (A-groove), whichever is closer to its limit: a groove on the other
+    chain, or a closer fold on the same chain, which the fold of the whole chain (fold_gap's, one
+    per chain) selects instead, does not hide it. Each head's own fold is that of fold_gap among
+    the pairs with a node on it."""
+    from faraday_singularity.selfcontact import fold_gap
+
+    kw = {"ratio": 4.0, "stop": 5e-5, "stop_elements": 3.0, "search_factor": 4.0}
+    bubble, apex = bubble_with_head(1e-3, r_n=0.2, r_w=0.54)
+    alone = _stops([bubble, cavity()], apexes=_apexes(apex))
+    assert alone["kind"] == "a-head" and alone["fold_gap"] / alone["fold_limit"] > 0.75
+    (neck,) = ev.liquid_necks((("bubble", bubble),), LIQUID.liquid)
+    whole = fold_gap(bubble.points[:, 0], bubble.points[:, 1], **kw)
+    own = ev.head_fold(bubble.points, neck["head"], neck["index"], **kw)
+    assert own == whole and list(own.pair) == alone["fold_pair"]
+    # a groove closer to its limit on the open chain, the head's neck there not landing (0.6 s)
+    open_ = cavity_with_head(1e-3, r_n=0.3, r_w=0.53)
+    other = _stops([bubble_with_head(1e-3, r_n=0.3)[0], open_])
+    assert other["kind"] == "groove" and other["chain"] == "open"
+    assert other["fold_gap"] / other["fold_limit"] < 0.65
+    req = _stops([bubble, open_], apexes=_apexes(apex))
+    assert (req["kind"], req["class"], req["chain"]) == ("a-head", "A-head", "bubble")
+    assert req["fold_pair"] == alone["fold_pair"]
+    # a closer fold of the same chain, far from the jet: the chain's own fold, but not the event
+    fingered, added = _finger(bubble, Z_APEX - 0.08)
+    whole = fold_gap(fingered.points[:, 0], fingered.points[:, 1], **kw)
+    assert whole.gap / max(5e-5, 3.0 * whole.h_elem) < 0.1 and whole.pair[1] < apex
+    assert rc.fold_contact(whole.arc, whole.h_elem) == "fold"
+    req = _stops([fingered, cavity()], apexes=_apexes(apex + added))
+    assert (req["kind"], req["class"]) == ("a-head", "A-head")
+    assert req["fold_pair"] == [k + added for k in alone["fold_pair"]]
+    # with the head's neck too wide to land, the closer fold is the groove
+    wide, apex_w = bubble_with_head(1e-3, r_n=0.3, r_w=0.54)
+    fingered, added = _finger(wide, Z_APEX - 0.08)
+    req = _stops([fingered, cavity()], apexes=_apexes(apex_w + added))
+    assert req["kind"] == "groove" and req["fold_pair"] == list(fold_gap(
+        fingered.points[:, 0], fingered.points[:, 1], **kw).pair) and "a_head" not in req
+
+
 def test_the_branch_orders_invalid_states_then_the_window_then_the_events():
     """Precedence within one state: a state that is not valid stops first (a spline that contacts
     itself, then on a fresh mesh an unresolved tracked neck, the guard, the driver's check of the
