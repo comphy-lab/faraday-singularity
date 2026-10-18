@@ -875,7 +875,7 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
                    h_min: float, *, neck_elements: float = 3.0, fold_ratio: float = 4.0,
                    fold_stop: float = 1e-3, fold_stop_elements: float = 3.0,
                    fold_search: float = 4.0, apexes: dict | None = None,
-                   guard: dict | None = None) -> dict | None:
+                   guard: dict | None = None, events=None, invalid=None) -> dict | None:
     """The stop a state after the cut calls for, if any.
 
     The mesh cannot follow a second change of topology: the bridge closing again (the bubble and
@@ -915,7 +915,21 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     The collapse driver's own neck stop covers only the open chain
     (``FaradayProblem.interface_arrays``); after a cut its fold stop is this one, on both chains,
     and the only one on the bubble, which before the cut was part of the open chain. Each chain is
-    examined on its own, so the bridge between the two is never a fold."""
+    examined on its own, so the bridge between the two is never a fold.
+
+    With ``events``, the events block (``events.EventSettings``), the stops are those of the events
+    branch instead, in its own order and with its own limits (``events.post_cut_events``), and
+    ``invalid`` is the check of a fresh mesh's curved elements the driver makes among the stops of
+    an invalid state; without it the stops are those above, unchanged."""
+    if events is not None:
+        from .events import post_cut_events
+
+        return post_cut_events(chains, cut, settings, h_min, events, neck_elements=neck_elements,
+                               fold_ratio=fold_ratio, fold_stop=fold_stop,
+                               fold_stop_elements=fold_stop_elements, fold_search=fold_search,
+                               apexes=apexes, guard=guard, invalid=invalid)
+    if invalid is not None:
+        raise TypeError("post_cut_stops: invalid is a check of the events branch (events)")
     if len(chains) != 2:
         return {"reason": "topology-changed", "chains": len(chains)}
     bubble = next(c for c in chains if not c.is_open)

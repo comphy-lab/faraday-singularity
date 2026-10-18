@@ -286,7 +286,7 @@ import numpy as np
 from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_disc_points,
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
-from .events import PRECUT_EVENT, EventSettings, events_done
+from .events import EVENT_REQUEST, EVENT_UNHANDLED, PRECUT_EVENT, EventSettings, events_done
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -748,6 +748,22 @@ class CollapseDriver:
             apexes.setdefault(a["chain"], []).append({"tip": tip, **a})
         s = self.s
         fresh = self._fresh_mesh()
+        if self.events is not None:
+            # the events branch: invalid states, the end of the window, then the events, of which
+            # none has a handler yet (a resumable stop, _unhandled_event)
+            stop = post_cut_stops(chains, CutGeometry(**cut["geometry"]), self.reconnect,
+                                  cut["sizing"]["h_tip"], neck_elements=s.neck_stop_elements,
+                                  fold_ratio=s.fold_ratio, fold_stop=s.fold_stop,
+                                  fold_stop_elements=s.fold_stop_elements, fold_search=FOLD_SEARCH,
+                                  apexes=apexes, guard={"fresh": fresh, "h_floor": s.h_floor,
+                                                        "refine_ratio": s.refine_ratio},
+                                  events=self.events,
+                                  invalid=self._jacobian_stop if fresh else None)
+            if stop is not None and stop["reason"] == EVENT_REQUEST:
+                stop = self._unhandled_event(stop)
+            if stop is not None:
+                stop.update(self._taus(self._t()))
+            return stop
         stop = post_cut_stops(chains, CutGeometry(**cut["geometry"]), self.reconnect,
                               cut["sizing"]["h_tip"], neck_elements=s.neck_stop_elements,
                               fold_ratio=s.fold_ratio, fold_stop=s.fold_stop,
@@ -759,6 +775,24 @@ class CollapseDriver:
         if stop is not None:
             stop.update(self._taus(self._t()))
         return stop
+
+    def _unhandled_event(self, request: dict) -> dict:
+        """The stop of an event that has no handler yet (``events.post_cut_events``' request):
+        ``event-unhandled``, with the event's number ``k`` (one more than the events made) and
+        what found it; at the end of the run the state is kept as the state before the event,
+        ``precut_e<k>`` (``run``), from which a run continues once the event's handler exists."""
+        out = {key: v for key, v in request.items() if key != "reason"}
+        return {"reason": EVENT_UNHANDLED, "k": len(self._made_events()) + 1, **out}
+
+    def _keep_event_state(self, stop: dict) -> Path:
+        """The dump of the state before an unhandled event (``precut_e<k>``, outside the rotation,
+        ``cut_stage`` ``precut-event``, with the event as the stop found it): a continuation from
+        it meets the event again, with its handler once one exists, and may change the keys of the
+        event's class from it (``events.EventSettings.refused_changes``)."""
+        k = int(stop["k"])
+        event = {key: v for key, v in stop.items() if key != "reason"}
+        return self.keep_state(self.outdir / "states" / f"precut_e{k:03d}.dump",
+                               cut_stage=PRECUT_EVENT, event=event)
 
     def _jacobian_stop(self) -> dict | None:
         """``interface-unresolved`` (trigger ``curved-jacobian``) for a mesh with an element whose
@@ -1217,7 +1251,7 @@ class CollapseDriver:
 
     # --- bookkeeping --------------------------------------------------------------------------
 
-    def _event(self, kind: str, m: dict, **extra):
+    def _event(self, kind: str, m: dict, /, **extra):
         rec = {"event": kind, "time": m["time"], "step": self.state.step,
                "r_j": m["r_j"], "z_axis": m["z_axis"], "ell": m["ell"],
                "axis_curvature": m["axis_curvature"],
@@ -2039,6 +2073,8 @@ class CollapseDriver:
                 self.save_state()
         if r is not None:  # after a cut the state the run ends on is a dump too
             self._commit_post_cut(m)
+            if stop.get("reason") == EVENT_UNHANDLED:  # with the events block only
+                stop["precut"] = str(self._keep_event_state(stop))
             stop["end_state"] = str(self._save_end_state())
         if self.keep_stop_state and stop.get("trigger") == "neck-radius":
             # the measured state of an accepted step: a landing state for a reconnection

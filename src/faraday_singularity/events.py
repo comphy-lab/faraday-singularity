@@ -26,6 +26,16 @@ events (:meth:`EventSettings.class_keys`), fixed once an event of the class has 
 in a restart from the state before an event (``precut_e<k>``), from which they apply anew; every
 other key is a key of the leg, which any restart may change (:meth:`EventSettings.
 refused_changes`). Lengths and times are in the solver's units (length ``1/k``, capillary time).
+
+With the block the stops of a state after the cut are those of :func:`post_cut_events`, in three
+ranks: a state that is not valid stops the run; the bubble emptying ends the window; every change of
+topology is an event, returned as a request for its handler (``event-request``). No handler exists
+yet: the driver stops on each event, resumably (``event-unhandled``, with the dump of the state
+before it, ``precut_e<k>``), so that a run continues from it once its handler exists. A liquid neck
+is followed from ``liquid.track_depth`` on (:func:`liquid_necks`, :func:`head_sides`) and lands at
+``r_n <= liquid.eps_d s``, ``s`` the largest radius of its head; a fold of either chain closes at
+``max(gap.kappa_g delta, fold_stop_elements h_elem)``, and one that reaches the head of a tracked
+neck lands that neck once ``r_n <= liquid.eps_max s`` (:func:`head_of_fold`).
 """
 
 from __future__ import annotations
@@ -34,6 +44,8 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass, field, fields
+
+import numpy as np
 
 EVENTS_BLOCK = "reconnect_events"  # the key of the block in a case's collapse block
 BUBBLE_BOTTOM_SIZINGS = ("kept", "frozen")
@@ -112,8 +124,8 @@ class PostCutSettings:
     through ``neck_stop_elements h_floor``); ``neck_floor`` is the smallest size of the region of a
     neck (the cut's focus size without it) and ``neck_elements_per_scale`` its elements per neck
     radius (``reconnect.elements_per_scale`` without it); ``rise_tol`` replaces the collapse's
-    ``rise_tol`` (the rise of a bump above its base that makes a jet); ``dt_min`` the step-size floor
-    of the driver; ``minimum_dt`` is oomph-lib's smallest step after the cut (``Problem::
+    ``rise_tol`` (the rise of a bump above its base that makes a jet); ``dt_min`` the step-size
+    floor of the driver; ``minimum_dt`` is oomph-lib's smallest step after the cut (``Problem::
     Minimum_dt``, 1e-3 times the driver's floor without it), below which it gives up on a step,
     and below which it also refuses an accepted step whose next candidate, four times the step,
     would fall; before the cut it stays at oomph-lib's default. ``open_neck_stop`` false drops the
@@ -254,3 +266,276 @@ def split_events_block(collapse: dict) -> tuple[dict, dict | None]:
     if block is not None and not isinstance(block, dict):
         raise ValueError(f"collapse.{EVENTS_BLOCK} must be an object")
     return rest, block
+
+
+# --- the events after the cut, as the stops find them ---------------------------------------------
+
+# what reconnect.post_cut_stops returns, with the block, for an event: the driver meets it with its
+# handler, and stops on one that has none yet, resumably (EVENT_UNHANDLED)
+EVENT_REQUEST = "event-request"
+EVENT_UNHANDLED = "event-unhandled"
+# the handler of each kind of event (None: to be designed when one occurs); the driver has none
+# yet, so every event is a resumable stop
+HANDLERS = {"liquid-neck": "liquid-cut", "a-head": "liquid-cut", "groove": "groove-fill",
+            "piercing": "ring", "gas-neck": "n-chain-split", "bridge-closing": None,
+            "chain-contact": None}
+HEAD_SIDE_TOL = 0.05  # a head lies on one side of its neck's height to within this * r_n
+
+
+def fold_stop_after_cut(events: EventSettings | None, delta: float, fold_stop: float) -> float:
+    """The absolute part of the fold limit after the cut: ``kappa_g delta`` with the block's
+    ``gap.kappa_g``, the collapse's ``fold_stop`` without the block or with ``kappa_g`` null."""
+    if events is None or events.gap.kappa_g is None:
+        return fold_stop
+    return events.gap.kappa_g * delta
+
+
+def head_sides(points, end_types, index: int, *, is_bubble: bool,
+               tol: float = HEAD_SIDE_TOL) -> list[dict]:
+    """The two sides of the neck at node ``index`` of a chain, each with the tests of a head: the
+    side's far end lies on the axis (``axis_end``); it does not hold the widest node of the bubble
+    chain (``holds_widest``; on the open chain the wall end, which no axis end is, rules the other
+    side out); its nodes lie on the side of the neck's height ``z_n`` that its tip lies on, to
+    within ``tol r_n`` (``one_sided``, with ``direction`` the sign of ``z_tip - z_n``); and its
+    half-section, the side from the neck to its tip closed along the axis and by the chord at
+    ``z_n``, is a simple polygon (``simple``). ``qualifies`` when all hold. Each side also gives its
+    node range (``lo``, ``hi``, the neck included), its largest radius ``s``, the volume of its
+    half-section revolved (``volume``) and its tip's height (``z_tip``)."""
+    from shapely.geometry import LinearRing
+
+    from .reconnect import AXIS, revolved_volume
+
+    P = np.asarray(points, dtype=float)
+    n, i = len(P), int(index)
+    r_n, z_n = float(P[i, 0]), float(P[i, 1])
+    widest = int(np.argmax(P[:, 0]))
+    out = []
+    for name, lo, hi, end in (("before", 0, i, 0), ("after", i, n - 1, 1)):
+        side = P[lo:hi + 1]
+        z_tip = float(P[0, 1] if end == 0 else P[-1, 1])
+        direction = float(np.sign(z_tip - z_n))
+        rec = {"side": name, "lo": lo, "hi": hi, "axis_end": end_types[end] == AXIS,
+               "holds_widest": bool(is_bubble and lo <= widest <= hi),
+               "direction": direction, "z_tip": z_tip, "s": float(side[:, 0].max()),
+               "one_sided": bool(direction != 0.0
+                                 and np.all(direction * (side[:, 1] - z_n) >= -tol * r_n)),
+               "simple": False, "volume": math.nan}
+        if rec["axis_end"]:
+            path = side[::-1] if end == 0 else side  # from the neck to the tip on the axis
+            section = np.vstack([path, [[0.0, z_n]]])
+            rec["simple"] = bool(LinearRing(section).is_simple)
+            rec["volume"] = revolved_volume(section)
+        rec["qualifies"] = bool(rec["axis_end"] and not rec["holds_widest"] and rec["one_sided"]
+                                and rec["simple"])
+        out.append(rec)
+    return out
+
+
+def liquid_necks(named, ls: LiquidEventSettings) -> list[dict]:
+    """The tracked necks on the liquid side of the ``(name, chain)`` pairs: every neck of a chain
+    (``reconnect.chain_necks``) with side ``liquid`` and a depth of at least ``ls.track_depth``.
+
+    Each gives its chain and node (``chain``, ``index``), ``r_n``, ``z_n``, ``depth`` and
+    ``shoulder`` (``chain_necks``), the element length there, twice the shorter of its two segments
+    (``h_loc``), and its head (:func:`head_sides`): where exactly one side qualifies, ``head`` (its
+    node range), ``s`` its largest radius, ``direction``, ``z_tip`` and ``head_volume``, with
+    ``status`` ``head``, or ``head-too-large`` beyond ``ls.max_head_volume s^3``; where none or both
+    do, ``status`` ``no-head`` or ``two-heads``, ``head`` None and ``s`` the shoulder. The neck has
+    landed (``landed``) once ``r_n <= eps_d s`` (``ratio``, ``r_n/(eps_d s)``, at most one)."""
+    from .reconnect import chain_necks
+
+    out = []
+    for name, c in named:
+        P = np.asarray(c.points, dtype=float)
+        seg = np.hypot(*np.diff(P, axis=0).T)
+        for nk in chain_necks(P, c.end_types):
+            if nk["side"] != "liquid" or nk["depth"] < ls.track_depth:
+                continue
+            i = int(nk["index"])
+            rec = {"chain": name, "index": i, "r_n": float(nk["r"]), "z_n": float(nk["z"]),
+                   "depth": float(nk["depth"]), "shoulder": float(nk["shoulder"]),
+                   "h_loc": 2.0 * float(min(seg[i - 1], seg[i]))}
+            heads = [h for h in head_sides(P, c.end_types, i, is_bubble=not c.is_open)
+                     if h["qualifies"]]
+            if len(heads) == 1:
+                h = heads[0]
+                s = h["s"]
+                rec.update(head=[h["lo"], h["hi"]], side=h["side"], s=s, direction=h["direction"],
+                           z_tip=h["z_tip"], head_volume=h["volume"],
+                           head_volume_over_s3=h["volume"] / s**3,
+                           status="head" if h["volume"] <= ls.max_head_volume * s**3
+                           else "head-too-large")
+            else:
+                rec.update(head=None, s=rec["shoulder"],
+                           status="no-head" if not heads else "two-heads")
+            rec["ratio"] = rec["r_n"] / (ls.eps_d * rec["s"])
+            rec["landed"] = bool(rec["r_n"] <= ls.eps_d * rec["s"])
+            out.append(rec)
+    return out
+
+
+def head_of_fold(pair, necks: list[dict]) -> dict | None:
+    """The tracked neck (:func:`liquid_necks`, on the fold's chain) on whose head a node of the
+    fold pair lies, beyond the neck itself: the bulb of a head coming up to the wall of the groove
+    around it (the narrowest relative to its head, ``r_n/s``, if several); None otherwise."""
+    hits = [x for x in necks if x.get("head") is not None
+            and any(x["head"][0] <= k <= x["head"][1] and k != x["index"] for k in pair)]
+    return min(hits, key=lambda x: x["r_n"] / x["s"]) if hits else None
+
+
+def _neck_fields(x: dict) -> dict:
+    keys = ("chain", "index", "r_n", "z_n", "depth", "shoulder", "h_loc", "s", "ratio", "status",
+            "head", "side", "direction", "z_tip", "head_volume", "head_volume_over_s3")
+    return {k: x[k] for k in keys if k in x}
+
+
+def _request(kind: str, cls: str, **fields) -> dict:
+    return {"reason": EVENT_REQUEST, "kind": kind, "class": cls, "handler": HANDLERS[kind],
+            **fields}
+
+
+def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, *,
+                    neck_elements: float, fold_ratio: float, fold_stop: float,
+                    fold_stop_elements: float, fold_search: float, apexes: dict | None,
+                    guard: dict | None, invalid=None) -> dict | None:
+    """The stops and events of a state after the cut with the events block, in their order
+    (``reconnect.post_cut_stops`` with ``events``; its arguments).
+
+    1. A state that is not valid, or that no step may start from, stops the run: the chains not
+       two (``topology-changed``), chains that touch or a chain whose nodes have crossed (raised),
+       a spline through the nodes that contacts itself (``self-contact-approach``, trigger
+       ``spline-contact``), on a freshly built mesh (``guard["fresh"]``) a tracked liquid neck
+       narrower than ``liquid.resolution`` element lengths at it (``liquid-neck-unresolved``),
+       the guard of the interface (``interface-unresolved``) and ``invalid()``, the check of the
+       curved elements of a fresh mesh the driver passes.
+    2. The end of the window: the bubble emptied below ``bubble_stop`` of its volume at the cut
+       (``bubble-vanishing``, ``window_end``).
+    3. The events, each returned as a request (reason ``event-request``, its ``kind``, ``class`` and
+       the ``handler`` it is to have): the bubble's two tips within ``max(delta, 3 h_min)``, the
+       downward jet piercing the bubble (``piercing``); a landed liquid neck, the one nearest its
+       landing first (``liquid-neck``: class ``L``, or ``L-unhandled`` where the neck has no single
+       head or one too large; with ``liquid.enabled`` false, a liquid neck at the cut's
+       secondary-pinch test instead); the fold closest to its limit ``max(kappa_g delta,
+       fold_stop_elements h_elem)`` (``gap``), which lands the neck of a head it reaches when
+       ``r_n <= eps_max s`` (``a-head``, class ``A-head``) and is otherwise a closing groove
+       (``groove``, class ``A-groove``, with the head's neck as ``a_head`` where one is reached and
+       the jet whose base the pair straddles); a gas neck at the cut's secondary-pinch test
+       (``gas-neck``, class ``G``); the bridge closing (``bridge-closing``, ``B``) and the chains
+       approaching (``chain-contact``, ``X``)."""
+    from .reconnect import (Chain, chains_disjoint, chain_necks, edge_reading, fold_contact,
+                            interface_guard, revolved_volume, spline_contact_stop)
+    from .selfcontact import InterfaceSelfIntersection, fold_gap
+
+    if len(chains) != 2:
+        return {"reason": "topology-changed", "chains": len(chains)}
+    bubble = next(c for c in chains if not c.is_open)
+    cavity = next(c for c in chains if c.is_open)
+    named = (("bubble", bubble), ("open", cavity))
+    ls = events.liquid
+    # 1. the state itself
+    chain_gap = chains_disjoint(chains)  # raises where two chains touch or cross
+    stop_abs = fold_stop_after_cut(events, settings.delta, fold_stop)
+    folds = []
+    for name, c in named:
+        fold = fold_gap(c.points[:, 0], c.points[:, 1], ratio=fold_ratio, stop=stop_abs,
+                        stop_elements=fold_stop_elements, search_factor=fold_search)
+        if fold.crossed:
+            what = "bubble" if name == "bubble" else "open chain"
+            raise InterfaceSelfIntersection(
+                f"the {what}'s free surface crosses itself after the cut")
+        folds.append((name, fold))
+    stride = 2 if settings.rebuild_spline == "vertices" else 1
+    stop = spline_contact_stop([(name, Chain(c.points[::stride], c.end_types))
+                                if stride > 1 and len(c.points) % 2 == 1 else (name, c)
+                                for name, c in named])
+    if stop is not None:
+        return stop
+    necks = liquid_necks(named, ls) if ls.enabled else []
+    fresh = bool(guard["fresh"]) if guard is not None else False
+    if fresh:
+        unresolved = [x for x in necks if x["r_n"] < ls.resolution * x["h_loc"]]
+        if unresolved:
+            x = min(unresolved, key=lambda x: x["r_n"] / x["h_loc"])
+            return {"reason": "liquid-neck-unresolved", **_neck_fields(x),
+                    "limit": ls.resolution * x["h_loc"], "resolution": ls.resolution,
+                    "fresh": True}
+    if guard is not None:
+        stop = interface_guard({name: edge_reading(c.points) for name, c in named}, settings,
+                               fresh=fresh, h_floor=float(guard["h_floor"]),
+                               refine_ratio=float(guard["refine_ratio"]))["stop"]
+        if stop is not None:
+            return stop
+    if invalid is not None:
+        stop = invalid()
+        if stop is not None:
+            return stop
+    # 2. the end of the window
+    vb = revolved_volume(bubble.points)
+    if vb < settings.bubble_stop * cut.bubble_volume:
+        return {"reason": "bubble-vanishing", "bubble_volume": vb, "window_end": True}
+    # 3. the events
+    zb = sorted([float(bubble.points[0, 1]), float(bubble.points[-1, 1])])
+    zc = cavity.axis_ends()[0][1]
+    length = zb[1] - zb[0]
+    limit = max(settings.delta, 3.0 * h_min)
+    if length < limit:
+        return _request("piercing", "W1", bubble_length=length, limit=limit)
+    neck_limit = max(settings.delta, neck_elements * h_min)
+
+    def secondary(side):  # the cut's test of a new neck (reconnect.post_cut_stops)
+        for name, c in named:
+            for nk in chain_necks(c.points, c.end_types):
+                if nk["side"] == side and nk["r"] < neck_limit and (
+                        nk["depth"] >= settings.neck_depth or nk["r"] < neck_elements * h_min):
+                    return {"chain": name, "r_neck": nk["r"], "z_neck": nk["z"],
+                            "index": int(nk["index"]), "neck_limit": neck_limit,
+                            "neck_shoulder": nk["shoulder"], "neck_depth": nk["depth"],
+                            "neck_side": side}
+        return None
+
+    if ls.enabled:
+        landed = sorted((x for x in necks if x["landed"]), key=lambda x: x["ratio"])
+        if landed:
+            x = landed[0]
+            return _request("liquid-neck", "L" if x["status"] == "head" else "L-unhandled",
+                            eps_d=ls.eps_d, **_neck_fields(x))
+    else:
+        found = secondary("liquid")
+        if found is not None:
+            return _request("liquid-neck", "L", detected_by="secondary-pinch", **found)
+    closing = []
+    for name, fold in folds:
+        fold_limit = max(stop_abs, fold_stop_elements * fold.h_elem)
+        if math.isfinite(fold.gap) and fold.gap < fold_limit:
+            closing.append((fold.gap / fold_limit, name, fold, fold_limit))
+    if closing:  # the fold closest to its limit, on either chain
+        _, name, fold, fold_limit = min(closing, key=lambda x: x[0])
+        rec = {"chain": name, "contact": fold_contact(fold.arc, fold.h_elem),
+               "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
+               "fold_h_elem": fold.h_elem, "fold_limit": fold_limit,
+               "fold_pair": list(fold.pair), "kappa_g": events.gap.kappa_g}
+        a, b = fold.pair
+        jet = next((x for x in (apexes or {}).get(name, []) if a < int(x["index"]) < b), None)
+        if jet is not None:
+            rec.update(jet=jet["tip"], apex_index=int(jet["index"]),
+                       apex_r=jet.get("r", math.nan), apex_z=jet.get("z", math.nan),
+                       R_apex=jet.get("R_apex", math.nan),
+                       groove_angle=jet.get("groove_angle", math.nan))
+        head = head_of_fold(fold.pair, [x for x in necks if x["chain"] == name]) \
+            if ls.enabled else None
+        if head is not None:
+            rec["a_head"] = {**_neck_fields(head), "r_n_over_s": head["r_n"] / head["s"],
+                             "eps_max": ls.eps_max}
+            if head["status"] == "head" and head["r_n"] <= ls.eps_max * head["s"]:
+                return _request("a-head", "A-head", **rec)
+        return _request("groove", "A-groove", **rec)
+    found = secondary("gas")
+    if found is not None:
+        return _request("gas-neck", "G", **found)
+    bridge = zc - zb[1]
+    limit = max(settings.bridge_stop * cut.bridge, 3.0 * h_min)
+    if bridge < limit:
+        return _request("bridge-closing", "B", bridge=bridge, limit=limit)
+    if chain_gap < 3.0 * h_min:
+        return _request("chain-contact", "X", chain_gap=chain_gap, limit=3.0 * h_min)
+    return None

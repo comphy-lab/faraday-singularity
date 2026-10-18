@@ -401,6 +401,29 @@ far from the cut, is meshed never coarser than `post.bubble_bottom_size` rather 
 coarser than at the landing (`kept`, the default), so that the bubbles of a study in `delta` are
 meshed alike there.
 
+With the block, the stops of a state after the cut come in three ranks
+(`events.post_cut_events`). A state that is not valid stops the run: the chains not two, a spline
+through the nodes that contacts itself, on a freshly built mesh a tracked liquid neck narrower than
+`liquid.resolution` (4) element lengths at it (`liquid-neck-unresolved`), the guard of the interface
+and the check of the curved elements. The bubble emptying (below `bubble_stop` of its volume at the
+cut) ends the window (`bubble-vanishing`, with `window_end`). Every change of topology is then an
+event, in this order: the bubble's two tips within `delta` of each other, the downward jet piercing
+the bubble (`piercing`); a landed liquid neck (`liquid-neck`); the fold closest to its limit
+(`a-head` or `groove`); a gas neck (`gas-neck`); the bridge closing (`bridge-closing`) and the
+chains approaching (`chain-contact`). A neck on the liquid side is followed from
+`liquid.track_depth` (0.05) below its shoulder. Its head is the side of it whose far end lies on the
+axis, that holds neither the wall end nor the bubble's widest point, lies on one side of the neck's
+height and bounds a simple section of at most `liquid.max_head_volume` (20) times the cube of its
+largest radius `s`; the neck lands once `r_n <= liquid.eps_d s` (0.2), the one nearest its landing
+first. A fold of either chain closes at `max(gap.kappa_g delta, fold_stop_elements h_elem)`
+(`kappa_g` 0.05; null for the collapse's absolute `fold_stop`), and one that reaches the head of a
+tracked neck lands that neck at once if `r_n <= liquid.eps_max s` (0.5). With `liquid.enabled`
+false a liquid neck is met at the cut's own test of a second pinch-off instead. No event has a
+handler yet: the run stops on the first (`event-unhandled`, with the event's number `k`, its
+`kind`, `class` and the handler it is to have) and keeps the state before it as
+`states/precut_e<k>.dump` (`cut_stage` `precut-event`), besides the state it ends on; a
+continuation from it meets the event again, and its handler once one exists.
+
 `simulationCases/reconnect_prototype.py` is a development tool beside this: it cuts a landing state
 at `--delta` or `--delta-ratio` times its neck radius, with options that override the case's
 reconnect block, and takes `--steps` steps under the same driver and post-cut mode, without the
