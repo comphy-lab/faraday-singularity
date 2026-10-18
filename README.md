@@ -520,7 +520,11 @@ axial speed with its rear retracting towards it at `r_n^(-1/2)`: the stump's tip
 and its front reaching the far tip of the bubble (from two steps after the cut on) are flags only,
 the bubble mattering only for the entrainment, its collapse and the budgets (`ghost.recontacts` in
 the record and its file, an event `ghost-recontact`, a row of `drops.txt`, which also has a row for
-each ghost made). The run stops resumably, with the dump of the state before the event, at the
+each ghost made). Every removal enters the budget of the run: `budget.txt` has a row per step
+after the cut with the liquid of the mesh (its volume, axial momentum and kinetic energy, as in
+`chains.txt`), the volume, momentum and kinetic energy the events have removed since the gas cut
+(each head's at its cut, whose volume and momentum the cut checks against the change within its
+box) and their sums. The run stops resumably, with the dump of the state before the event, at the
 event after `max_events` (`max-events`), at one that the cascade test of its tip judges to shrink
 (`event-cascade`: an interval since the last at the tip below `cascade_min_interval delta^2`, or
 `cascade_count` successive ratios of the intervals and of the heads' volumes, each below

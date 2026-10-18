@@ -522,3 +522,35 @@ def test_the_ghost_of_each_removed_head_is_followed_and_its_recontacts_flagged(t
     assert hit["tip"] == "bubble_bottom" and hit["z_ghost"] <= hit["z_tip"]
     assert hit["step"] > drv.pb.events[0]["step"] + ev.GHOST_SKIP_STEPS
     assert out["stop"]["reason"] == "max-steps"
+
+
+def test_the_budget_of_the_run_holds_the_liquid_of_the_mesh_and_every_removal(tmp_path,
+                                                                            monkeypatch):
+    """budget.txt, a row per step after the cut as chains.txt has: the liquid of the mesh (its
+    volume, axial momentum and kinetic energy, chains.txt's), what the events have removed since the
+    gas cut (each head's volume, momentum and kinetic energy at its cut) and the sums; the removals
+    enter it from the event on, and the run's result holds their totals."""
+    drv, out, _ = _run(tmp_path, monkeypatch, RegrowingHead())
+    made = drv.pb.events
+    budget = _rows(tmp_path / "budget.txt")
+    chains = _rows(tmp_path / "chains.txt")
+    assert [r["step"] for r in budget] == [r["step"] for r in chains]
+    for b, c in zip(budget, chains):
+        for key in ("time", "tau", "tau_p", "volume", "momentum_z", "kinetic_energy"):
+            assert b[key] == c[key], key
+        n = int(b["events"])
+        removed = made[:n]
+        assert float(b["V_removed"]) == pytest.approx(sum(e["removed"]["V"] for e in removed),
+                                                      rel=1e-11, abs=1e-300)
+        assert float(b["Pz_removed"]) == pytest.approx(sum(e["removed"]["Pz"] for e in removed),
+                                                       rel=1e-11, abs=1e-300)
+        assert float(b["volume_total"]) == pytest.approx(float(b["volume"])
+                                                         + float(b["V_removed"]))
+        assert float(b["momentum_z_total"]) == pytest.approx(float(b["momentum_z"])
+                                                             + float(b["Pz_removed"]))
+    # the removals enter from the step of their event on
+    steps = {int(r["step"]): int(r["events"]) for r in budget}
+    for j, e in enumerate(made, start=1):
+        assert steps[e["step"]] < j and steps.get(e["step"] + 1, j) >= j
+    assert out["events"]["removed_total"] == pytest.approx(
+        {x: sum(e["removed"][x] for e in made) for x in ("V", "Pz", "KE")})

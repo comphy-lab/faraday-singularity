@@ -550,6 +550,13 @@ EVENT_COLUMNS = ("k", "step", "time", "tau", "tau_p", "tau_over_delta2", "kind",
 # tip it met and its height
 DROP_COLUMNS = ("k", "status", "step", "time", "tau", "tau_p", "tip", "far_tip", "z_front",
                 "z_rear", "z_tip", "U", "v_ret", "V")
+# budget.txt, a row per step after the cut: the liquid of the mesh (its volume, axial momentum and
+# kinetic energy, as chains.txt has them), what the events have removed of it since the gas cut,
+# each removed head counted with its own at its cut, and the sums, the liquid the run would hold
+# without the removals
+BUDGET_COLUMNS = ("step", "time", "tau", "tau_p", "events", "volume", "momentum_z",
+                  "kinetic_energy", "V_removed", "Pz_removed", "KE_removed", "volume_total",
+                  "momentum_z_total", "kinetic_energy_total")
 
 
 def _table_cell(v) -> str:
@@ -679,7 +686,7 @@ class CollapseDriver:
         self._events = open(self.outdir / "events.jsonl", "w", buffering=1)
         # with the events block: a row per event the run makes (events.txt), and what an event in
         # the making hands its record (_meet_event, _on_event_made)
-        self._event_rows = self._drops = None
+        self._event_rows = self._drops = self._budget = None
         self._event_before: tuple | None = None
         self._event_after: dict | None = None
         if events is not None:
@@ -687,6 +694,8 @@ class CollapseDriver:
             self._event_rows.write("# " + "\t".join(EVENT_COLUMNS) + "\n")
             self._drops = open(self.outdir / "drops.txt", "w", buffering=1)
             self._drops.write("# " + "\t".join(DROP_COLUMNS) + "\n")
+            self._budget = open(self.outdir / "budget.txt", "w", buffering=1)
+            self._budget.write("# " + "\t".join(BUDGET_COLUMNS) + "\n")
         (self.outdir / "collapse_settings.json").write_text(
             json.dumps(asdict(settings), indent=2) + "\n")
 
@@ -695,7 +704,7 @@ class CollapseDriver:
         self._events.close()
         if self._chains is not None:
             self._chains.close()
-        for f in (self._event_rows, self._drops):
+        for f in (self._event_rows, self._drops, self._budget):
             if f is not None:
                 f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
@@ -1197,6 +1206,28 @@ class CollapseDriver:
             return f"{float(v):.12e}"
 
         self._chains.write("\t".join(cell(c) for c in CHAIN_COLUMNS) + "\n")
+        if self._budget is not None:  # with the events block only
+            self._write_budget_row(values)
+
+    def _removed(self) -> dict:
+        """What the events made have removed of the liquid since the gas cut: the volume, axial
+        momentum and kinetic energy of each removed head at its cut (its record's ``removed``),
+        summed, and the number of events."""
+        liquid = [e for e in self._made_events() if e.get("kind") in EVENT_CLASSES["liquid"]]
+        return {"events": len(liquid), **{key: sum(float((e.get("removed") or {}).get(key) or 0.0)
+                                                   for e in liquid) for key in ("V", "Pz", "KE")}}
+
+    def _write_budget_row(self, values: dict):
+        """The row of ``budget.txt`` of a step after the cut, from the values of its row of
+        ``chains.txt``: the liquid of the mesh, the removals since the gas cut and their sums."""
+        removed = self._removed()
+        row = {**{key: values.get(key) for key in ("step", "time", "tau", "tau_p", "volume",
+                                                   "momentum_z", "kinetic_energy")},
+               "events": removed["events"], "V_removed": removed["V"],
+               "Pz_removed": removed["Pz"], "KE_removed": removed["KE"]}
+        for key, extra in (("volume", "V"), ("momentum_z", "Pz"), ("kinetic_energy", "KE")):
+            row[f"{key}_total"] = float(values.get(key, math.nan)) + removed[extra]
+        self._budget.write("\t".join(_table_cell(row.get(c)) for c in BUDGET_COLUMNS) + "\n")
 
     def _bubble_features(self) -> tuple[dict | None, dict, float]:
         """After a cut: the bubble chain, the jet bases of its two tips (``reconnect.tip_jet``, by
@@ -2210,14 +2241,13 @@ class CollapseDriver:
                 out[str(e.get(key))] = out.get(str(e.get(key)), 0) + 1
             return out
 
-        liquid = [e for e in made if e.get("kind") in EVENT_CLASSES["liquid"]]
         last = made[-1] if made else None
         return {"made": len(made), "max_events": self.events.max_events,
                 "by_kind": count("kind"), "by_tip": count("tip"),
                 "last": None if last is None else {key: last.get(key) for key in (
                     "k", "kind", "class", "chain", "tip", "t", "tau", "tau_p")},
-                "removed_total": {key: sum(float((e.get("removed") or {}).get(key) or 0.0)
-                                           for e in liquid) for key in ("V", "Pz", "KE")},
+                "removed_total": {key: v for key, v in self._removed().items()
+                                  if key != "events"},
                 "cascade": {tip: v["verdict"] for tip, v in self._cascade().verdicts().items()},
                 "ghost_recontacts": {kind: sum(
                     1 for e in made for x in (e.get("ghost") or {}).get("recontacts") or ()
