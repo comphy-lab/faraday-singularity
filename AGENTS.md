@@ -207,8 +207,9 @@ add a second top-level `cases/` tree.
   them. The keys of `liquid` and `gap` are fixed once an event of their class was made, except in a
   restart from the state before an event (`precut_e<k>`, `cut_stage` `precut-event`), from which they
   apply anew (`event_keys_changed_at` in its leg); the keys of `post` change at any restart (a key a
-  recorded block lacks counts at its default). An unknown key of the `collapse` block is refused
-  with a message.
+  recorded block lacks counts at its default). `post.bubble_bottom_sizing` `frozen` meshes the
+  bubble's bottom never coarser than `post.bubble_bottom_size` instead of the landing focus
+  (`reconnect.feature_regions`). An unknown key of the `collapse` block is refused with a message.
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the

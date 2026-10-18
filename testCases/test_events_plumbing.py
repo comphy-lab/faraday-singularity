@@ -1,11 +1,12 @@
 """Contract tests of the plumbing of the events block (``collapse.reconnect_events``): the runner's
 admission of a case with it (cut, post-cut continuation, the class keys fixed after an event, the
 state before an event, refusals before any output), the dumps and legs of a run after the cut with
-it. No finite-element problem is built."""
+it, and the frozen sizing of the bubble's bottom. No finite-element problem is built."""
 
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -301,3 +302,79 @@ def test_a_restart_with_the_block_starts_a_leg_and_mirrors_the_runner_refusals(t
     # and no block without a cut
     with pytest.raises(ValueError, match="needs the reconnect settings"):
         CollapseDriver(CutProblem(), _settings(), tmp_path / "f", events=s)
+
+
+# --- the bubble's bottom, frozen ---------------------------------------------------------------------
+
+
+def test_a_frozen_bubble_bottom_is_never_coarser_than_its_size_whatever_the_landing():
+    """``post.bubble_bottom_sizing`` ``frozen`` replaces the landing's resolution at the bubble's
+    bottom (``focus.kept``) by a fixed size: at the kept size it is the kept rule itself; a size
+    coarser than the landing's coarsens the bottom to it (over the region the landing resolved),
+    caps the base of its jet there, and a jet narrower than it still asks for its own size."""
+    from test_reconnect_geometry import _post_cut_segs, _regions
+
+    s = rc.ReconnectSettings(delta=1e-3)
+    segs = _post_cut_segs(bottom=(2e-3, 5e-3))
+    z_bb, z_bt = float(segs[0]["z"][0]), float(segs[0]["z"][-1])
+    kept = rc.kept_region({"size": 4e-5, "radius": 0.02, "grading": 0.2}, 6.25e-5, z_bb, z_bt)
+    cut = {"delta": 1e-3, "rmin": 1e-3, "focus": {"kept": kept}}
+    base = {"bubble_bottom": {"r": 5e-3, "z": 4.49, "R_apex": 3.2e-4, "R_pred": 3.2e-4}}
+    legacy = _regions(segs, cut, s, h_floor=6.25e-6, apexes=base)
+    same = _regions(segs, cut, s, h_floor=6.25e-6, apexes=base, bubble_bottom_sizing="frozen",
+                    bubble_bottom_size=4e-5)
+    assert same == legacy  # frozen at the kept size: the kept rule
+    assert legacy == _regions(segs, cut, s, h_floor=6.25e-6, apexes=base,
+                              bubble_bottom_sizing="kept")
+    frozen = _regions(segs, cut, s, h_floor=6.25e-6, apexes=base, bubble_bottom_sizing="frozen",
+                      bubble_bottom_size=1.6e-4)
+    g, h = frozen["bubble_bottom"], legacy["bubble_bottom"]
+    assert g["target"] == 1.6e-4 and g["kept"] == 1.6e-4 and h["target"] == 4e-5
+    assert g["radius"] == h["radius"] and g["z"] == h["z"] == z_bb
+    # the base of the jet there: capped at the bottom's size, so finer than 3.2e-4/16 only below it
+    assert frozen["jet_base_bubble_bottom"]["target"] == pytest.approx(3.2e-4 / 16)
+    assert "jet_base_bubble_bottom" not in _regions(
+        segs, cut, s, h_floor=6.25e-6, apexes={"bubble_bottom": dict(base["bubble_bottom"],
+                                                                     R_apex=3.2e-3, R_pred=3.2e-3)},
+        bubble_bottom_sizing="frozen", bubble_bottom_size=1.6e-4)
+    # a narrow jet asks for its own size, below the frozen one
+    narrow = _regions(_post_cut_segs(bottom=(2e-4, 1e-4), n=40001), cut, s, h_floor=6.25e-6,
+                      bubble_bottom_sizing="frozen", bubble_bottom_size=1.6e-4)["bubble_bottom"]
+    assert narrow["target"] == pytest.approx(max(narrow["ell"] / 16, 6.25e-6))
+    assert narrow["target"] < 1.6e-4
+    # without a landing focus: frozen caps the region of the jet; no jet, no region
+    alone = _regions(segs, {"delta": 1e-3, "rmin": 1e-3}, s, h_floor=6.25e-6,
+                     bubble_bottom_sizing="frozen", bubble_bottom_size=1e-4)["bubble_bottom"]
+    assert alone["target"] == 1e-4 and alone["radius"] < 0.5 * (z_bt - z_bb) + 1e-12
+    sphere = _post_cut_segs()
+    assert "bubble_bottom" not in _regions(sphere, {"delta": 1e-3, "rmin": 1e-3}, s,
+                                           bubble_bottom_sizing="frozen",
+                                           bubble_bottom_size=1e-4)
+    with pytest.raises(ValueError, match="unknown bubble_bottom_sizing"):
+        _regions(segs, cut, s, bubble_bottom_sizing="own")
+
+
+def test_the_driver_sizes_the_bubble_bottom_by_the_block(tmp_path):
+    """The driver passes the block's sizing of the bubble's bottom to its regions after the cut."""
+    from test_bookkeeping import CutSurfaceProblem
+    from faraday_singularity.mesh import Focus
+
+    recon = ReconnectSettings(delta=1e-2, dt0=1e-6)
+    out = {}
+    for name, events in (("kept", None), ("frozen", ev.EventSettings.from_dict(
+            {"post": {"bubble_bottom_sizing": "frozen", "bubble_bottom_size": 3e-3}}))):
+        size = recon.focus_size * recon.delta
+        pb = CutSurfaceProblem(recon.tip_size * recon.delta, size, bottom=(2e-4, 1e-3))
+        pb.template.focus = Focus(size=size, radius=0.2, grading=0.2)
+        drv = _events_driver(tmp_path / name, pb, recon, events=events, max_steps=0)
+        drv.pb.cut["focus"] = {"kept": {"name": "bubble_bottom", "size": 1e-3, "radius": 0.02}}
+        regions, _ = drv._feature_regions({"z_tip": 4.69, "kappa": 1 / 0.08, "r_j": 0.0,
+                                           "rise": 0.0, "bump": False, "flat_bump": False},
+                                          drv._bubble_features()[1])
+        out[name] = {g["name"]: g for g in regions}
+        drv.close()
+    assert out["kept"]["bubble_bottom"]["kept"] == 1e-3
+    assert out["frozen"]["bubble_bottom"]["kept"] == 3e-3
+    assert out["frozen"]["bubble_bottom"]["target"] <= 3e-3
+    assert math.isclose(out["frozen"]["bubble_bottom"]["radius"],
+                        out["kept"]["bubble_bottom"]["radius"])

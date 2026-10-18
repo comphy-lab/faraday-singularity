@@ -1025,7 +1025,8 @@ def kept_region(landing_focus: dict | None, cut_focus_size: float, z_bubble_bott
 def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
                     settings: ReconnectSettings, *, h_floor: float, h_axis: float,
                     elements_per_scale: float, focus_extent: float,
-                    apexes: dict | None = None) -> list[dict]:
+                    apexes: dict | None = None, bubble_bottom_sizing: str = "kept",
+                    bubble_bottom_size: float | None = None) -> list[dict]:
     """The features of both chains after a cut, each to be meshed at its own size (the regions of
     the focus, ``mesh.FocusRegion``): ``name``, ``target`` (element size), centre ``r``, ``z``,
     ``radius``, its scale ``ell`` (``inf`` without one) and ``floor``, the smallest size it may ask
@@ -1053,6 +1054,9 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
       asks for (``r_j/elements_per_scale``, floored at the landing run's ``h_floor``, as before the
       cut) but never coarser than it had at the landing (``kept``, :func:`kept_region`), over the
       larger of its jet's region and the one the landing resolved, within its half of the bubble.
+      With ``bubble_bottom_sizing`` ``frozen`` (the events block's ``post``) the size it may not
+      exceed is ``bubble_bottom_size`` instead of the landing's, whatever the landing state: the
+      bubbles of a study in ``delta`` are then meshed alike there, far from the cut.
     * Each neck of either chain: ``r_n/elements_per_scale``, floored at the cut's focus size, within
       ``focus_extent r_n`` of it.
 
@@ -1101,7 +1105,20 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
                      reach)
     scales, reach = jet(tips.get("bubble_bottom", {}))
     kept = (cut.get("focus") or {}).get("kept")
-    if scales or kept:
+    if bubble_bottom_sizing == "frozen":
+        # never coarser than the frozen size, over the region the landing resolved, if any
+        size = float(bubble_bottom_size)
+        ell = min(scales + [ell_cap])
+        target = min(float(np.clip(ell / elements_per_scale, h_floor, h_axis)), size)
+        radius = max(focus_extent * ell if scales else 0.0, reach,
+                     float(kept["radius"]) if kept else 0.0)
+        if radius > 0.0:
+            out.append({"name": "bubble_bottom", "target": target, "r": 0.0, "z": z_bb,
+                        "radius": min(radius, 0.5 * (z_bt - z_bb)),
+                        "ell": ell if scales else math.inf, "floor": h_floor, "kept": size})
+    elif bubble_bottom_sizing != "kept":
+        raise ValueError(f"unknown bubble_bottom_sizing {bubble_bottom_sizing!r}")
+    elif scales or kept:
         ell = min(scales + [ell_cap])
         target = float(np.clip(ell / elements_per_scale, h_floor, h_axis))
         radius = max(focus_extent * ell if scales else 0.0, reach)

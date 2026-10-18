@@ -396,7 +396,10 @@ of the block and the keys in which it differs from the block the state was writt
 dump continues only under a case with the block. The keys of `liquid` and of `gap` are the keys of
 a class of events: once an event of the class has been made they may not change, except in a
 restart from the state before an event (`precut_e<k>`), from which they apply anew; the keys of
-`post` may change at any restart.
+`post` may change at any restart. With `post.bubble_bottom_sizing` `frozen` the bubble's bottom,
+far from the cut, is meshed never coarser than `post.bubble_bottom_size` rather than never
+coarser than at the landing (`kept`, the default), so that the bubbles of a study in `delta` are
+meshed alike there.
 
 `simulationCases/reconnect_prototype.py` is a development tool beside this: it cuts a landing state
 at `--delta` or `--delta-ratio` times its neck radius, with options that override the case's

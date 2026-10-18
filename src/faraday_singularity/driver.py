@@ -872,7 +872,8 @@ class CollapseDriver:
                                                       if self.reconnect.elements_per_scale is None
                                                       else self.reconnect.elements_per_scale),
                                   focus_extent=s.focus_extent,
-                                  apexes=self._apex_prediction(pc["apexes"]))
+                                  apexes=self._apex_prediction(pc["apexes"]),
+                                  **self._post_region_keys())
         refine = interface_guard(pc["edges"], self.reconnect, fresh=self._fresh_mesh(),
                                  h_floor=s.h_floor, refine_ratio=s.refine_ratio)["refine"]
         kinks = kink_regions(st.kinks, pc["edges"], refine, t=self._t(), h_floor=s.h_floor,
@@ -897,6 +898,15 @@ class CollapseDriver:
             g["h_max"], g["h_min"] = region_spacing(segs, g, axis_tips, cut.get("sizing"), own,
                                                     finer)
         return regions, kinks
+
+    def _post_region_keys(self) -> dict:
+        """The keys of the events block's ``post`` that size the regions after the cut
+        (``reconnect.feature_regions``); none without the block."""
+        if self.events is None:
+            return {}
+        post = self.events.post
+        return {"bubble_bottom_sizing": post.bubble_bottom_sizing,
+                "bubble_bottom_size": post.bubble_bottom_size}
 
     def _commit_post_cut(self, m: dict):
         """After a cut, at the end of an accepted step (its last measurement ``m``): keep the radius
