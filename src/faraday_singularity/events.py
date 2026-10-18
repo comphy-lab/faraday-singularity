@@ -50,11 +50,18 @@ spacing at the splice. Hard checks refuse a cap that leaves the old liquid, fold
 knife-edge angle at the splice, removes no simple region, or leaves chains a mesh cannot be built on
 (:class:`CapRefused`); the removed region ``Q`` (the head, the axis and the cap) gives the volume
 and the areas the cut takes away.
+
+Of the events a run makes, :class:`CascadeMonitor` follows the sequence at each tip on the axis
+(:func:`event_tip`) and judges whether it shrinks (a cascade that stops the run), grows or stays
+stationary; the removed head of each liquid cut is followed as a ghost that moves rigidly at its
+mean axial speed while its rear retracts (:func:`ghost_place`), whose recontacts with the stump it
+left and with the far tip of the bubble are flagged (:func:`ghost_recontacts`).
 """
 
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -1286,3 +1293,146 @@ def event_neck(request: dict) -> dict:
     if request.get("kind") == "a-head":
         return {k: v for k, v in (request.get("a_head") or {}).items() if k in NECK_KEYS}
     return {k: request[k] for k in NECK_KEYS if k in request}
+
+
+# --- the events a run makes: their tips, the cascade of events at a tip, the ghosts --------------
+
+# the tip on the axis whose head the ghost of a cut moves towards, through the gas of the bubble;
+# the head of the cavity's tip rises into the open gas, which ends on no tip
+FAR_TIPS = {"bubble_top": "bubble_bottom", "bubble_bottom": "bubble_top", "cavity_tip": None}
+GHOST_SKIP_STEPS = 2  # a ghost's recontacts are read from this many steps after its cut on
+
+
+def event_tip(neck: dict) -> str:
+    """The tip on the axis a tracked neck's head ends on (:func:`liquid_necks`: its chain and
+    side, ``before`` the neck the chain's first end, ``after`` its last): ``cavity_tip``,
+    ``bubble_bottom`` or ``bubble_top``."""
+    end = 0 if neck.get("side") == "before" else -1
+    return TIP_OF_END.get((neck.get("chain"), end), str(neck.get("chain")))
+
+
+class CascadeMonitor:
+    """The events made at each tip on the axis, in their order (their generation at the tip), and
+    the verdict on the next: a cascade of events that shrink stops the run, one that grows or
+    stays stationary is recorded.
+
+    Of the events at a tip, ``interval`` is the time since the one before (``delta^2`` and
+    ``T = t_p - t_cut`` give it in units of the cut radius, ``interval_over_delta2``, and as
+    events per ``T``, ``events_per_T``) and ``V`` the volume of its head. From the third event
+    at a tip each has a pair of ratios to the one before, of their intervals and of their
+    volumes. The verdict on an event (:meth:`check`, before it is made):
+
+    * ``shrink``: its interval is below ``min_interval delta^2``, or the last ``count`` pairs of
+      ratios (its own the last) all lie below ``ratio``, both of the interval and of the volume;
+    * ``grow``: the last ``count`` pairs all lie above ``1/ratio``, both;
+    * ``stationary``: neither, with ``count`` pairs at least;
+    * ``undetermined`` with fewer, and ``first`` for the first event at its tip."""
+
+    def __init__(self, *, delta: float, min_interval: float, ratio: float, count: int,
+                 T: float = math.nan):
+        self.delta, self.min_interval, self.ratio, self.count = delta, min_interval, ratio, count
+        self.T = T
+        self.history: dict[str, list[dict]] = {}
+
+    @classmethod
+    def for_run(cls, events: EventSettings, delta: float, T: float = math.nan,
+                records=()) -> CascadeMonitor:
+        """The monitor of a run with the block ``events`` at cut radius ``delta``, with the events
+        the run has made (``records``: their tip, time and head volume) in it."""
+        out = cls(delta=delta, min_interval=events.cascade_min_interval,
+                  ratio=events.cascade_ratio, count=events.cascade_count, T=T)
+        for rec in records or ():
+            trigger = rec.get("trigger") or {}
+            if rec.get("outcome", "made") == "made" and rec.get("tip") is not None:
+                out.add(rec["tip"], int(rec.get("k", 0)), float(rec["t"]),
+                        float(trigger.get("head_volume", math.nan)))
+        return out
+
+    def check(self, tip: str, t: float, V: float) -> dict:
+        """The verdict on an event at ``tip`` at time ``t`` with a head of volume ``V``, before it
+        is made, with its generation at the tip, its interval and the ratios of its pair."""
+        h = self.history.get(tip, [])
+        out = {"tip": tip, "generation": len(h) + 1, "interval": math.nan,
+               "interval_over_delta2": math.nan, "events_per_T": math.nan,
+               "interval_ratio": math.nan, "volume_ratio": math.nan, "shrinking": 0,
+               "growing": 0, "verdict": "first"}
+        if not h:
+            return out
+        times = [x["t"] for x in h] + [float(t)]
+        vols = [x["V"] for x in h] + [float(V)]
+        gaps = [b - a for a, b in itertools.pairwise(times)]
+        dt = gaps[-1]
+        out.update(interval=dt, interval_over_delta2=dt / self.delta**2,
+                   events_per_T=abs(self.T) / dt if math.isfinite(self.T) and dt > 0.0
+                   else math.nan)
+        pairs = []  # (interval ratio, volume ratio) of each event from the third at the tip on
+        for j in range(1, len(gaps)):
+            ri = gaps[j] / gaps[j - 1] if gaps[j - 1] > 0.0 else math.inf
+            rv = vols[j + 1] / vols[j] if vols[j] > 0.0 else math.nan
+            pairs.append((ri, rv))
+        if pairs:
+            out.update(interval_ratio=pairs[-1][0], volume_ratio=pairs[-1][1])
+        for key, test in (("shrinking", lambda p: p[0] < self.ratio and p[1] < self.ratio),
+                          ("growing", lambda p: p[0] > 1.0 / self.ratio
+                           and p[1] > 1.0 / self.ratio)):
+            n = 0
+            for p in reversed(pairs):
+                if not test(p):
+                    break
+                n += 1
+            out[key] = n
+        if dt < self.min_interval * self.delta**2 or out["shrinking"] >= self.count:
+            out["verdict"] = "shrink"
+        elif out["growing"] >= self.count:
+            out["verdict"] = "grow"
+        else:
+            out["verdict"] = "stationary" if len(pairs) >= self.count else "undetermined"
+        return out
+
+    def add(self, tip: str, k: int, t: float, V: float) -> dict:
+        """Record the event ``k`` at ``tip``; returns the verdict :meth:`check` gave it."""
+        verdict = self.check(tip, t, V)
+        self.history.setdefault(tip, []).append({"k": int(k), "t": float(t), "V": float(V),
+                                                 "verdict": verdict})
+        return verdict
+
+    def verdicts(self) -> dict:
+        """The verdict on the last event at each tip, as :meth:`check` gave it."""
+        return {tip: dict(h[-1]["verdict"]) for tip, h in self.history.items() if h}
+
+
+def ghost_place(ghost: dict, t: float) -> tuple[float, float]:
+    """The ends on the axis of the ghost of a removed head (a liquid cut's ``ghost``) at time
+    ``t``: it moves rigidly at its mean axial speed ``U``, so that its front, the head's old tip,
+    is at ``z_front0 + U (t - t0)``, while its rear, at the stump's new tip at the cut, retracts
+    towards the head at ``v_ret`` besides, ``z_rear0 + (U + direction v_ret) (t - t0)``."""
+    dt = float(t) - float(ghost["t0"])
+    U, d = float(ghost["U"]), float(ghost["direction"])
+    return (float(ghost["z_front0"]) + U * dt,
+            float(ghost["z_rear0"]) + (U + d * float(ghost["v_ret"])) * dt)
+
+
+def ghost_recontacts(ghost: dict, t: float, step: int, tips: dict) -> list[dict]:
+    """The recontacts of a ghost (:func:`ghost_place`) at time ``t`` and step ``step`` with the
+    tips on the axis (``tips``: the heights of ``cavity_tip``, ``bubble_bottom``,
+    ``bubble_top``), each kind once and only from ``GHOST_SKIP_STEPS`` steps after the cut
+    (``step0``) on: ``rear`` when the tip of the stump (``tip``) has passed the ghost's rear,
+    ``direction (z_rear - z_stump) < 0``, the stump catching up with the head it lost; ``front``
+    when the ghost's front has reached the tip ahead of it (``far_tip``, :data:`FAR_TIPS`: the
+    other end of the bubble), ``direction (z_front - z_far) >= 0``. Flags only: nothing stops."""
+    if int(step) < int(ghost.get("step0", 0)) + GHOST_SKIP_STEPS:
+        return []
+    done = {x.get("kind") for x in ghost.get("recontacts") or ()}
+    front, rear = ghost_place(ghost, t)
+    d = float(ghost["direction"])
+    out = []
+    z_stump = tips.get(ghost.get("tip"), math.nan)
+    if "rear" not in done and math.isfinite(z_stump) and d * (rear - z_stump) < 0.0:
+        out.append({"kind": "rear", "t": float(t), "step": int(step), "z_ghost": rear,
+                    "tip": ghost.get("tip"), "z_tip": float(z_stump)})
+    far = ghost.get("far_tip")
+    z_far = tips.get(far, math.nan) if far is not None else math.nan
+    if "front" not in done and math.isfinite(z_far) and d * (front - z_far) >= 0.0:
+        out.append({"kind": "front", "t": float(t), "step": int(step), "z_ghost": front,
+                    "tip": far, "z_tip": float(z_far)})
+    return out
