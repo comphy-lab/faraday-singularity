@@ -265,33 +265,37 @@ add a second top-level `cases/` tree.
   record is `events/event_<k>.json`, its dumps `precut_e<k>` and `postcut_e<k>`
   (`testCases/test_liquid_cut_fem.py`, a synthetic state with a jet on each chain). The driver
   makes the liquid cut of an `L` or `A-head` event within the run (`CollapseDriver._meet_event`, at
-  the stop checks of the loop's top, after a step and after a rebuild; `events.IMPLEMENTED_HANDLERS`)
-  with the run's last step as the history's, and goes on from the fresh mesh, whose stops it checks
-  again as those of a mesh freshly built (`reset_after_event`: no new cycle, the births, series,
-  holds and last step kept; the scale's growth limit, the cut tip's apex history and its chain's
-  kink region dropped; event `liquid-cut`, a `liquid-cut` profile); it adds to the record the base
-  of the cut jet before the cut (`trigger.r_j`, `z_b`, `r_j_over_r_n`, `neck_to_base_over_r_j`),
-  the event's `generation` at its tip, `step`, `leg`, `tau_over_delta2`, `t_prime_over_T` (`T =
-  t_p - t_cut`), the `cascade` verdict, the `commit`, the ghost's start and the jet after the cut
-  (`after`), and writes a row of `events.txt`. Every other event is a resumable stop with the dump
-  of the state before it (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under
-  `event`, also an event of its reason) besides the end state: `event-unhandled` (no handler made:
-  the ring of a piercing, the groove fill, the split of a gas neck, a liquid neck without a single
-  head), `max-events` (the event after `max_events`), `event-cascade` (`events.CascadeMonitor`
-  judges it to shrink: an interval at its tip below `cascade_min_interval delta^2`, or the last
-  `cascade_count` pairs of ratios of intervals and of head volumes below `cascade_ratio`),
-  `liquid-cut-refused` (the problem unchanged), `event-unclosed` (hard budgets that do not close:
-  the problem holds a cut that is not accepted, so the run ends on the state before it, its
-  `end_state`, and dumps nothing more); any other failure of a liquid cut fails the run. A
-  continuation from such a dump is a post-cut restart from which the keys of every class apply anew
-  (`events.EventSettings.refused_changes`), the events before it staying as made. The run's result
-  with the block has `events` (made, by kind and tip, the last, the totals removed, the cascade's
-  verdicts, the event stopped on) and `window_end` (`bubble-vanishing`, also an event
-  `window-end`). The tests of the
-  branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run
-  directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by
-  default. After the cut the driver reads its limits through accessors that return the collapse's
-  own value before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`, `_fold_stop`,
+  the stop checks of the loop's top, after a step and after a rebuild;
+  `events.IMPLEMENTED_HANDLERS`) with the run's last step as the history's, and goes on from the
+  fresh mesh, whose stops it checks again as those of a mesh freshly built (`reset_after_event`: no
+  new cycle, the births, series, holds and last step kept; the scale's growth limit, the cut tip's
+  apex history and its chain's kink region dropped; event `liquid-cut`, a `liquid-cut` profile); it
+  adds to the record the base of the cut jet before the cut (`trigger.r_j`, `z_b`, `r_j_over_r_n`,
+  `neck_to_base_over_r_j`), the event's `generation` at its tip, `step`, `leg`, `tau_over_delta2`,
+  `t_prime_over_T` (`T = t_p - t_cut`), the `cascade` verdict, the `commit`, the ghost's start and
+  the jet after the cut (`after`), and writes a row of `events.txt`. The ghost of each removed head
+  is followed after each step (`CollapseDriver._follow_ghosts`, `events.ghost_place`): its
+  recontacts with the stump and with the far tip of the bubble (`events.ghost_recontacts`, from
+  `GHOST_SKIP_STEPS` after the cut) are flags only, in `ghost.recontacts` of the record and its
+  file, events `ghost-recontact` and rows of `drops.txt` (with one per ghost made). Every other
+  event is a resumable stop with the dump of the state before it (`states/precut_e<k>.dump`,
+  `cut_stage` `precut-event`, the event under `event`, also an event of its reason) besides the end
+  state: `event-unhandled` (no handler made: the ring of a piercing, the groove fill, the split of a
+  gas neck, a liquid neck without a single head), `max-events` (the event after `max_events`),
+  `event-cascade` (`events.CascadeMonitor` judges it to shrink: an interval at its tip below
+  `cascade_min_interval delta^2`, or the last `cascade_count` pairs of ratios of intervals and of
+  head volumes below `cascade_ratio`), `liquid-cut-refused` (the problem unchanged),
+  `event-unclosed` (hard budgets that do not close: the problem holds a cut that is not accepted, so
+  the run ends on the state before it, its `end_state`, and dumps nothing more); any other failure
+  of a liquid cut fails the run. A continuation from such a dump is a post-cut restart from which
+  the keys of every class apply anew (`events.EventSettings.refused_changes`), the events before it
+  staying as made. The run's result with the block has `events` (made, by kind and tip, the last,
+  the totals removed, the cascade's verdicts, the ghosts' recontacts, the event stopped on) and
+  `window_end` (`bubble-vanishing`, also an event `window-end`). The tests of the branch on the stop
+  states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run directories
+  (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by default.
+  After the cut the driver reads its limits through accessors that return the collapse's own value
+  before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`, `_fold_stop`,
   `_neck_limit`): `post.h_floor` (focus floor, feature regions, guard, kink regions, the open
   chain's neck limit), `post.rise_tol`, `post.dt_min`, `gap.kappa_g delta` (also the groove gaps of
   `chains.txt`), `post.neck_floor` and `post.neck_elements_per_scale` (the neck regions of

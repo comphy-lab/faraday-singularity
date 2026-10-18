@@ -300,8 +300,8 @@ from .episodes import ETA_HYS, EpisodeTracker
 from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, EVENT_STOPS,
                      EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, IMPLEMENTED_HANDLERS,
                      LIQUID_CUT_REFUSED, PRECUT_EVENT, SIZING_KEYS, CascadeMonitor, EventSettings,
-                     event_neck, event_tip, events_done, fold_stop_after_cut,
-                     minimum_dt_after_cut)
+                     event_neck, event_tip, events_done, fold_stop_after_cut, ghost_place,
+                     ghost_recontacts, minimum_dt_after_cut)
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -545,6 +545,11 @@ EVENT_COLUMNS = ("k", "step", "time", "tau", "tau_p", "tau_over_delta2", "kind",
                  "F3", "F4", "F5", "F6", "phi_relative_error", "predicted_unlocated",
                  "reported_unlocated", "dt_history", "interval_over_delta2", "events_per_T",
                  "cascade", "V_removed_total", "Pz_removed_total", "KE_removed_total", "wall")
+# drops.txt, a row per change of the ghost of a removed head: made (status free), and each of its
+# recontacts (status rear or front, events.ghost_recontacts), with its ends on the axis then, the
+# tip it met and its height
+DROP_COLUMNS = ("k", "status", "step", "time", "tau", "tau_p", "tip", "far_tip", "z_front",
+                "z_rear", "z_tip", "U", "v_ret", "V")
 
 
 def _table_cell(v) -> str:
@@ -674,12 +679,14 @@ class CollapseDriver:
         self._events = open(self.outdir / "events.jsonl", "w", buffering=1)
         # with the events block: a row per event the run makes (events.txt), and what an event in
         # the making hands its record (_meet_event, _on_event_made)
-        self._event_rows = None
+        self._event_rows = self._drops = None
         self._event_before: tuple | None = None
         self._event_after: dict | None = None
         if events is not None:
             self._event_rows = open(self.outdir / "events.txt", "w", buffering=1)
             self._event_rows.write("# " + "\t".join(EVENT_COLUMNS) + "\n")
+            self._drops = open(self.outdir / "drops.txt", "w", buffering=1)
+            self._drops.write("# " + "\t".join(DROP_COLUMNS) + "\n")
         (self.outdir / "collapse_settings.json").write_text(
             json.dumps(asdict(settings), indent=2) + "\n")
 
@@ -688,8 +695,9 @@ class CollapseDriver:
         self._events.close()
         if self._chains is not None:
             self._chains.close()
-        if self._event_rows is not None:
-            self._event_rows.close()
+        for f in (self._event_rows, self._drops):
+            if f is not None:
+                f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
             disarm = getattr(self.pb, "disarm_inverted_element_remesh", None)
             if disarm is not None:
@@ -2021,6 +2029,8 @@ class CollapseDriver:
             self._event_before = None
         m = self._event_after
         self._write_event_row(made)
+        if isinstance(made.get("ghost"), dict):
+            self._write_drop_row(made, "free")
         self._commit_post_cut(m)
         return m, None
 
@@ -2128,6 +2138,66 @@ class CollapseDriver:
         self._event_rows.write("\t".join(_table_cell(values.get(c)) for c in EVENT_COLUMNS)
                                + "\n")
 
+    def _follow_ghosts(self, m: dict):
+        """After an accepted step, with the events block: the ghost of each head the run removed
+        (its record's ``ghost``, ``events.ghost_place``), against the tips on the axis of the state
+        ``m``, whose recontacts (``events.ghost_recontacts``: the stump catching the ghost's rear,
+        its front reaching the far tip of the bubble) are flags only: each is added to the ghost
+        (``recontacts``, ``status`` ``recontact``) in the record the dumps keep and in the record's
+        file, where this run wrote it, as an event ``ghost-recontact`` and a row of ``drops.txt``.
+        Nothing stops: the bubble matters only for the entrainment, its collapse and the
+        budgets."""
+        if self.events is None or self._cut_record() is None:
+            return
+        rec = self._post_cut_state()["record"]
+        if not rec:
+            return
+        tips = {"cavity_tip": rec["z_cavity_tip"], "bubble_bottom": rec["z_bubble_bottom"],
+                "bubble_top": rec["z_bubble_top"]}
+        for e in self._made_events():
+            g = e.get("ghost")
+            if not isinstance(g, dict) or "step0" not in g:
+                continue
+            hits = ghost_recontacts(g, m["time"], self.state.step, tips)
+            for hit in hits:
+                hit = {key: _finite(v) if isinstance(v, float) else v
+                       for key, v in {**hit, **self._taus(hit["t"])}.items()}
+                g.setdefault("recontacts", []).append(hit)
+                g["status"] = "recontact"
+                self._event("ghost-recontact", m, k=e.get("k"), recontact=hit["kind"],
+                            tip=hit["tip"], z_ghost=hit["z_ghost"], z_tip=hit["z_tip"])
+                self._write_drop_row(e, hit["kind"], hit)
+            if hits:
+                self._rewrite_event_file(e)
+
+    def _write_drop_row(self, rec: dict, status: str, hit: dict | None = None):
+        """The row of ``drops.txt`` of a change of an event's ghost: made (``free``), or a
+        recontact ``hit``."""
+        g = rec["ghost"]
+        t = float(g["t0"]) if hit is None else float(hit["t"])
+        front, rear = ghost_place(g, t)
+        values = {"k": rec.get("k"), "status": status,
+                  "step": rec.get("step") if hit is None else hit["step"], "time": t,
+                  **self._taus(t), "tip": g.get("tip"), "far_tip": g.get("far_tip"),
+                  "z_front": front, "z_rear": rear,
+                  "z_tip": None if hit is None else hit["z_tip"], "U": g.get("U"),
+                  "v_ret": g.get("v_ret"), "V": g.get("V")}
+        self._drops.write("\t".join(_table_cell(values.get(c)) for c in DROP_COLUMNS) + "\n")
+
+    def _rewrite_event_file(self, rec: dict):
+        """Put an event's ghost, as the run follows it, into its record's file
+        (``events/event_<k>.json``), where this run wrote it, the polygon the file alone holds
+        kept."""
+        path = self.outdir / "events" / f"event_{int(rec['k']):03d}.json"
+        if not path.is_file():  # made in an earlier leg, in its own run directory
+            return
+        full = json.loads(path.read_text())
+        full["ghost"] = {**rec["ghost"], **({"polygon": full["ghost"]["polygon"]}
+                                            if "polygon" in (full.get("ghost") or {}) else {})}
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(full, indent=1) + "\n")
+        tmp.replace(path)
+
     def _events_summary(self, stop: dict) -> dict:
         """After a cut with the block: the events of the run's result (``run_status.json``): how
         many were made, by kind and by tip, the last, the totals of the removals since the gas
@@ -2149,6 +2219,9 @@ class CollapseDriver:
                 "removed_total": {key: sum(float((e.get("removed") or {}).get(key) or 0.0)
                                            for e in liquid) for key in ("V", "Pz", "KE")},
                 "cascade": {tip: v["verdict"] for tip, v in self._cascade().verdicts().items()},
+                "ghost_recontacts": {kind: sum(
+                    1 for e in made for x in (e.get("ghost") or {}).get("recontacts") or ()
+                    if x.get("kind") == kind) for kind in ("rear", "front")},
                 "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
                                                          "handler")}
                          if stop.get("reason") in EVENT_STOPS else None)}
@@ -2415,6 +2488,7 @@ class CollapseDriver:
                             alpha_apex=st.apex_alpha, t_apex_est=st.apex_t_est)
                 self._maybe_snapshot(m, "jet-born")
             self._track_tips(m)  # after a cut, the jets of the bubble's tips
+            self._follow_ghosts(m)  # with the events block, the ghosts of the removed heads
             # a trough apex only: a bump or crest on the axis has z''(0) < 0
             if st.cavity_seen and not st.born and m["axis_curvature"] > st.max_curvature:
                 st.max_curvature = m["axis_curvature"]

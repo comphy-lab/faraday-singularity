@@ -336,8 +336,7 @@ def test_the_driver_makes_each_event_and_goes_on_from_the_fresh_mesh(tmp_path, m
         assert trig["neck_to_base_over_r_j"] > 0.0
         assert e["dt"]["before"] == e["dt"]["history"] > 0.0
         g = e["ghost"]
-        assert (g["tip"], g["far_tip"], g["recontacts"]) == ("bubble_top", "bubble_bottom", [])
-        assert g["step0"] == e["step"]
+        assert (g["tip"], g["far_tip"], g["step0"]) == ("bubble_top", "bubble_bottom", e["step"])
         assert e["after"]["jet_born"] is True and e["after"]["r_j"] > 0.0
         meta = json.loads(Path(e["dumps"]["postcut"]).with_suffix(".json").read_text())
         assert meta["mesh_fresh"] is True and "resume_at" not in meta
@@ -480,3 +479,46 @@ def test_a_restart_from_the_state_after_an_event_goes_on_with_its_cascade(tmp_pa
     again.close()
     assert [e["k"] for e in pb.events][:2] == [1, 2] and pb.events[1]["generation"] == 2
     assert pb.events[1]["cascade"]["interval"] == pytest.approx(pb.events[1]["t"] - first["t"])
+
+
+def test_the_ghost_of_each_removed_head_is_followed_and_its_recontacts_flagged(tmp_path,
+                                                                             monkeypatch):
+    """The ghost of each removed head is followed after its cut: a ghost at rest whose rear lies
+    beyond the stump's tip (here the stand-in keeps the head, so the stump's tip is the old head's)
+    is caught by the stump two steps after the cut, one moving down at 2e4 reaches the bubble's
+    bottom a few steps later. Each recontact is a flag (the run goes on to its step limit): in the
+    ghost of the record the dumps keep and of its file, the polygon kept, an event
+    ``ghost-recontact`` and a row of ``drops.txt``, after the row of the ghost made."""
+    resting = fake_surgery(ghost={"U": 0.0, "v_ret": 0.0})
+    drv, out, _ = _run(tmp_path / "rest", monkeypatch, RegrowingHead(period=1e3),
+                       surgery=resting, max_steps=6)
+    assert drv.pb.events == [] and out["events"]["ghost_recontacts"] == {"rear": 0, "front": 0}
+    drv, out, _ = _run(tmp_path / "rear", monkeypatch, RegrowingHead(), surgery=resting)
+    assert out["stop"]["reason"] == "max-steps" and drv.pb.events
+    first = drv.pb.events[0]
+    g = first["ghost"]
+    assert g["status"] == "recontact" and [x["kind"] for x in g["recontacts"]] == ["rear"]
+    hit = g["recontacts"][0]
+    assert hit["step"] == first["step"] + ev.GHOST_SKIP_STEPS and hit["tip"] == "bubble_top"
+    assert hit["tau"] == pytest.approx(hit["t"]) and hit["z_ghost"] == g["z_rear0"]
+    lines = [x for x in _jsonl(tmp_path / "rear" / "events.jsonl")
+             if x["event"] == "ghost-recontact"]
+    assert [(x["k"], x["recontact"]) for x in lines][:1] == [(1, "rear")]
+    rows = _rows(tmp_path / "rear" / "drops.txt")
+    assert [(r["k"], r["status"]) for r in rows][:2] == [("1", "free"), ("1", "rear")]
+    assert float(rows[0]["z_rear"]) == pytest.approx(g["z_rear0"])
+    file = json.loads((tmp_path / "rear" / "events" / "event_001.json").read_text())
+    assert file["ghost"]["recontacts"] == g["recontacts"] and file["ghost"]["polygon"]
+    end = json.loads(Path(out["stop"]["end_state"]).with_suffix(".json").read_text())
+    assert end["events"][0]["ghost"]["recontacts"] == g["recontacts"]
+    followed = [e for e in drv.pb.events if e["step"] + ev.GHOST_SKIP_STEPS <= out["steps"]]
+    assert out["events"]["ghost_recontacts"]["rear"] == len(followed) >= 1
+    falling = fake_surgery(ghost={"U": -2e4, "v_ret": 0.0})
+    drv, out, _ = _run(tmp_path / "front", monkeypatch, RegrowingHead(period=4e-6),
+                       surgery=falling, max_steps=20)
+    g = drv.pb.events[0]["ghost"]
+    assert [x["kind"] for x in g["recontacts"]] == ["front"]
+    hit = g["recontacts"][0]
+    assert hit["tip"] == "bubble_bottom" and hit["z_ghost"] <= hit["z_tip"]
+    assert hit["step"] > drv.pb.events[0]["step"] + ev.GHOST_SKIP_STEPS
+    assert out["stop"]["reason"] == "max-steps"

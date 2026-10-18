@@ -515,7 +515,12 @@ the source commit, the start of the ghost and the cut jet after the cut (`after`
 gets an event `liquid-cut`, `profiles/` a profile, and `events.txt` a row per event (the trigger,
 the cap, the removed head and its ghost, the jet's base before and after, the closures relative to
 the head's own, the transfer, the interval since the event before at its tip, the cascade's verdict,
-the totals removed). The run stops resumably, with the dump of the state before the event, at the
+the totals removed). The ghost of each removed head is followed after its cut, rigidly at its mean
+axial speed with its rear retracting towards it at `r_n^(-1/2)`: the stump's tip catching its rear
+and its front reaching the far tip of the bubble (from two steps after the cut on) are flags only,
+the bubble mattering only for the entrainment, its collapse and the budgets (`ghost.recontacts` in
+the record and its file, an event `ghost-recontact`, a row of `drops.txt`, which also has a row for
+each ghost made). The run stops resumably, with the dump of the state before the event, at the
 event after `max_events` (`max-events`), at one that the cascade test of its tip judges to shrink
 (`event-cascade`: an interval since the last at the tip below `cascade_min_interval delta^2`, or
 `cascade_count` successive ratios of the intervals and of the heads' volumes, each below
@@ -524,8 +529,9 @@ it changed anything (`liquid-cut-refused`) and at one whose hard budgets do not 
 (`event-unclosed`), after which the problem holds a cut that is not accepted: the run then ends on
 the state before the event (`end_state`) and dumps nothing more. Any other failure of a cut fails
 the run. With the block the result in `run_status.json` has `events` (the events made, by kind and
-by tip, the last, the totals removed, the cascade's verdicts and the event the run stopped on) and
-`window_end` (the end of the window the run stopped at, the bubble emptying).
+by tip, the last, the totals removed, the cascade's verdicts, the ghosts' recontacts and the event
+the run stopped on) and `window_end` (the end of the window the run stopped at, the bubble
+emptying).
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus
