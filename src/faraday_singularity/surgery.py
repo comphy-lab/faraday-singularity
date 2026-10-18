@@ -1240,22 +1240,28 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        predicted from the geometry (``events.predict_unlocated``), every predicted one on the cap,
        none of the bulk or the axis, and at most the stump's tip on the axis without a value; the
        chains, their ends and the axis spans as planned.
-    5. **Cap fill** (``liquid.cap_fill`` ``sample``): the cap's nodes take the old bulk velocity at
-       their places, not the nearest old surface's that pyoomph's transfer gives them.
+    5. **Cap fill** (``liquid.cap_fill`` ``sample``; ``cap.fill``): the cap's nodes take the old
+       bulk velocity at their places, not the nearest old surface's that pyoomph's transfer gives
+       them.
     6. **Projection** (:func:`project`, with ``liquid.projection`` and ``liquid.restart`` or the gas
        cut's): ``Pi = 0`` on every free surface, the cap's included, the step before the cut
        (``dt_prev``) as the history's, the time unchanged; within the box, what it changed and the
        identity of the box's cutoff (``projection.box``).
     7. **Budgets after** and the closures (:func:`_closures`), of which the volume and the momentum
-       of the removal are hard checks (:class:`BudgetUnclosed` where they miss); the removed head as the ghost the run is to follow
-       (``ghost``: its volume, momentum and kinetic energy, its mean axial speed ``U``, its
-       equivalent radius, the retraction speed of its rear ``r_n^(-1/2)``, its two ends and the
-       speed of the stump's tip relative to it) and the totals of the removals since the gas cut
-       (``removed_total``); the record is appended to ``problem.events``, ``on_made`` is called
-       with it (the driver's bookkeeping) and ``postcut_e<k>`` kept.
+       of the removal are hard checks (:class:`BudgetUnclosed` where they miss); the removed head
+       as the ghost the run is to follow (``ghost``: its volume, momentum and kinetic energy, its
+       mean axial speed ``U``, its equivalent radius, the retraction speed of its rear
+       ``r_n^(-1/2)``, its two ends and the speed of the stump's tip relative to it) and the totals
+       of the removals since the gas cut (``removed_total``); the record is appended to
+       ``problem.events`` and ``on_made`` is called with it, the driver's bookkeeping, which also
+       adds to ``trigger`` what the driver measured of the state before the cut (the base of the
+       jet, ``r_j``, ``z_b`` and ``r_j_over_r_n``) before ``postcut_e<k>`` is kept and the file
+       written.
 
-    The record (schema ``faraday-event/2``) is written to ``events/event_<k>.json`` whatever the
-    outcome (``made``, ``refused``, ``unclosed``, ``failed`` or ``interrupted``, with
+    The record (schema ``faraday-event/2``: ``trigger``, ``cap`` with its ``fill``, ``removed``,
+    ``transfer``, ``projection``, ``budgets``, ``closures`` with ``F3_phi``, ``ghost``, of which
+    only the file holds the ``polygon``, the region removed at its start, and ``removed_total``) is
+    written to ``events/event_<k>.json`` whatever the outcome (``made``, ``refused``, ``unclosed``, ``failed`` or ``interrupted``, with
     ``failed_at``), as :func:`cut` writes its own; a refusal leaves the problem unchanged, a failure
     ends the run, and hard budgets that do not close (:class:`BudgetUnclosed`, a failure) end it at
     a stop to resume from ``precut_e<k>``."""
@@ -1477,8 +1483,8 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     poly_after = box_polyline_budgets([c for _, c in new_named], lc.z_n, R_b, s.reservoir_depth)
 
     stage("fill")
-    record["cap_fill"] = _fill_cap(pb, lc, samples, new_segs[lc.chain],
-                                   apply=ls.cap_fill == "sample")
+    record["cap"]["fill"] = _fill_cap(pb, lc, samples, new_segs[lc.chain],
+                                      apply=ls.cap_fill == "sample")
 
     stage("projection")
     record["projection"] = {}
@@ -1537,7 +1543,7 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     made["dumps"]["postcut"] = _keep(pb, driver, out, f"postcut_e{k:03d}",
                                      {"cut_stage": "postcut-event", "event_k": k})["path"]
     pb.events[-1] = made
-    full = dict(made, removed=dict(made["removed"], polygon=lc.removed.tolist()))
+    full = dict(made, ghost=dict(made["ghost"], polygon=lc.removed.tolist()))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_jsonable(full), indent=1) + "\n")
     rel = ", ".join(f"{x} {closures['relative'][x]:.3g}" for x in BUDGET_LIMITS)

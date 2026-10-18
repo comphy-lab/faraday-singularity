@@ -397,7 +397,15 @@ def jets(tmp_path_factory):
         res["late"] = late
         # the cut of the first event, then of the next
         cuts = out / "cuts"
-        res["record1"] = surgery.liquid_cut(pb, EVENTS, RECON, cuts, req, k=1, **CUT_KW)
+        made = []
+
+        def on_made(rec):  # as the driver adds its measurement of the jet's base to the trigger
+            made.append(rec["k"])
+            rec["trigger"].update(r_j=0.25, z_b=0.5, r_j_over_r_n=0.75)
+
+        res["record1"] = surgery.liquid_cut(pb, EVENTS, RECON, cuts, req, k=1, on_made=on_made,
+                                            **CUT_KW)
+        res["on_made"] = made
         res["file1"] = json.loads((cuts / "events" / "event_001.json").read_text())
         res["segs1"] = surgery._named_chains(pb)[0]
         res["spans1"] = surgery._axis_spans_of_mesh(pb)
@@ -544,11 +552,18 @@ def test_each_cut_removes_its_head_and_rebuilds_the_mesh_as_planned(jets):
     assert r2["removed_total"]["events"] == 2
     for x in ("V", "Pz", "KE"):
         assert r2["removed_total"][x] == pytest.approx(r1["removed"][x] + r2["removed"][x])
-    # the events made, as the dumps keep them, the polygon of the removed head in the file only
+    # the events made, as the dumps keep them, the polygon of the ghost in the file only
     assert [e["k"] for e in jets["events"]] == [1, 2]
     assert ev.events_done(jets["events"]) == {"liquid": 2, "gap": 0}
-    assert "polygon" not in r1["removed"] and len(jets["file1"]["removed"]["polygon"]) > 10
+    assert "polygon" not in r1["ghost"] and "polygon" not in jets["file1"]["removed"]
+    assert len(jets["file1"]["ghost"]["polygon"]) > 10
     assert jets["file1"]["dumps"]["postcut"] == r1["dumps"]["postcut"]
+    # what on_made adds to the trigger, before the file is written
+    assert jets["on_made"] == [1]
+    for rec in (r1, jets["file1"], jets["events"][0]):
+        assert {k: rec["trigger"][k] for k in ("r_j", "z_b", "r_j_over_r_n")} == {
+            "r_j": 0.25, "z_b": 0.5, "r_j_over_r_n": 0.75}
+    assert "r_j" not in r2["trigger"]
     for rec in (r1, r2):
         for key in ("precut", "postcut"):
             assert Path(rec["dumps"][key]).is_file() and \
@@ -568,7 +583,7 @@ def test_the_transfer_leaves_unlocated_only_the_cap_it_predicts(jets):
         assert set(tr["unlocated"]) == {surgery.INTERFACE}
         assert tr["no_value"] == {surgery.INTERFACE + "/axis": [1, 3]}
         assert "_kin_bc" in tr["corner_fields"]
-        fill = rec["cap_fill"]
+        fill = rec["cap"]["fill"]
         assert fill["mode"] == "sample" and fill["nodes"] == tr["cap_nodes"]
         assert fill["samples_found"] == fill["samples"]
         assert rec["cap"]["samples"] == {"count": fill["samples"], "found": fill["samples"]}
@@ -630,7 +645,7 @@ def test_the_cap_carries_the_old_bulk_velocity_at_its_nodes(jets):
     scale = float(sample["speed"].max())
     assert sample["error"].max() < 2e-3 * scale
     assert transfer["error"].max() > 0.1 * scale > 50.0 * sample["error"].max()
-    assert transfer["record"]["cap_fill"]["mode"] == "transfer"
+    assert transfer["record"]["cap"]["fill"]["mode"] == "transfer"
     assert "box" not in sample["record"]["projection"]  # the projection was off
 
 
