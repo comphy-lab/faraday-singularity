@@ -227,7 +227,12 @@ add a second top-level `cases/` tree.
   state; a continuation from it is a post-cut restart that may change the event's class keys. The
   tests of the branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names
   their run directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k`
-  cover it by default.
+  cover it by default. After the cut the driver reads its limits through accessors that return the
+  collapse's own value before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`,
+  `_fold_stop`, `_neck_limit`): `post.h_floor` (focus floor, feature regions, guard, kink regions,
+  the open chain's neck limit), `post.rise_tol`, `post.dt_min`, `gap.kappa_g delta` (also the groove
+  gaps of `chains.txt`), `post.neck_floor` and `post.neck_elements_per_scale` (the neck regions of
+  `reconnect.feature_regions`); `post.open_neck_stop` false skips the open chain's neck stop.
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the

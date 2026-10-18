@@ -1040,7 +1040,8 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
                     settings: ReconnectSettings, *, h_floor: float, h_axis: float,
                     elements_per_scale: float, focus_extent: float,
                     apexes: dict | None = None, bubble_bottom_sizing: str = "kept",
-                    bubble_bottom_size: float | None = None) -> list[dict]:
+                    bubble_bottom_size: float | None = None, neck_floor: float | None = None,
+                    neck_elements_per_scale: float | None = None) -> list[dict]:
     """The features of both chains after a cut, each to be meshed at its own size (the regions of
     the focus, ``mesh.FocusRegion``): ``name``, ``target`` (element size), centre ``r``, ``z``,
     ``radius``, its scale ``ell`` (``inf`` without one) and ``floor``, the smallest size it may ask
@@ -1072,7 +1073,9 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
       exceed is ``bubble_bottom_size`` instead of the landing's, whatever the landing state: the
       bubbles of a study in ``delta`` are then meshed alike there, far from the cut.
     * Each neck of either chain: ``r_n/elements_per_scale``, floored at the cut's focus size, within
-      ``focus_extent r_n`` of it.
+      ``focus_extent r_n`` of it; with the events block's ``post`` at ``neck_elements_per_scale``
+      elements per neck radius and floored at ``neck_floor``, so that a neck can be followed below
+      the cut radius.
 
     ``cavity`` describes the open chain's tip (``z_tip``, ``kappa`` the apex curvature, ``r_j``,
     ``rise``, ``bump`` and ``flat_bump`` as the driver measures it), ``tips`` the bubble's two
@@ -1161,12 +1164,14 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
         out.append({"name": f"jet_base_{tip}", "target": target, "r": float(a["r"]),
                     "z": float(a["z"]), "radius": max(settings.apex_extent * R, 4.0 * target),
                     "ell": R, "floor": h_floor})
+    neck_eps = elements_per_scale if neck_elements_per_scale is None else neck_elements_per_scale
+    neck_min = h_cut if neck_floor is None else neck_floor
     for name, chain in (("neck_open", "open"), ("neck_bubble", "bubble")):
         r_n, z_n = necks.get(f"r_neck_{chain}", math.nan), necks.get(f"z_neck_{chain}", math.nan)
         if math.isfinite(r_n) and r_n > 0.0:
-            out.append({"name": name, "target": float(np.clip(r_n / elements_per_scale, h_cut, h_axis)),
+            out.append({"name": name, "target": float(np.clip(r_n / neck_eps, neck_min, h_axis)),
                         "r": float(r_n), "z": float(z_n), "radius": focus_extent * float(r_n),
-                        "ell": float(r_n), "floor": h_cut})
+                        "ell": float(r_n), "floor": neck_min})
     return out
 
 

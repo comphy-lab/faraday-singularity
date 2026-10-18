@@ -286,7 +286,8 @@ import numpy as np
 from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_disc_points,
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
-from .events import EVENT_REQUEST, EVENT_UNHANDLED, PRECUT_EVENT, EventSettings, events_done
+from .events import (EVENT_REQUEST, EVENT_UNHANDLED, PRECUT_EVENT, EventSettings, events_done,
+                     fold_stop_after_cut)
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -663,7 +664,7 @@ class CollapseDriver:
         if len(segs) == 2:
             bubble = next(c for c in segs if not c["open"])
             tips = {name: tip_jet(bubble_end(bubble, name), r_search=s.r_search,
-                                  rise_tol=s.rise_tol, flat_aspect=s.flat_aspect,
+                                  rise_tol=self._rise_tol(), flat_aspect=s.flat_aspect,
                                   jet_aspect=s.jet_aspect, jet_max_radius=s.jet_max_radius)
                     for name in BUBBLE_TIP_SIGNS}
             apexes = self._apexes(next(c for c in segs if c["open"]), bubble, tips)
@@ -693,7 +694,7 @@ class CollapseDriver:
         s = self.s
         out = {}
         r, z = np.asarray(cavity["r"], dtype=float), np.asarray(cavity["z"], dtype=float)
-        jb = jet_base(Profile(r, z), s.r_search, s.rise_tol)
+        jb = jet_base(Profile(r, z), s.r_search, self._rise_tol())
         rise = float(z[0]) - jb.z_b
         if jb.jet_born and jb.r_j > 0.0 and not rise <= s.flat_aspect * jb.r_j:
             a = jet_base_apex(r, z, jb.index)
@@ -714,7 +715,7 @@ class CollapseDriver:
                          "r": tj["r_j"], "z": tj["z_b"]}
         for a in out.values():
             c = cavity if a["chain"] == "open" else bubble
-            g = groove_gap(c["r"], c["z"], a["index"], ratio=s.fold_ratio, stop=s.fold_stop,
+            g = groove_gap(c["r"], c["z"], a["index"], ratio=s.fold_ratio, stop=self._fold_stop(),
                            stop_elements=s.fold_stop_elements)
             a.update(groove_gap=g["gap"], groove_limit=g["limit"], groove_arc=g["arc"])
         return out
@@ -755,7 +756,7 @@ class CollapseDriver:
                                   cut["sizing"]["h_tip"], neck_elements=s.neck_stop_elements,
                                   fold_ratio=s.fold_ratio, fold_stop=s.fold_stop,
                                   fold_stop_elements=s.fold_stop_elements, fold_search=FOLD_SEARCH,
-                                  apexes=apexes, guard={"fresh": fresh, "h_floor": s.h_floor,
+                                  apexes=apexes, guard={"fresh": fresh, "h_floor": self._h_floor(),
                                                         "refine_ratio": s.refine_ratio},
                                   events=self.events,
                                   invalid=self._jacobian_stop if fresh else None)
@@ -861,8 +862,47 @@ class CollapseDriver:
         its features by their own scales, between ``h_floor`` and the cut's focus size
         (``reconnect.feature_regions``): the cut's focus size is the coarsest size it allows near
         the cut, not a floor, which met a sharp tip or the apex of a groove at the base of a jet
-        with one or two elements."""
-        return self.s.h_floor
+        with one or two elements. With the events block ``post.h_floor`` after the cut."""
+        return self._h_floor()
+
+    # --- after a cut: the limits and floors of the events block's post ------------------------
+
+    def _post(self):
+        """The events block's ``post`` after a cut; None before it or without the block, where
+        every limit is the collapse's own."""
+        if self.events is None or self._cut_record() is None:
+            return None
+        return self.events.post
+
+    def _h_floor(self) -> float:
+        """The smallest element size: ``h_floor``, after a cut ``post.h_floor`` if set."""
+        post = self._post()
+        return self.s.h_floor if post is None or post.h_floor is None else post.h_floor
+
+    def _rise_tol(self) -> float:
+        """The rise of a bump that makes a jet: ``rise_tol``, after a cut ``post.rise_tol`` if
+        set."""
+        post = self._post()
+        return self.s.rise_tol if post is None or post.rise_tol is None else post.rise_tol
+
+    def _dt_min(self) -> float:
+        """The step-size floor: ``dt_min``, after a cut ``post.dt_min`` if set."""
+        post = self._post()
+        return self.s.dt_min if post is None or post.dt_min is None else post.dt_min
+
+    def _fold_stop(self) -> float:
+        """The absolute part of the fold limit: ``fold_stop``, after a cut with the block
+        ``gap.kappa_g delta`` (``events.fold_stop_after_cut``)."""
+        if self._post() is None:
+            return self.s.fold_stop
+        return fold_stop_after_cut(self.events, self.reconnect.delta, self.s.fold_stop)
+
+    def _neck_limit(self) -> float:
+        """The open chain's neck stop, ``max(neck_stop, neck_stop_elements h_floor)``, with the
+        floor of :meth:`_h_floor`."""
+        if self._post() is None:
+            return self.s.neck_limit
+        return max(self.s.neck_stop, self.s.neck_stop_elements * self._h_floor())
 
     def _apex_prediction(self, apexes: dict) -> dict:
         """The base of each jet (``_post_cut_state``'s ``apexes``) with the radius predicted
@@ -901,19 +941,20 @@ class CollapseDriver:
             return [], {}
         s, cut, st = self.s, self._cut_record(), self.state
         regions = feature_regions(segs, cavity, tips, pc["record"], cut, self.reconnect,
-                                  h_floor=s.h_floor, h_axis=self.pb.mesh_settings.h_axis,
+                                  h_floor=self._h_floor(), h_axis=self.pb.mesh_settings.h_axis,
                                   elements_per_scale=(s.elements_per_scale
                                                       if self.reconnect.elements_per_scale is None
                                                       else self.reconnect.elements_per_scale),
                                   focus_extent=s.focus_extent,
                                   apexes=self._apex_prediction(pc["apexes"]),
                                   **self._post_region_keys())
+        h_floor = self._h_floor()
         refine = interface_guard(pc["edges"], self.reconnect, fresh=self._fresh_mesh(),
-                                 h_floor=s.h_floor, refine_ratio=s.refine_ratio)["refine"]
-        kinks = kink_regions(st.kinks, pc["edges"], refine, t=self._t(), h_floor=s.h_floor,
+                                 h_floor=h_floor, refine_ratio=s.refine_ratio)["refine"]
+        kinks = kink_regions(st.kinks, pc["edges"], refine, t=self._t(), h_floor=h_floor,
                              hold=lambda L: s.coarsen_hold * local_time(L, U))
         regions += [{"name": g["name"], "target": g["target"], "r": g["r"], "z": g["z"],
-                     "radius": g["radius"], "ell": math.inf, "floor": s.h_floor,
+                     "radius": g["radius"], "ell": math.inf, "floor": h_floor,
                      "released": g["released"]} for g in kinks.values()]
         focus = self.pb.active_mesh_template().focus
         axis_tips = [float(c["z"][k]) for c in segs for k, end in ((0, 0), (-1, 1))
@@ -940,7 +981,8 @@ class CollapseDriver:
             return {}
         post = self.events.post
         return {"bubble_bottom_sizing": post.bubble_bottom_sizing,
-                "bubble_bottom_size": post.bubble_bottom_size}
+                "bubble_bottom_size": post.bubble_bottom_size, "neck_floor": post.neck_floor,
+                "neck_elements_per_scale": post.neck_elements_per_scale}
 
     def _commit_post_cut(self, m: dict):
         """After a cut, at the end of an accepted step (its last measurement ``m``): keep the radius
@@ -1136,12 +1178,13 @@ class CollapseDriver:
         r, z, ur, uz = pb.interface_arrays()
         prof = Profile(r, z)
         kappa = axis_curvature(prof)
-        jb = jet_base(prof, s.r_search, s.rise_tol)
+        rise_tol = self._rise_tol()
+        jb = jet_base(prof, s.r_search, rise_tol)
         rise = float(z[0]) - jb.z_b
         flat_bump = jb.index > 0 and rise <= s.flat_aspect * jb.r_j
         cavity = self.state.cavity_seen or jb.index == 0
         born = (self.state.born or (cavity and jb.jet_born and jb.r_j < s.jet_max_radius
-                                    and rise > max(s.rise_tol, s.jet_aspect * jb.r_j)))
+                                    and rise > max(rise_tol, s.jet_aspect * jb.r_j)))
         r_j = jb.r_j if cavity else math.nan
         nk = necks(prof)
         r_neck, z_neck = (nk[0][0], nk[0][1]) if nk else (math.nan, math.nan)
@@ -1873,8 +1916,12 @@ class CollapseDriver:
     # --- main loop ----------------------------------------------------------------------------
 
     def _geometry_stop(self, m):
-        neck_limit = self.s.neck_limit
-        if math.isfinite(m["r_neck"]) and m["r_neck"] < neck_limit:
+        neck_limit = self._neck_limit()
+        post = self._post()
+        # with the block, after the cut, the open chain's neck stop may be off
+        # (post.open_neck_stop): its liquid neck is then an event of the stops after the cut
+        if (post is None or post.open_neck_stop) and math.isfinite(m["r_neck"]) \
+                and m["r_neck"] < neck_limit:
             return {"reason": "pinch-off-approach", "trigger": "neck-radius",
                     "r_neck": m["r_neck"], "z_neck": m["z_neck"], "neck_limit": neck_limit}
         # after a cut the fold stop is the post-cut one, on both chains, which names a fold across
@@ -1966,7 +2013,7 @@ class CollapseDriver:
                     dt = min(dt, s.scale_rate * m["ell"] / rate)
             if st.dt_prev is not None:
                 dt = min(dt, s.growth * st.dt_prev)
-            if dt < s.dt_min:
+            if dt < self._dt_min():
                 stop = {"reason": "dt-floor", "dt": dt}
                 break
             st.ell_prev, st.t_prev = m["ell"], t

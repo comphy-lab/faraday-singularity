@@ -129,7 +129,9 @@ def cavity_with_head(delta, *, r_n=0.3, s=0.5, r_w=1.0, r_root=0.45, h=1 / 256, 
     tip on the axis to the roof, then out to the wall."""
     local, apex = head_feature(r_n=r_n, s=s, r_w=r_w, r_root=r_root)
     feat = np.column_stack([delta * local[::-1, 0], 4.70 - delta * local[::-1, 1]])
-    far = np.linspace(feat[-1], [0.5, 5.0], 20000)[1:]
+    t = np.linspace(0.0, 1.0, 20000)[1:, None]  # out to the wall, leaving the roof tangentially
+    far = ((1 - t) ** 2 * feat[-1] + 2 * t * (1 - t) * np.array([0.25, feat[-1, 1]])
+           + t**2 * np.array([0.5, 5.0]))
     dense = np.vstack([feat, far, [[R_C, 5.2]]])
     # the spacing is graded away from the feature, which here comes first: build it reversed
     rev = dense[::-1]
@@ -479,3 +481,58 @@ def test_the_stop_states_of_runs_after_a_cut_go_on_with_the_block(run):
     req = rc.post_cut_stops(chains, cut, s, h_tip, events=landed, **kw)
     assert req["kind"] == "liquid-neck" and req["index"] == neck["index"]
     assert req["chain"] == neck["chain"]
+
+
+# --- the floors after the cut, in units of delta --------------------------------------------------
+
+
+def test_the_floor_of_the_guard_is_the_same_in_units_of_delta_with_a_floor_scaled_with_delta():
+    """An element of the jet's root bent by 40 degrees asks for a refinement; the guard stops the
+    run on it (feature-below-floor) once its chord lies within 1.5 floors. With the floor scaled
+    with delta (delta/512 none, delta/128 every one of the 2^-k scalings stops) the outcome is the
+    same at every delta; with the collapse's absolute floor it changes with delta."""
+    from test_reconnect_geometry import _bent
+
+    outcomes = {"d/512": set(), "d/128": set(), "absolute": []}
+    for k in range(8):
+        d = 1e-3 * 2.0 ** -k
+        bubble, apex = bubble_with_head(d, r_n=0.3)
+        i = apex + 200  # down the jet's root, between the apex and the neck
+        bent = rc.Chain(_bent(bubble.points, i // 2, turn_deg=40.0), bubble.end_types)
+        chains = [bent, cavity()]
+        cut = rc.cut_geometry([bubble, chains[1]], 3.0, gas_before=1.0)
+        for name, h_floor in (("d/512", d / 512), ("d/128", d / 128), ("absolute", 7.8125e-7)):
+            stop = _stops(chains, delta=d, cut=cut,
+                          guard={"fresh": False, "h_floor": h_floor, "refine_ratio": 1.5})
+            got = None if stop is None else (stop["reason"], stop["trigger"])
+            if name == "absolute":
+                outcomes[name].append(got)
+            else:
+                outcomes[name].add(got)
+    assert outcomes["d/512"] == {None}
+    assert outcomes["d/128"] == {("interface-unresolved", "feature-below-floor")}
+    assert outcomes["absolute"][0] is None and outcomes["absolute"][-1] is not None
+
+
+def test_a_neck_after_the_cut_is_followed_below_the_cut_radius_with_the_block():
+    """The region of a neck is floored at the cut's focus size, delta/16, without the block's
+    post.neck_floor; with it a neck of 0.1 delta is meshed at r_n/eps, and post.
+    neck_elements_per_scale sets eps there alone."""
+    from test_reconnect_geometry import _post_cut_segs, _regions
+
+    s = rc.ReconnectSettings(delta=1e-3)
+    segs = _post_cut_segs()
+    P = np.column_stack([segs[1]["r"], segs[1]["z"]])
+    k = 300
+    P[k - 5:k + 6, 0] = np.minimum(P[k - 5:k + 6, 0], 1e-4 + 1e-6 * np.abs(np.arange(-5, 6)))
+    segs[1]["r"] = P[:, 0]
+    cut = {"delta": 1e-3, "rmin": 1e-3}
+    legacy = _regions(segs, cut, s)["neck_open"]
+    assert legacy["target"] == pytest.approx(6.25e-5) and legacy["floor"] == 6.25e-5
+    assert _regions(segs, cut, s, neck_floor=None, neck_elements_per_scale=None)["neck_open"] \
+        == legacy
+    g = _regions(segs, cut, s, neck_floor=1e-6)["neck_open"]
+    assert g["target"] == pytest.approx(1e-4 / 16) and g["floor"] == 1e-6
+    g = _regions(segs, cut, s, neck_floor=1e-6, neck_elements_per_scale=32.0)
+    assert g["neck_open"]["target"] == pytest.approx(1e-4 / 32)
+    assert g["cavity_tip"] == _regions(segs, cut, s)["cavity_tip"]  # the rest at its own eps

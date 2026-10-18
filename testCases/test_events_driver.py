@@ -158,3 +158,66 @@ def test_a_closing_groove_is_met_at_kappa_g_delta_not_at_the_absolute_fold_stop(
     assert out["stop"]["reason"] == "max-steps" and out["steps"] == 3
     rows = np.loadtxt(tmp_path / "block" / "chains.txt", ndmin=2)
     assert len(rows) == 4
+
+
+def test_the_limits_after_the_cut_are_the_blocks_and_before_it_the_collapses(tmp_path):
+    """With the block the driver's floors after the cut are post's (h_floor, rise_tol, dt_min, the
+    open chain's neck stop through neck_stop_elements h_floor), each the collapse's own when null;
+    before the cut, and without the block, the collapse's. A step below post.dt_min is the
+    dt-floor stop."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    post = {"h_floor": 1e-7, "rise_tol": 1e-8, "dt_min": 1e-5, "neck_floor": 2e-7}
+    events = ev.EventSettings.from_dict({"post": post})
+    pb = CutProblem()
+    drv = CollapseDriver(pb, _settings(neck_stop=1e-4, h_floor=1e-5), tmp_path / "pre",
+                         reconnect=recon, events=events)
+    assert (drv._h_floor(), drv._rise_tol(), drv._dt_min(), drv._fold_stop()) == (
+        1e-5, 1e-6, 1e-12, 1e-3)  # no cut yet
+    assert drv._neck_limit() == max(1e-4, 3 * 1e-5)
+    drv.close()
+    drv = _events_driver(tmp_path / "block", CutProblem(), recon, events=events, neck_stop=1e-4,
+                         h_floor=1e-5)
+    assert (drv._h_floor(), drv._rise_tol(), drv._dt_min(), drv._focus_floor()) == (
+        1e-7, 1e-8, 1e-5, 1e-7)
+    assert drv._fold_stop() == pytest.approx(0.05 * 1e-3) and drv._neck_limit() == 1e-4
+    regions = {g["name"]: g for g in drv.measure()["regions"]}
+    assert all(g["floor"] in (1e-7, recon.focus_size * 1e-3) for g in regions.values())
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"] == {**out["stop"], "reason": "dt-floor"} and out["steps"] == 0
+    plain = _events_driver(tmp_path / "plain", CutProblem(), recon, neck_stop=1e-4, h_floor=1e-5)
+    assert (plain._h_floor(), plain._rise_tol(), plain._dt_min(), plain._fold_stop()) == (
+        1e-5, 1e-6, 1e-12, 1e-3)
+    assert plain.run(1e-9)["stop"]["reason"] == "max-steps"
+    plain.close()
+    nulls = _events_driver(tmp_path / "nulls", CutProblem(), recon,
+                           events=ev.EventSettings.from_dict({"gap": {"kappa_g": None}}),
+                           neck_stop=1e-4, h_floor=1e-5)
+    assert (nulls._h_floor(), nulls._rise_tol(), nulls._dt_min(), nulls._fold_stop()) == (
+        1e-5, 1e-6, 1e-12, 1e-3)
+    nulls.close()
+
+
+def test_with_liquid_events_the_open_chains_neck_stop_is_off_after_the_cut(tmp_path):
+    """The open chain's neck stop (collapse.neck_stop, here its default of 1e-3) would end the run
+    on the neck at the root of the jet rising from the cavity's tip, which liquid events follow:
+    post.open_neck_stop false drops it after the cut, and the neck is tracked instead."""
+    from test_events_stops import cavity_with_head
+
+    class RisingJet(CutProblem):
+        def interface_segments(self):
+            segs = super().interface_segments()
+            P = cavity_with_head(1e-3, r_n=0.3).points
+            segs[1] = self._chain("open", P[:, 0].copy(), P[:, 1].copy(), ("axis", "fixed"))
+            return segs
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    plain = _events_driver(tmp_path / "plain", RisingJet(), recon).run(1e-9)
+    assert plain["stop"]["reason"] == "pinch-off-approach" and plain["steps"] == 0
+    kept = _events_driver(tmp_path / "kept", RisingJet(), recon,
+                          events=ev.EventSettings()).run(1e-9)
+    assert kept["stop"]["reason"] == "pinch-off-approach"  # the default keeps it
+    out = _events_driver(tmp_path / "off", RisingJet(), recon,
+                         events=ev.EventSettings.from_dict(LIQUID)).run(1e-9)
+    assert out["stop"]["reason"] == "max-steps" and out["steps"] == 3
+
