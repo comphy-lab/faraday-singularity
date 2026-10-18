@@ -385,7 +385,10 @@ the roots of the jets the cut launched; `gap`, the closing folds of either chain
 narrowing); and `post`, the limits, floors and mesh sizes of the run after the cut, each by default
 the collapse's own. A case without the block runs exactly as before the block existed: the tests
 run a cut, the run after it with rebuilds and dumps, and a restart from one of those dumps, against
-the source of commit `1b65916`, to the byte. The block applies after the cut only, and needs a
+the source of commit `1b65916`, to the byte. That finite-element run meets no neck, no jet at the
+bubble's bottom and no stop but its step limit; stand-in problems with prescribed chains cover
+those against the same source (`testCases/test_events_legacy.py`). A replay of a production run
+after its cut remains the full check. The block applies after the cut only, and needs a
 `reconnect` block: a cut restart may add, drop or change it together with the reconnect block
 (`run_case.CUT_EVENTS_DERIVED_KEYS`), a continuation from a dump written after the cut may add or
 change it (`run_case.POST_CUT_DERIVED_KEYS`), and a run from the start or an ordinary restart that
