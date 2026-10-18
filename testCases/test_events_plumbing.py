@@ -66,7 +66,8 @@ def test_a_state_written_after_a_cut_before_the_block_continues_with_or_without_
     names the block among the keys that differ (``POST_CUT_DERIVED_KEYS``)."""
     cut_case = _cut_case()
     state, _ = _parent_run(tmp_path, case=cut_case)
-    _write_meta(state, cut={"delta": RECON.delta, "t_cut": 0.5 - 0.5e-4, "settings": RECON.to_dict()})
+    _write_meta(state, cut={"delta": RECON.delta, "t_cut": 0.5 - 0.5e-4,
+                            "settings": RECON.to_dict()})
     path = tmp_path / "parent-case.json"
     record, mode = _admit(state, cut_case, path)
     assert mode == run_case.POST_CUT and "derived_keys" not in record["parent_record"]
@@ -197,7 +198,7 @@ def test_the_runner_refuses_an_invalid_block_or_collapse_key_before_output(tmp_p
     assert not out.exists()
 
 
-# --- the driver: dumps and legs ----------------------------------------------------------------------
+# --- the driver: dumps and legs -------------------------------------------------------------------
 
 
 def _events_driver(tmp_path, pb, recon, events=None, leg_info=None, **kw):
@@ -304,7 +305,7 @@ def test_a_restart_with_the_block_starts_a_leg_and_mirrors_the_runner_refusals(t
         CollapseDriver(CutProblem(), _settings(), tmp_path / "f", events=s)
 
 
-# --- the bubble's bottom, frozen ---------------------------------------------------------------------
+# --- the bubble's bottom, frozen ------------------------------------------------------------------
 
 
 def test_a_frozen_bubble_bottom_is_never_coarser_than_its_size_whatever_the_landing():
