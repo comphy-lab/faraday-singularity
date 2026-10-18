@@ -590,7 +590,8 @@ def test_the_budgets_of_each_cut_close(jets):
     identity is recorded."""
     for rec, sign in ((jets["record1"], 1.0), (jets["record2"], -1.0)):
         cl, rem = rec["closures"], rec["removed"]
-        assert cl["flags"] == [] and cl["hard"] == [] and cl["sigma"] == 0.0
+        assert cl["flags"] == [] and cl["hard"] == []
+        assert cl["sigma"] == {"V": 0.0, "Pz": 0.0, "KE": 0.0}
         assert cl["relative"]["F1"] < 2e-3 and cl["relative"]["F2"] < 1e-2
         assert cl["relative"]["F3"] < 2e-3 and cl["relative"]["F4"] < 1e-3
         assert cl["relative"]["F5"] < 2e-3 and cl["relative"]["F6"] < 1e-2

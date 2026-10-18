@@ -512,6 +512,44 @@ def test_the_closures_of_a_cut_flag_each_budget_and_fail_on_the_volume_and_the_m
         assert surgery._closures(*_budgets(half))["flags"] == [], name
 
 
+def test_the_limits_of_the_closures_are_floored_at_a_multiple_of_the_noise_of_the_box():
+    """Each limit is the head's own times its coefficient but never below its multiple of the noise
+    of the box in an ordinary rebuild (NOISE_FLOORS: five of the volume's for F1, of the momentum's
+    for F2 and F3, three and five of the energy's for F4 and F6; none for the area): a miss of the
+    volume of twice its limit passes over a noise of half that limit, and fails over a fifth of it."""
+    pytest.importorskip("pyoomph")
+    from faraday_singularity import surgery
+
+    assert surgery.NOISE_FLOORS == {"F1": ("V", 5.0), "F2": ("Pz", 5.0), "F3": ("Pz", 5.0),
+                                    "F4": ("KE", 3.0), "F6": ("KE", 5.0)}
+    sigma = {"V": 1e-3, "Pz": 0.1, "KE": 0.2}
+    cl = surgery._closures(*_budgets(), sigma=sigma)
+    assert cl["sigma"] == sigma and cl["flags"] == []
+    assert cl["limits"] == pytest.approx({"F1": 1e-2, "F2": 0.5, "F3": 0.5, "F4": 0.6,
+                                          "F5": 0.04, "F6": 1.0})
+    assert surgery._closures(*_budgets())["sigma"] == {"V": 0.0, "Pz": 0.0, "KE": 0.0}
+    miss = [("poly", "after", "V_liquid", -0.02)]  # twice the limit of a hundredth of V
+    assert surgery._closures(*_budgets(miss))["hard"] == ["F1"]
+    assert surgery._closures(*_budgets(miss), sigma={"V": 0.005})["flags"] == []
+    assert surgery._closures(*_budgets(miss), sigma={"V": 0.002})["hard"] == ["F1"]
+    for name, key, changes in (
+            ("F2", "Pz", [("box", "after_transfer", "Pz", 0.2),
+                          ("box", "after_projection", "Pz", 0.2)]),
+            ("F3", "Pz", [("box", "after_projection", "Pz", 0.2)]),
+            ("F4", "KE", [("box", "after_projection", "KE", 0.4)]),
+            ("F6", "KE", [("box", "after_transfer", "KE", 0.2),
+                          ("box", "after_projection", "KE", 0.2)])):
+        factor = surgery.NOISE_FLOORS[name][1]
+        value = surgery._closures(*_budgets(changes))[name]
+        assert surgery._closures(*_budgets(changes), sigma={key: 1.01 * value / factor}
+                                 )["flags"] == [], name
+        assert surgery._closures(*_budgets(changes), sigma={key: 0.99 * value / factor}
+                                 )["flags"] == [name], name
+    area = [("poly", "after", "A", -0.1)]
+    assert surgery._closures(*_budgets(area), sigma={"V": 1.0, "Pz": 1.0, "KE": 1.0}
+                             )["flags"] == ["F5"]
+
+
 def test_the_neck_a_request_lands_is_the_tracked_one_and_its_head_is_cut():
     """The neck of a request of the events branch (``events.event_neck``): of a landed liquid neck
     its own fields, of a fold that reaches a head (``a-head``) the fields of that head's neck; each

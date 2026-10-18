@@ -241,10 +241,12 @@ add a second top-level `cases/` tree.
   `bridge-closing`, `chain-contact`. Heads and tracked necks: `events.head_sides`, `liquid_necks`,
   `head_of_fold`. The keys of `liquid` also set the cut of a neck that lands under them
   (`surgery.liquid_cut`, which refuses a request made under others), which the driver does not make
-  yet (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`, `restart`; class keys like the
-  rest of `liquid`): the head removed and the stump capped at the neck (`events.truncate_chain`,
-  refused unless its hard checks hold), the mesh rebuilt from a plan
-  built in the project (`events.build_liquid_plan`, parked as pyoomph parks its own,
+  yet (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`, `restart`, and the noise of the
+  box in an ordinary rebuild that floors the limits of its budgets, `sigma_V`, `sigma_Pz`,
+  `sigma_KE`, `surgery.NOISE_FLOORS`, none until calibrated; class keys like the rest of `liquid`):
+  the head removed and the stump capped at the neck (`events.truncate_chain`, refused unless its
+  hard checks hold), the mesh rebuilt from a plan built in the project (`events.build_liquid_plan`,
+  parked as pyoomph parks its own,
   `surgery.park_plan`), the transfer checked against the geometry (`surgery.transfer_problems`:
   pyoomph's count of unlocated interface nodes within two of the count `events.predict_unlocated`
   predicts, every predicted one on the cap, none of the bulk or the axis, at most the stump's tip

@@ -1029,12 +1029,16 @@ CAP_FILL_DENSITY = 4  # samples of the old bulk velocity per node of the new mes
 CAP_FILL_FOUND = 0.9
 CAP_NODE_TOL = 0.05  # a new interface node within this times r_n of the planned cap lies on it
 UNLOCATED_SLACK = 2  # the transfer may leave this many interface nodes more or fewer than predicted
-# the budgets of a liquid cut within its box (closures F1-F6; sigma, the box noise of an ordinary
-# rebuild, not yet calibrated, counts zero): the coefficient of each limit, and the closures of the
-# volume and the axial momentum of the removal, which are hard checks (the kinetic energy, the area
-# and the identity of the cutoff are recorded and flagged)
+# the budgets of a liquid cut within its box (closures F1-F6): the coefficient of the limit of each,
+# times the removed head's own, and the closures of the volume and the axial momentum of the
+# removal, which are hard checks (the kinetic energy and the area are flagged, the identity of the
+# cutoff recorded)
 BUDGET_LIMITS = {"F1": 1e-2, "F2": 0.05, "F3": 0.05, "F4": 0.1, "F5": 1e-2, "F6": 0.05}
 HARD_CLOSURES = ("F1", "F2", "F3")
+# the floors of those limits, by closure: a multiple of the noise of the box in an ordinary rebuild
+# (the keys sigma_V, sigma_Pz, sigma_KE of the block's liquid part), the noise's name and multiple
+NOISE_FLOORS = {"F1": ("V", 5.0), "F2": ("Pz", 5.0), "F3": ("Pz", 5.0), "F4": ("KE", 3.0),
+                "F6": ("KE", 5.0)}
 
 
 def _named_chains(problem) -> tuple[tuple, dict]:
@@ -1160,16 +1164,18 @@ def transfer_problems(transfer: dict) -> list[str]:
     return problems
 
 
-def _closures(removed: dict, poly: dict, box: dict) -> dict:
+def _closures(removed: dict, poly: dict, box: dict, sigma: dict | None = None) -> dict:
     """The budgets of a liquid cut within its box (``poly``: the polyline volumes and areas before
     and after the transfer; ``box``: the grid's momentum and kinetic energy before it, after the
     transfer and the cap fill, and after the projection), each against its limit, ``BUDGET_LIMITS``
-    times the head's own (the box noise counting zero until calibrated): F1 the liquid volume lost
-    against the removed head's, F2 the axial momentum the transfer lost against the head's, F3 the
-    momentum the projection changed, F4 the kinetic energy it changed (either way), F5 the area of
-    the interface against the head's less the cap's, F6 the kinetic energy the transfer lost
-    against the head's. ``flags`` lists the closures beyond their limits; those of
-    ``HARD_CLOSURES`` among them (``hard``) fail the cut, after its remesh."""
+    times the head's own but never below the floor of ``NOISE_FLOORS``, a multiple of the noise of
+    the box in an ordinary rebuild (``sigma``: ``V``, ``Pz``, ``KE``, zero where not given and until
+    calibrated; recorded as ``sigma``): F1 the liquid volume lost against the removed head's, F2 the
+    axial momentum the transfer lost against the head's, F3 the momentum the projection changed, F4
+    the kinetic energy it changed (either way), F5 the area of the interface against the head's less
+    the cap's, F6 the kinetic energy the transfer lost against the head's. ``flags`` lists the
+    closures beyond their limits; those of ``HARD_CLOSURES`` among them (``hard``) fail the cut,
+    after its remesh."""
     V, P, KE = removed["V"], removed["Pz"], removed["KE"]
     dA = removed["area"] - removed["cap_area"]
     before, moved, after = box["before"], box["after_transfer"], box["after_projection"]
@@ -1181,11 +1187,14 @@ def _closures(removed: dict, poly: dict, box: dict) -> dict:
         "F5": abs(poly["after"]["A"] - poly["before"]["A"] + dA),
         "F6": abs(moved["KE"] - before["KE"] + KE)}
     scale = {"F1": V, "F2": abs(P), "F3": abs(P), "F4": KE, "F5": abs(dA), "F6": KE}
-    limits = {k: BUDGET_LIMITS[k] * scale[k] for k in values}
+    noise = {"V": 0.0, "Pz": 0.0, "KE": 0.0, **{k: float(v) for k, v in (sigma or {}).items()}}
+    limits = {k: max(BUDGET_LIMITS[k] * scale[k],
+                     NOISE_FLOORS[k][1] * noise[NOISE_FLOORS[k][0]] if k in NOISE_FLOORS else 0.0)
+              for k in values}
     flags = [k for k in values if not values[k] <= limits[k]]
     return {**values, "limits": limits,
             "relative": {k: values[k] / scale[k] if scale[k] else math.nan for k in values},
-            "flags": flags, "hard": [k for k in flags if k in HARD_CLOSURES], "sigma": 0.0}
+            "flags": flags, "hard": [k for k in flags if k in HARD_CLOSURES], "sigma": noise}
 
 
 def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, request: dict, *,
@@ -1482,7 +1491,8 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
                    "after": global_after}}
     closures = _closures(removed, record["budgets"]["polylines"],
                          {"before": box_before, "after_transfer": box_transfer,
-                          "after_projection": box_after})
+                          "after_projection": box_after},
+                         sigma={"V": ls.sigma_V, "Pz": ls.sigma_Pz, "KE": ls.sigma_KE})
     closures["F3_phi"] = {x: (box or {}).get(x, math.nan)
                           for x in ("phi_lhs", "phi_rhs", "phi_error", "phi_relative_error")}
     record["closures"] = closures

@@ -86,6 +86,11 @@ def _positive(owner: str, name: str, value, *, optional: bool = False):
                          + (", or null" if optional else ""))
 
 
+def _non_negative(owner: str, name: str, value):
+    if not (_number(value) and value >= 0):
+        raise ValueError(f"collapse.{EVENTS_BLOCK}.{owner}.{name} must be finite and not negative")
+
+
 def _flag(owner: str, name: str, value):
     if not isinstance(value, bool):
         raise ValueError(f"collapse.{EVENTS_BLOCK}.{owner}.{name} must be true or false")
@@ -114,7 +119,11 @@ class LiquidEventSettings:
     (``transfer``, from the old surface near the neck: an arm only); with ``projection`` the
     pressure-impulse projection of the cut follows, and the first step after it is ``restart``
     (``reconnect.restart`` when null). The budgets of the cut are taken within ``max(box_radius
-    delta, 2 L_rem)`` of the neck, ``L_rem`` the reach of the removed head along the axis."""
+    delta, 2 L_rem)`` of the neck, ``L_rem`` the reach of the removed head along the axis, and the
+    limit of each is a multiple of the head's own but never below a multiple of the noise of the box
+    in an ordinary rebuild (``surgery.NOISE_FLOORS``): ``sigma_V`` of its liquid volume,
+    ``sigma_Pz`` of its axial momentum, ``sigma_KE`` of its kinetic energy, in the solver's units,
+    none (zero) until calibrated."""
     enabled: bool = False
     eps_d: float = 0.2
     eps_max: float = 0.5
@@ -127,6 +136,9 @@ class LiquidEventSettings:
     box_radius: float = 4.0
     projection: bool = True
     restart: str | None = None
+    sigma_V: float = 0.0
+    sigma_Pz: float = 0.0
+    sigma_KE: float = 0.0
 
     def __post_init__(self):
         from .reconnect import RESTARTS
@@ -146,6 +158,8 @@ class LiquidEventSettings:
             if getattr(self, name) not in allowed:
                 raise ValueError(f"collapse.{EVENTS_BLOCK}.liquid.{name} must be one of {allowed}")
         _flag("liquid", "projection", self.projection)
+        for name in ("sigma_V", "sigma_Pz", "sigma_KE"):
+            _non_negative("liquid", name, getattr(self, name))
         if self.restart is not None and self.restart not in RESTARTS:
             raise ValueError(f"collapse.{EVENTS_BLOCK}.liquid.restart must be one of {RESTARTS}, "
                              "or null")
