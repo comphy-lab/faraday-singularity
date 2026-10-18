@@ -476,9 +476,9 @@ Weber numbers, the cap, the removed head (volume, axial momentum, kinetic energy
 its polygon), the head as the ghost a run is to follow (its mean axial speed, equivalent radius,
 the retraction speed `r_n^(-1/2)` of its rear and its two ends), the totals of the removals since
 the gas cut (`removed_total`), the transfer, the fill, the projection and the budgets, and the
-states before and after the cut are kept (`states/precut_e<k>.dump`, `states/postcut_e<k>.dump`). A refusal leaves the problem unchanged; a failure after the remesh
-ends the run. The tests make it on a synthetic state with a jet on each chain
-(`testCases/test_liquid_cut_fem.py`).
+states before and after the cut are kept (`states/precut_e<k>.dump`, `states/postcut_e<k>.dump`).
+A refusal leaves the problem unchanged; a failure after the remesh ends the run. The tests make it
+on a synthetic state with a jet on each chain (`testCases/test_liquid_cut_fem.py`).
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus
