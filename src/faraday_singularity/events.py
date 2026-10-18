@@ -456,10 +456,12 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
     1. A state that is not valid, or that no step may start from, stops the run: the chains not
        two (``topology-changed``), chains that touch or a chain whose nodes have crossed (raised),
        a spline through the nodes that contacts itself (``self-contact-approach``, trigger
-       ``spline-contact``), on a freshly built mesh (``guard["fresh"]``) a tracked liquid neck
-       narrower than ``liquid.resolution`` element lengths at it (``liquid-neck-unresolved``),
-       the guard of the interface (``interface-unresolved``) and ``invalid()``, the check of the
-       curved elements of a fresh mesh the driver passes.
+       ``spline-contact``), and on a freshly built mesh (``guard["fresh"]``) a tracked liquid
+       neck narrower than ``liquid.resolution`` element lengths at it
+       (``liquid-neck-unresolved``), the guard of the interface (``interface-unresolved``) and
+       ``invalid()``, the check of the curved elements of a fresh mesh the driver passes. On a
+       mesh a step has run on the guard comes last, after the events, as in the cut's own stops:
+       an event's handler rebuilds the mesh.
     2. The end of the window: the bubble emptied below ``bubble_stop`` of its volume at the cut
        (``bubble-vanishing``, ``window_end``).
     3. The events, each returned as a request (reason ``event-request``, its ``kind``, ``class`` and
@@ -517,10 +519,14 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
             return {"reason": "liquid-neck-unresolved", **_neck_fields(x),
                     "limit": ls.resolution * x["h_loc"], "resolution": ls.resolution,
                     "fresh": True}
-    if guard is not None:
-        stop = interface_guard({name: edge_reading(c.points) for name, c in named}, settings,
+
+    def guarded():  # the guard of the interface on its quadratic elements
+        return interface_guard({name: edge_reading(c.points) for name, c in named}, settings,
                                fresh=fresh, h_floor=float(guard["h_floor"]),
                                refine_ratio=float(guard["refine_ratio"]))["stop"]
+
+    if guard is not None and fresh:  # a mesh no step has run on: a rebuild that is not valid
+        stop = guarded()
         if stop is not None:
             return stop
     if invalid is not None:
@@ -623,4 +629,8 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
         return _request("bridge-closing", "B", bridge=bridge, limit=limit)
     if chain_gap < 3.0 * h_min:
         return _request("chain-contact", "X", chain_gap=chain_gap, limit=3.0 * h_min)
+    if guard is not None and not fresh:
+        # a mesh a step has run on: the guard last, as in the cut's own stops (an event's handler
+        # rebuilds the mesh)
+        return guarded()
     return None

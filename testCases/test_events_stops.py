@@ -439,6 +439,35 @@ def test_the_branch_orders_invalid_states_then_the_window_then_the_events():
     assert req["bubble_length"] == pytest.approx(length)
 
 
+def test_the_guard_of_a_mesh_stepped_on_comes_after_the_events_as_in_the_cuts_stops():
+    """An element of the jet's root bent by 130 degrees, beyond edge_turn_stop on any mesh, in a
+    state with a landed liquid neck: on a freshly built mesh the guard stops the run first (a
+    rebuild that is not valid); on a mesh a step has run on the event comes first, as the cut's
+    own stops report the neck before the guard, and the guard stops a state without an event."""
+    from test_reconnect_geometry import _bent
+
+    bubble, apex = bubble_with_head(1e-3, r_n=0.09)
+    bent = rc.Chain(_bent(bubble.points, (apex + 200) // 2, turn_deg=130.0), bubble.end_types)
+    chains = [bent, cavity()]
+    cut = rc.cut_geometry([bubble, chains[1]], 3.0, gas_before=1.0)
+    stepped = {"fresh": False, "h_floor": 1e-3 / 512, "refine_ratio": 1.5}
+    fresh = dict(stepped, fresh=True)
+    legacy = _stops(chains, cut=cut, events=None, guard=stepped)
+    assert legacy["reason"] == "secondary-pinch-approach" and legacy["neck_side"] == "liquid"
+    for events, cls in ((LIQUID, "L"), (ev.EventSettings(), "L-unhandled")):
+        req = _stops(chains, cut=cut, events=events, guard=stepped)
+        assert (req["reason"], req["kind"], req["class"]) == (ev.EVENT_REQUEST, "liquid-neck", cls)
+        stop = _stops(chains, cut=cut, events=events, guard=fresh)
+        assert (stop["reason"], stop["trigger"]) == ("interface-unresolved", "edge-turn")
+    # no event: the guard of the stepped mesh, last
+    bubble, apex = bubble_with_head(1e-3, r_n=0.3)
+    bent = rc.Chain(_bent(bubble.points, (apex + 200) // 2, turn_deg=130.0), bubble.end_types)
+    assert _stops([bubble, chains[1]], cut=cut, guard=stepped) is None
+    stop = _stops([bent, chains[1]], cut=cut, guard=stepped)
+    assert (stop["reason"], stop["trigger"]) == ("interface-unresolved", "edge-turn")
+    assert not stop["fresh"]
+
+
 def test_every_change_of_topology_the_cut_stopped_on_is_an_event_with_the_block():
     """On the states of ``test_reconnect_geometry``'s stops after a cut: the bridge closing, the
     chains approaching, the bubble's tips meeting, a gas neck, a liquid neck (liquid events off)

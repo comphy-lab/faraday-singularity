@@ -212,8 +212,9 @@ add a second top-level `cases/` tree.
   (`reconnect.feature_regions`). An unknown key of the `collapse` block is refused with a message.
   With the block, `reconnect.post_cut_stops` hands over to `events.post_cut_events` (without it the
   cut's stops are untouched): invalid states first (chains not two, crossed nodes or touching chains
-  raise, spline contact, on a fresh mesh a tracked liquid neck below `liquid.resolution h_loc`,
-  `liquid-neck-unresolved`, the guard, the driver's curved-element check passed as `invalid`), then
+  raise, spline contact, and on a fresh mesh a tracked liquid neck below `liquid.resolution h_loc`,
+  `liquid-neck-unresolved`, the guard, the driver's curved-element check passed as `invalid`; on a
+  mesh a step has run on the guard comes last, after the events, as in the cut's own stops), then
   the end of the window (`bubble-vanishing` with `window_end`), then the events as requests
   (`event-request`: `kind`, `class`, the `handler` of its class, `events.HANDLERS`, none for
   `L-unhandled`) in the order `piercing` (W1, the bubble's tips within `delta`), `liquid-neck` (L,

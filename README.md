@@ -405,7 +405,8 @@ With the block, the stops of a state after the cut come in three ranks
 (`events.post_cut_events`). A state that is not valid stops the run: the chains not two, a spline
 through the nodes that contacts itself, on a freshly built mesh a tracked liquid neck narrower than
 `liquid.resolution` (4) element lengths at it (`liquid-neck-unresolved`), the guard of the interface
-and the check of the curved elements. The bubble emptying (below `bubble_stop` of its volume at the
+and the check of the curved elements; on a mesh a step has run on, the guard comes last, after the
+events, as in the cut's own stops (an event's handler rebuilds the mesh). The bubble emptying (below `bubble_stop` of its volume at the
 cut) ends the window (`bubble-vanishing`, with `window_end`). Every change of topology is then an
 event, in this order: the bubble's two tips within `delta` of each other, the downward jet piercing
 the bubble (`piercing`); a landed liquid neck (`liquid-neck`); a closing fold, one that lands the
