@@ -48,7 +48,10 @@ def _record(k, t, tip="cavity_tip", *, V=5e-10, r_n=1e-4, s=5e-4, r_j=6e-4, z_n=
     return rec
 
 
-def _write_run(run: Path, records, rows, *, budget=None, status=None):
+BUDGET_HEAD = ("step", "time", "volume", "V_removed", "volume_total")
+
+
+def _write_run(run: Path, records, rows, *, budget=None, status=None, budget_head=BUDGET_HEAD):
     (run / "events").mkdir(parents=True)
     (run / "parameters.json").write_text(json.dumps({"case": {"case_id": "case-a"},
                                                      "reconnect": {"delta": DELTA}}))
@@ -61,8 +64,7 @@ def _write_run(run: Path, records, rows, *, budget=None, status=None):
     lines += ["\t".join(f"{r[c]:.12e}" for c in CHAIN_COLUMNS) for r in rows]
     (run / "chains.txt").write_text("\n".join(lines) + "\n")
     if budget is not None:
-        head = ("step", "time", "volume", "V_removed", "volume_total")
-        (run / "budget.txt").write_text("\n".join(["# " + "\t".join(head)] + [
+        (run / "budget.txt").write_text("\n".join(["# " + "\t".join(budget_head)] + [
             "\t".join(f"{x:.12e}" for x in b) for b in budget]) + "\n")
 
 
@@ -90,12 +92,22 @@ def test_the_events_of_a_run_in_units_of_the_cut_radius(tmp_path):
                                          z_b=4.698,
                                          recontacts=[{"kind": "rear", "tau": 9e-6}],
                                          dropped=["postcut"]),
-               _record(3, 9e-6, tip="bubble_top", outcome="refused")]
+               _record(3, 9e-6, tip="bubble_top", outcome="refused"),
+               {"schema": "faraday-event/2", "k": 4, "kind": "piercing", "class": "W1",
+                "handler": "ring", "outcome": "unhandled", "reason": "event-unhandled",
+                "chain": "bubble", "tip": None, "step": 50, "t": 1.1e-5, "tau": 1.1e-5,
+                "tau_p": 1.1e-5 - T, "delta": DELTA, "trigger": {},
+                "request": {"bubble_length": 8e-4}, "dumps": {"precut": "precut_e004.dump"}}]
     run = tmp_path / "run-a" / "runtime"
     _write_run(run, records, _rows())
     rows = event_table.event_rows(run)
-    assert [r["k"] for r in rows] == [1, 2, 3] and rows[0]["run"] == "run-a"
-    first, second, refused = rows
+    assert [r["k"] for r in rows] == [1, 2, 3, 4] and rows[0]["run"] == "run-a"
+    first, second, refused, pierced = rows
+    assert (pierced["outcome"], pierced["kind"], pierced["class"], pierced["handler"]) == (
+        "unhandled", "piercing", "W1", "ring")
+    assert pierced["tau_over_delta2"] == pytest.approx(11.0)
+    assert math.isnan(pierced["r_n_over_delta"]) and pierced["near_base"] == ""
+    assert first["handler"] is None  # a made cut's record names it under its request only
     assert first["tau_over_delta2"] == pytest.approx(3.0)
     assert first["t_prime_over_T"] == pytest.approx((3e-6 - T) / T)
     assert first["r_n_over_delta"] == pytest.approx(0.1) and first["r_n_over_s"] == pytest.approx(
@@ -131,10 +143,18 @@ def test_the_base_of_a_jet_that_widens_after_the_events_and_of_one_that_narrows(
     records = [_record(1, 3e-6), _record(2, 7e-6, interval=4e-6, verdict="undetermined",
                                          recontacts=[{"kind": "rear", "tau": 9e-6}]),
                _record(3, 9e-6, tip="bubble_top", outcome="refused")]
-    budget = [(0, 0.0, 100.0, 0.0, 100.0), (1, 1e-5, 100.0 - 1e-9, 1e-9, 100.0 + 2e-12)]
+    head = BUDGET_HEAD + ("Pz_removed", "momentum_z_total", "KE_removed", "kinetic_energy_total")
+    budget = [(0, 0.0, 100.0, 0.0, 100.0, 0.0, 2.0, 0.0, 8.0),
+              (1, 1e-5, 100.0 - 1e-9, 1e-9, 100.0 + 2e-12, 0.1, 2.5, 0.2, 8.0)]
+    status = {"state": "completed", "window_end": None,
+              "collapse": {"stop": {"reason": "event-unhandled", "k": 4, "kind": "piercing"}}}
     wide = tmp_path / "wide"
-    _write_run(wide, records, _rows(alpha=0.5), budget=budget)
+    _write_run(wide, records, _rows(alpha=0.5), budget=budget, budget_head=head, status=status)
     row = event_table.run_row(wide)
+    assert (row["stop"], row["stop_kind"], row["stop_event"]) == ("event-unhandled", "piercing", 4)
+    assert row["Pz_removed_share"] == pytest.approx(0.04)
+    assert row["KE_removed_share"] == pytest.approx(0.025)
+    assert row["flagged"] == 2  # the two made, each with F4 flagged; the refused one not counted
     assert row["base_verdict"] == "widens" and row["alpha_r_j"] == pytest.approx(0.5)
     assert row["dQ_j_dt"] > 0.0 and row["alpha_Q_j"] == pytest.approx(1.0)
     assert row["base_t_prime_lo"] > 0.0 and row["base_rows"] >= event_table.MIN_ROWS
@@ -147,12 +167,13 @@ def test_the_base_of_a_jet_that_widens_after_the_events_and_of_one_that_narrows(
     assert row["volume_drift"] == pytest.approx(-1e-11)
     assert row["volume_total_drift"] == pytest.approx(2e-14)
     assert (row["rear_recontacts"], row["front_recontacts"], row["refused"]) == (1, 0, 1)
-    assert row["stop"] == "max-steps" and row["state"] == "completed" and row["T"] == pytest.approx(
-        T)
+    assert row["state"] == "completed" and row["T"] == pytest.approx(T)
     narrow = tmp_path / "narrow"
     _write_run(narrow, records, _rows(alpha=-0.3, q=-0.5))
     row = event_table.run_row(narrow)
     assert row["base_verdict"] == "narrows" and row["alpha_r_j"] == pytest.approx(-0.3)
+    assert row["stop"] == "max-steps" and row["stop_kind"] == "" and row["stop_event"] == ""
+    assert math.isnan(row["Pz_removed_share"])  # a budget without the columns: none
     late = event_table.run_row(wide, after_events=3)
     assert late["base_verdict"] == "no-events" and late["base_rows"] == 0
     start = event_table.run_row(wide, after_events=0)
@@ -174,6 +195,13 @@ def test_the_command_line_writes_both_tables(tmp_path, capsys):
         (row,) = list(csv.DictReader(fh))
     assert row["base_verdict"] == "widens" and tuple(row) == event_table.RUN_FIELDS
     assert "1 events" in capsys.readouterr().out
+    # a row per run and tip: the upward jet and the downward one, whose base stands still
+    assert event_table.main([str(run), "--out", str(out), "--runs", str(runs), "--tip",
+                             "cavity_tip", "bubble_top"]) == 0
+    with runs.open() as fh:
+        rows = list(csv.DictReader(fh))
+    assert [(r["run"], r["tip"]) for r in rows] == [("run", "cavity_tip"), ("run", "bubble_top")]
+    assert rows[0]["base_verdict"] == "widens" and abs(float(rows[1]["alpha_r_j"])) < 1e-12
 
 
 def test_the_table_reads_the_outputs_of_a_run_of_the_driver(tmp_path, monkeypatch):

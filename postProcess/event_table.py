@@ -4,13 +4,15 @@
 Usage::
 
     python postProcess/event_table.py RUN_DIR [RUN_DIR ...] --out EVENTS.csv [--runs RUNS.csv] \
-        [--tip cavity_tip] [--after-events 1] [--near-base 3]
+        [--tip cavity_tip [bubble_top ...]] [--after-events 1] [--near-base 3]
 
 Each run directory holds a run after a cut with the ``collapse.reconnect_events`` block: the record
-of each of its events (``events/event_<k>.json``, made, refused, unclosed or failed), the rows of
-both chains per step (``chains.txt``), the budget of its liquid with the removals
-(``budget.txt``), ``run_status.json`` and ``parameters.json``. A run continued in several legs has
-one directory per leg; each event is in the directory of the leg that made it.
+of each of its events (``events/event_<k>.json``: made, refused, unclosed or failed, or the event
+the run stopped on before a handler was made for it, ``unhandled``, ``cascade`` or ``max-events``,
+with the handler its class is to have), the rows of both chains per step (``chains.txt``), the
+budget of its liquid with the removals (``budget.txt``), ``run_status.json`` and
+``parameters.json``. A run continued in several legs has one directory per leg; each event is in
+the directory of the leg that made it.
 
 **Events** (``--out``): what made the event and what it removed, in units of the cut radius
 ``delta`` and of ``T = t_p - t_cut`` (the time from the cut to the pinch time it recorded, read as
@@ -29,12 +31,15 @@ and the dumps of the event the run deleted.
 **Runs** (``--runs``): the events at each tip and the cascade's last verdict there, the volume the
 events removed (``delta^3``), the drift of the liquid of the mesh over the rows of ``budget.txt``
 and of its sum with the removals (each relative to its first value: the removals account for the
-difference), the ghosts' recontacts, the refused and failed cuts, the end of the window, the stop,
-and the test of the base of the jet of one tip (``--tip``; the upward jet into the cavity,
-``cavity_tip``, by default): over the rows of ``chains.txt`` from the ``--after-events``-th event
-of the run on in which that jet stands and ``t' = t - t_p`` is positive, the least-squares slope of
-``ln r_j`` against ``ln t'`` (``alpha_r_j``), the slope of ``Q_j`` against ``t'`` (``dQ_j_dt``) and
-of ``ln Q_j`` against ``ln t'`` where every ``Q_j`` is positive (``alpha_Q_j``): ``widens`` when
+difference), the share of the removals in that sum of the axial momentum and of the kinetic energy
+at its last row, the ghosts' recontacts, the refused and failed cuts, the events made with a
+closure flagged, the end of the window, the stop with the kind and number of the event it stopped
+on, and the test of the base of the jet of a tip (``--tip``, one row per run and tip; the upward jet
+into the cavity, ``cavity_tip``, by default, the downward one ``bubble_top``): over the rows of
+``chains.txt`` from the ``--after-events``-th event of the run on in which that jet stands and
+``t' = t - t_p`` is positive, the least-squares slope of ``ln r_j`` against ``ln t'``
+(``alpha_r_j``), the slope of ``Q_j`` against ``t'`` (``dQ_j_dt``) and of ``ln Q_j`` against
+``ln t'`` where every ``Q_j`` is positive (``alpha_Q_j``): ``widens`` when
 ``alpha_r_j`` and ``dQ_j_dt`` are both positive, ``narrows`` when ``alpha_r_j`` is negative,
 ``mixed`` otherwise, ``insufficient`` with fewer than ``MIN_ROWS`` rows and ``no-events`` before the
 event the window starts at. The base is also given against the root neck of its chain
@@ -57,8 +62,8 @@ TIP_NECKS = {"cavity_tip": "r_neck_open", "bubble_top": "r_neck_bubble",
              "bubble_bottom": "r_neck_bubble"}  # the root neck of each tip's chain (chains.txt)
 TIPS = ("cavity_tip", "bubble_top", "bubble_bottom")
 
-EVENT_FIELDS = ("run", "case_id", "delta", "k", "outcome", "failed_at", "kind", "class", "chain",
-                "tip", "generation", "step", "t", "tau_over_delta2", "t_prime_over_T",
+EVENT_FIELDS = ("run", "case_id", "delta", "k", "outcome", "failed_at", "kind", "class", "handler",
+                "chain", "tip", "generation", "step", "t", "tau_over_delta2", "t_prime_over_T",
                 "r_n_over_delta", "s_over_delta", "r_n_over_s", "V_over_delta3", "V_over_s3",
                 "interval_over_delta2", "interval_over_T", "events_per_T", "cascade",
                 "r_j_over_delta", "r_j_over_r_n", "neck_to_base_over_r_n",
@@ -67,10 +72,11 @@ EVENT_FIELDS = ("run", "case_id", "delta", "k", "outcome", "failed_at", "kind", 
                 "phi_relative_error", "flags", "hard", "predicted_unlocated",
                 "reported_unlocated", "rear_recontact_tau_over_delta2",
                 "front_recontact_tau_over_delta2", "dumps_dropped")
-RUN_FIELDS = ("run", "case_id", "delta", "T", "state", "stop", "window_end", "events",
-              *(f"events_{tip}" for tip in TIPS), *(f"cascade_{tip}" for tip in TIPS),
-              "V_removed_over_delta3", "volume_drift", "volume_total_drift", "rear_recontacts",
-              "front_recontacts", "refused", "unclosed", "failed", "tip", "base_rows",
+RUN_FIELDS = ("run", "case_id", "delta", "T", "state", "stop", "stop_kind", "stop_event",
+              "window_end", "events", *(f"events_{tip}" for tip in TIPS),
+              *(f"cascade_{tip}" for tip in TIPS), "V_removed_over_delta3", "volume_drift",
+              "volume_total_drift", "Pz_removed_share", "KE_removed_share", "rear_recontacts",
+              "front_recontacts", "refused", "unclosed", "failed", "flagged", "tip", "base_rows",
               "base_t_prime_lo", "base_t_prime_hi", "alpha_r_j", "dQ_j_dt", "alpha_Q_j",
               "base_verdict", "r_j_start_over_delta", "r_j_end_over_delta",
               "base_minus_neck_start_over_delta", "base_minus_neck_end_over_delta",
@@ -170,6 +176,7 @@ def event_rows(run: Path, *, near_base: float = 3.0) -> list[dict]:
         row = {"run": info["run"], "case_id": info["case_id"], "delta": d,
                **{key: rec.get(key) for key in ("k", "outcome", "failed_at", "kind", "class",
                                                  "chain", "tip", "generation", "step", "t")},
+               "handler": rec.get("handler", (rec.get("request") or {}).get("handler")),
                "tau_over_delta2": _ratio(rec.get("tau"), d * d),
                "t_prime_over_T": _ratio(rec.get("tau_p"), T),
                "r_n_over_delta": _ratio(r_n, d), "s_over_delta": _ratio(s, d),
@@ -260,6 +267,7 @@ def run_row(run: Path, *, tip: str = "cavity_tip", after_events: int = 1) -> dic
     made = [r for r in records if r.get("outcome") == "made"]
     row = {"run": info["run"], "case_id": info["case_id"], "delta": d, "T": info["T"],
            "state": status.get("state", ""), "stop": stop.get("reason", ""),
+           "stop_kind": stop.get("kind", ""), "stop_event": stop.get("k", ""),
            "window_end": (window or {}).get("reason", ""), "events": len(made)}
     for t in TIPS:
         at = [r for r in made if r.get("tip") == t]
@@ -271,11 +279,16 @@ def run_row(run: Path, *, tip: str = "cavity_tip", after_events: int = 1) -> dic
     for key, name in (("volume", "volume_drift"), ("volume_total", "volume_total_drift")):
         col = [_num(x) for x in budget.get(key, [])]
         row[name] = (col[-1] - col[0]) / col[0] if len(col) >= 2 and col[0] else math.nan
+    for removed, total, name in (("Pz_removed", "momentum_z_total", "Pz_removed_share"),
+                                 ("KE_removed", "kinetic_energy_total", "KE_removed_share")):
+        a, b = budget.get(removed) or [], budget.get(total) or []
+        row[name] = _ratio(a[-1], b[-1]) if a and b else math.nan
     hits = [x for r in made for x in (r.get("ghost") or {}).get("recontacts") or ()]
     row["rear_recontacts"] = sum(x.get("kind") == "rear" for x in hits)
     row["front_recontacts"] = sum(x.get("kind") == "front" for x in hits)
     for outcome in ("refused", "unclosed", "failed"):
         row[outcome] = sum(r.get("outcome") == outcome for r in records)
+    row["flagged"] = sum(bool((r.get("closures") or {}).get("flags")) for r in made)
     starts = sorted(_num(r.get("t")) for r in made)
     t_start = -math.inf if after_events <= 0 else (
         starts[after_events - 1] if after_events <= len(starts) else None)
@@ -297,8 +310,8 @@ def main(argv=None) -> int:
     ap.add_argument("runs", nargs="+", type=Path)
     ap.add_argument("--out", type=Path, required=True, help="the table of the events")
     ap.add_argument("--runs", dest="runs_out", type=Path, help="the table of the runs")
-    ap.add_argument("--tip", choices=TIPS, default="cavity_tip",
-                    help="the tip whose jet's base the run's test reads")
+    ap.add_argument("--tip", choices=TIPS, nargs="+", default=["cavity_tip"],
+                    help="the tips whose jets' bases the runs' tests read (a row per run and tip)")
     ap.add_argument("--after-events", type=int, default=1,
                     help="the test's window starts at this event of the run (0: at its start)")
     ap.add_argument("--near-base", type=float, default=3.0,
@@ -307,7 +320,8 @@ def main(argv=None) -> int:
     runs = [run for run in args.runs if run.is_dir()]
     events = [r for run in runs for r in event_rows(run, near_base=args.near_base)]
     _write(args.out, events, EVENT_FIELDS)
-    rows = [run_row(run, tip=args.tip, after_events=args.after_events) for run in runs]
+    rows = [run_row(run, tip=tip, after_events=args.after_events) for run in runs
+            for tip in args.tip]
     if args.runs_out is not None:
         _write(args.runs_out, rows, RUN_FIELDS)
     for r in rows:

@@ -148,7 +148,8 @@ python run_case.py <collapse-case>.json --outdir <new-run-directory> \
 python postProcess/collapse_table.py <run-directory> [...] --per-episode --out <table>.csv
 python postProcess/collapse_analysis.py <run-directory> --out <analysis-directory> \
     [--rj-window <lo> <hi>]
-python postProcess/event_table.py <run-directory> [...] --out <events>.csv --runs <runs>.csv
+python postProcess/event_table.py <run-directory> [...] --out <events>.csv --runs <runs>.csv \
+    [--tip cavity_tip bubble_top]
 ```
 
 Its run directory also receives:
@@ -552,15 +553,19 @@ in a liquid cut records that event (`event`: its number, kind, class, outcome, t
 at, its record and the dump of the state before it).
 
 `postProcess/event_table.py` tabulates the events of such runs, one row per event and one per run
-(`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event in units of the cut
-radius and of `T = t_p - t_cut` (the neck at its landing, the removed head, the interval since the
-event before at its tip, the jet's base before the cut and its ratio to the neck, the neck's
-distance from the base, the closures, the ghost's recontacts); each run with its events per tip and
-the cascade's verdicts, the drift of its liquid with and without the removals, and a report on the
-base of one jet (`--tip`, the upward jet into the cavity by default) from its `--after-events`-th
-event on: the slopes of `ln r_j` against `ln t'` and of `Q_j` against `t'`, `t' = t - t_p`, with the
-verdict `widens` when both are positive, `narrows` when the first is negative, `mixed` otherwise,
-and the base against the root neck of its chain. The report decides nothing about the run.
+and tip (`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event, made or the one
+a run stopped on, with its outcome and the handler of its class, in units of the cut radius and of
+`T = t_p - t_cut` (the neck at its landing, the removed head, the interval since the event before
+at its tip, the jet's base before the cut and its ratio to the neck, the neck's distance from the
+base, the closures, the ghost's recontacts); each run with its stop and the event it stopped on,
+its events per tip and the cascade's verdicts, the drift of its liquid with and without the
+removals, the removals' shares of the axial momentum and the kinetic energy, the events made with a
+closure flagged, and a report on the base of the jet of each tip of `--tip` (the upward jet into
+the cavity by default; `--tip cavity_tip bubble_top` adds the downward one) from its
+`--after-events`-th event on: the slopes of `ln r_j` against `ln t'` and of `Q_j` against `t'`,
+`t' = t - t_p`, with the verdict `widens` when both are positive, `narrows` when the first is
+negative, `mixed` otherwise, and the base against the root neck of its chain. The report decides
+nothing about the run.
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus
