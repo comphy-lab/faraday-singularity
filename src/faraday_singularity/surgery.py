@@ -87,6 +87,26 @@ production radii), and as the change of the gas volume within a box around the c
 (``reconnect.gas_volume_in_box``), which is the cut's own and is compared with the plan.
 
 Only private names of the pinned pyoomph release make step 2 possible; ``testCases`` pins them.
+
+**The cut of a liquid neck** after the gas cut (:func:`liquid_cut`; the driver does not make it
+yet) removes the head of a neck the events branch lands (``events.post_cut_events``) and closes the
+stump at the neck by a half-spheroid (``events.truncate_chain``). pyoomph's planner sees only the
+necks of the gas, so the plan of the new chains is the project's (``events.build_liquid_plan``),
+parked as pyoomph parks its own (:func:`park_plan`): the remesh builds it and the transfer carries
+the fields across through its chart. The transfer is checked against the geometry: it leaves
+unlocated exactly the interface nodes farther than half an element from every old element
+(``events.predict_unlocated``), all of them on the cap, and only the stump's tip on the axis
+without a value. pyoomph gives the unlocated nodes the velocity of the old surface near the neck,
+so the cap's nodes are given the old bulk velocity at their places, sampled along the planned cap
+before the remesh (``cap_fill`` ``sample``). The projection follows, with the step before the cut
+as the history's and the time unchanged. The budgets are taken within a box about the neck: the
+liquid volume and the area of the interface from the polylines clipped to it
+(:func:`box_polyline_budgets`), the axial momentum and the kinetic energy on a polar grid
+(:func:`box_grid`, :func:`box_integrals`) of the box and of the removed head, before the cut, after
+the transfer and the fill, and after the projection (:func:`project` with ``box``, which also
+reads the identity of the box's cutoff in its weak form). The removed volume and momentum must
+close against the box's change, and the projection may change the momentum there by little
+(``HARD_CLOSURES``); the energy, the area and the identity are recorded against their limits.
 """
 
 from __future__ import annotations
@@ -990,3 +1010,436 @@ def restore_cut(problem, record: dict) -> None:
     template.rebuild_spline = settings.get("rebuild_spline", "nodes")
     problem.cut = record
     orient_interface_chart(problem)
+
+
+# --- the cut of a liquid neck after the gas cut ---------------------------------------------------
+
+EVENT_SCHEMA = "faraday-event/2"
+# the stages of a liquid cut before it changes the problem: any failure up to them is a refusal
+LIQUID_UNCHANGED_STAGES = ("admission", "precut", "caps", "plan", "budgets")
+CAP_FILL_DENSITY = 4  # samples of the old bulk velocity per node of the new mesh along the cap
+CAP_NODE_TOL = 0.05  # a new interface node within this times r_n of the planned cap lies on it
+UNLOCATED_SLACK = 2  # the transfer may leave this many interface nodes more or fewer than predicted
+# the budgets of a liquid cut within its box (closures F1-F5; sigma, the box noise of an ordinary
+# rebuild, not yet calibrated, counts zero): the coefficient of each limit, and the closures of the
+# volume and the axial momentum of the removal, which are hard checks
+BUDGET_LIMITS = {"F1": 1e-2, "F2": 0.05, "F3": 0.05, "F4": 0.1, "F5": 1e-2}
+HARD_CLOSURES = ("F1", "F2", "F3")
+
+
+def _named_chains(problem) -> tuple[tuple, dict]:
+    """The chains of the interface by name (``open``, ``bubble``) as the stops after a cut read
+    them, the ends on the axis put on ``r = 0``, and the segments themselves."""
+    named, segs = [], {}
+    for c in problem.interface_segments():
+        name = "open" if c["open"] else "bubble"
+        if name in segs:
+            raise RuntimeError(f"the free surface has more than one {name} chain")
+        P = np.column_stack([c["r"], c["z"]]).astype(float)
+        for k, end in ((0, 0), (-1, 1)):
+            if c["end_types"][end] == "axis":
+                P[k, 0] = 0.0
+        named.append((name, Chain(P, tuple(c["end_types"]))))
+        segs[name] = c
+    return tuple(sorted(named, key=lambda x: x[0])), segs
+
+
+def _cap_polyline(lc) -> tuple[np.ndarray, np.ndarray]:
+    """The planned cap from the neck to its tip on the axis, and the arclength along it."""
+    Q = np.vstack([[lc.r_n, lc.z_n], lc.cap])
+    return Q, np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(Q, axis=0).T))])
+
+
+def _onto_polyline(X, Q, s) -> tuple[np.ndarray, np.ndarray]:
+    """The distance of each point ``X`` from the polyline ``Q`` and the arclength ``s`` at the
+    nearest point of it."""
+    X = np.asarray(X, dtype=float).reshape(-1, 2)
+    A, d = Q[:-1], np.diff(Q, axis=0)
+    L2 = np.maximum(np.einsum("ij,ij->i", d, d), 1e-300)
+    best, at = np.full(len(X), np.inf), np.zeros(len(X))
+    for j in range(len(A)):
+        t = np.clip(((X - A[j]) @ d[j]) / L2[j], 0.0, 1.0)
+        dist = np.hypot(*(X - A[j] - t[:, None] * d[j]).T)
+        better = dist < best
+        best[better], at[better] = dist[better], s[j] + t[better] * (s[j + 1] - s[j])
+    return best, at
+
+
+def _fill_cap(problem, lc, samples: dict, *, apply: bool) -> dict:
+    """The cap fill of a liquid cut: the new interface nodes on the planned cap (beyond the neck,
+    within ``CAP_NODE_TOL r_n`` of it) take the old bulk velocity at their places, interpolated by
+    arclength along the cap between the samples taken before the remesh (``samples``), at the
+    current level (``project`` makes the history impulsive); ``u_r`` stays pinned on the axis. With
+    ``apply`` false only what the fill would change is read. Returns the nodes, the samples used and
+    the largest change of the velocity."""
+    Q, s = _cap_polyline(lc)
+    nodes = mesh_nodes(problem.get_mesh(INTERFACE))
+    X = np.array([[n.x(0), n.x(1)] for n in nodes]).reshape(-1, 2)
+    dist, u = _onto_polyline(X, Q, s)
+    on = (u > 1e-9 * s[-1]) & (dist <= CAP_NODE_TOL * lc.r_n)
+    ok = samples["found"]
+    fi = problem.get_mesh("liquid").get_nodal_field_indices()
+    iu, iw = fi["velocity_x"], fi["velocity_y"]
+    out = {"mode": "sample" if apply else "transfer", "nodes": int(on.sum()),
+           "samples": int(len(ok)), "samples_found": int(ok.sum()), "max_change": 0.0,
+           "max_speed": 0.0}
+    if not on.any() or not ok.any():
+        return out
+    ur = np.interp(u[on], samples["s"][ok], samples["u_r"][ok])
+    uz = np.interp(u[on], samples["s"][ok], samples["u_z"][ok])
+    change = 0.0
+    for n, a, b in zip((nodes[k] for k in np.flatnonzero(on)), ur, uz):
+        a = 0.0 if n.is_pinned(iu) else float(a)
+        change = max(change, math.hypot(a - n.value(iu), b - n.value(iw)))
+        if apply:
+            if not n.is_pinned(iu):
+                n.set_value(iu, a)
+            n.set_value(iw, float(b))
+    out.update(max_change=float(change), max_speed=float(np.max(np.hypot(ur, uz))))
+    if apply:
+        problem.reapply_boundary_conditions()
+    return out
+
+
+def _closures(removed: dict, poly: dict, box: dict) -> dict:
+    """The budgets of a liquid cut within its box (``poly``: the polyline volumes and areas before
+    and after the transfer; ``box``: the grid's momentum and kinetic energy before it, after the
+    transfer and the cap fill, and after the projection), each against its limit
+    (``BUDGET_LIMITS``, the box noise counting zero until calibrated): F1 the liquid volume lost
+    against the removed head's,
+    F2 the axial momentum the transfer lost against the head's, F3 the momentum the projection
+    changed, F4 the kinetic energy it took, F5 the area of the interface against the head's less
+    the cap's. ``flags`` lists the closures beyond their limits; those of ``HARD_CLOSURES`` among
+    them refuse the cut."""
+    V, P, KE = removed["V"], removed["Pz"], removed["KE"]
+    dA = removed["area"] - removed["cap_area"]
+    values = {
+        "F1": abs(poly["after"]["V_liquid"] - poly["before"]["V_liquid"] + V),
+        "F2": abs(box["after_transfer"]["Pz"] - box["before"]["Pz"] + P),
+        "F3": abs(box["after_projection"]["Pz"] - box["after_transfer"]["Pz"]),
+        "F4": box["after_transfer"]["KE"] - box["after_projection"]["KE"],
+        "F5": abs(poly["after"]["A"] - poly["before"]["A"] + dA)}
+    limits = {"F1": BUDGET_LIMITS["F1"] * V, "F2": BUDGET_LIMITS["F2"] * abs(P),
+              "F3": BUDGET_LIMITS["F3"] * abs(P), "F4": BUDGET_LIMITS["F4"] * KE,
+              "F5": BUDGET_LIMITS["F5"] * abs(dA)}
+    flags = [k for k in values if not values[k] <= limits[k]]
+    return {**values, "limits": limits, "relative": {
+        "F1": values["F1"] / V if V else math.nan, "F2": values["F2"] / abs(P) if P else math.nan,
+        "F3": values["F3"] / abs(P) if P else math.nan, "F4": values["F4"] / KE if KE else math.nan,
+        "F5": values["F5"] / abs(dA) if dA else math.nan},
+        "flags": flags, "hard": [k for k in flags if k in HARD_CLOSURES], "sigma": 0.0}
+
+
+def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, request: dict, *,
+               k: int, dt_prev: float, elements_per_scale: float, h_floor: float, driver=None,
+               on_made=None, log=print) -> dict:
+    """Cut the liquid neck an event request lands (``events.post_cut_events``: ``liquid-neck``,
+    class ``L``, or ``a-head``, class ``A-head``), the ``k``-th event after the gas cut, and
+    project.
+
+    1. **Admission**: a gas cut was made (``problem.cut``), the request names a tracked neck of the
+       state with a single head (``events.liquid_necks`` with ``events.liquid``); ``precut_e<k>``
+       is kept (``cut_stage`` ``precut-event``, the request as its ``event``).
+    2. **Cap** (``events.truncate_chain``): the head removed, the stump closed at the neck by the
+       half-spheroid of ``liquid.cap_height`` (tried once more at ``events.CAP_RETRY_HEIGHT`` if
+       refused), ``elements_per_scale`` elements per neck radius, refused unless its hard checks
+       hold; and the plan for the transfer (``events.build_liquid_plan``).
+    3. **Budgets before**: the global ones (``cut_observables``), within the box of radius
+       ``max(liquid.box_radius delta, 2 L_rem)`` about the neck the volume and the area of the
+       interface from the polylines (:func:`box_polyline_budgets`) and the momentum and kinetic
+       energy on a polar grid (:func:`box_integrals`), of the box and of the removed region ``Q``,
+       the same within ``LOCAL_RADIUS delta``, and the old bulk velocity along the cap
+       (``CAP_FILL_DENSITY`` samples per node of the new mesh there).
+    4. **Remesh at once** from the plan (:func:`park_plan`, ``rmin`` the neck radius), the focus the
+       driver's with the region ``event_cap`` at the cap's tip, meshed at ``clip(r_n/
+       elements_per_scale, h_floor, h_cut)``, ``h_cut`` the gas cut's focus size. From here a
+       failure is :class:`CutFailed`. The transfer is checked: the interface nodes it leaves
+       unlocated are those predicted from the geometry (``events.predict_unlocated``, within
+       ``UNLOCATED_SLACK``), all on the cap, none of the bulk or the axis, and no node but the
+       stump's tip on the axis without a value; the chains, their ends and the axis spans as
+       planned.
+    5. **Cap fill** (``liquid.cap_fill`` ``sample``): the cap's nodes take the old bulk velocity at
+       their places, not the nearest old surface's that pyoomph's transfer gives them.
+    6. **Projection** (:func:`project`, with ``liquid.projection`` and ``liquid.restart`` or the gas
+       cut's): ``Pi = 0`` on every free surface, the cap's included, the step before the cut
+       (``dt_prev``) as the history's, the time unchanged; within the box, what it changed and the
+       identity of the box's cutoff (``projection.box``).
+    7. **Budgets after** and the closures (:func:`_closures`), of which the volume and the momentum
+       of the removal are hard checks; the record is appended to ``problem.events``, ``on_made`` is
+       called with it (the driver's bookkeeping) and ``postcut_e<k>`` kept.
+
+    The record (schema ``faraday-event/2``) is written to ``events/event_<k>.json`` whatever the
+    outcome (``made``, ``refused``, ``failed`` or ``interrupted``, with ``failed_at``), as
+    :func:`cut` writes its own; a refusal leaves the problem unchanged, a failure ends the run."""
+    out = Path(outdir)
+    record: dict = {"schema": EVENT_SCHEMA, "k": int(k), "kind": request.get("kind"),
+                    "class": request.get("class")}
+    progress = {"stage": "admission"}
+    path = out / "events" / f"event_{int(k):03d}.json"
+    try:
+        return _liquid_cut(problem, events, reconnect, out, record, progress, request, path,
+                           k=int(k), dt_prev=float(dt_prev),
+                           elements_per_scale=float(elements_per_scale), h_floor=float(h_floor),
+                           driver=driver, on_made=on_made, log=log)
+    except BaseException as e:
+        stage, err, extra = progress["stage"], e, {}
+        if isinstance(e, Exception) and not isinstance(e, (CutRefused, CutFailed)):
+            message = f"at stage {stage}: {type(e).__name__}: {e}"
+            err = (CutRefused(f"no liquid cut was made ({message})")
+                   if stage in LIQUID_UNCHANGED_STAGES else
+                   CutFailed(f"the liquid cut failed after changing the problem ({message})"))
+            extra["traceback"] = traceback.format_exception(e)
+        outcome = ("refused" if isinstance(err, CutRefused) else
+                   "failed" if isinstance(err, Exception) else "interrupted")
+        failed = _jsonable({**record, "outcome": outcome, "failed_at": stage,
+                            "error": f"{type(err).__name__}: {err}", **extra})
+        if isinstance(err, (CutRefused, CutFailed)):
+            err.record = failed
+            if err.precut is None:
+                err.precut = (record.get("dumps") or {}).get("precut")
+        with contextlib.suppress(OSError):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(failed, indent=1) + "\n")
+        if err is e:
+            raise
+        raise err from e
+
+
+def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progress: dict,
+                request: dict, path: Path, *, k: int, dt_prev: float, elements_per_scale: float,
+                h_floor: float, driver, on_made, log) -> dict:
+    """The sequence of :func:`liquid_cut`, filling ``record`` as it goes."""
+    from dataclasses import replace
+
+    from .events import (CAP_RETRY_HEIGHT, EVENT_CLASSES, PRECUT_EVENT, CapRefused,
+                         build_liquid_plan, event_neck, liquid_necks, predict_unlocated,
+                         truncate_chain)
+
+    def stage(name):
+        progress["stage"] = name
+
+    wall0 = time.time()
+    ls = events.liquid
+    if pb.recon is None:
+        raise CutRefused("the problem was not made with reconnect settings")
+    if pb.cut is None:
+        raise CutRefused("a liquid cut follows the gas cut: the problem has none")
+    if request.get("kind") not in EVENT_CLASSES["liquid"] or \
+            request.get("class") not in ("L", "A-head"):
+        raise CutRefused(f"no liquid cut for an event of kind {request.get('kind')!r} and class "
+                         f"{request.get('class')!r}")
+    if not (dt_prev > 0.0 and math.isfinite(dt_prev)):
+        raise CutRefused(f"the step before the cut must be positive, not {dt_prev!r}")
+    t_now = pb.get_current_time(dimensional=False, as_float=True)
+    t_cut = float(pb.cut["t_cut"])
+    t_p = (pb.cut.get("pinch") or {}).get("t_p")
+    delta = float(s.delta)
+    named, segs = _named_chains(pb)
+    wanted = event_neck(request)
+    necks = liquid_necks(named, ls)
+    neck = next((x for x in necks if x["chain"] == wanted.get("chain")
+                 and x["index"] == wanted.get("index")), None)
+    record.update(t=t_now, tau=t_now - t_cut, tau_p=t_now - t_p if t_p is not None else math.nan,
+                  delta=delta, request={key: v for key, v in request.items() if key != "reason"},
+                  settings=events.to_dict(), settings_sha256=events.sha256(),
+                  dt={"history": dt_prev})
+    if neck is None or neck["status"] != "head":
+        raise CutRefused(f"the request names no tracked neck with a single head: {wanted}")
+    seg = segs[neck["chain"]]
+    u_r = float(seg["u_r"][neck["index"]])
+    Oh = float(getattr(pb.nd, "Oh", math.nan))
+    record.update(chain=neck["chain"], trigger={
+        **neck, "eps_d": ls.eps_d, "eps_max": ls.eps_max, "landed": bool(neck["landed"]),
+        "r_n_over_s": neck["r_n"] / neck["s"], "u_r": u_r,
+        "Re_n": neck["r_n"] * abs(u_r) / Oh if Oh > 0.0 else math.nan,
+        "We_n": neck["r_n"] * u_r**2})
+    record["dumps"] = {}
+
+    stage("precut")
+    event = {**record["request"], "k": k}
+    record["dumps"]["precut"] = _keep(pb, driver, out, f"precut_e{k:03d}",
+                                      {"cut_stage": PRECUT_EVENT, "event": event})["path"]
+
+    stage("caps")
+    attempts, lc = [], None
+    heights = (ls.cap_height,) + ((CAP_RETRY_HEIGHT,) if ls.cap_height != CAP_RETRY_HEIGHT else ())
+    for eta in heights:
+        try:
+            lc = truncate_chain(named, neck, eta=eta, elements_per_scale=elements_per_scale,
+                                min_angle=s.min_cap_angle, reservoir_depth=s.reservoir_depth)
+            attempts.append({"eta": eta, "outcome": "ok", "checks": lc.checks})
+            break
+        except CapRefused as e:
+            attempts.append({"eta": eta, "outcome": "refused", "error": str(e),
+                             "checks": e.checks})
+    record["cap"] = {"shape": ls.cap, "attempts": attempts, "retried": len(attempts) > 1}
+    if lc is None:
+        raise CutRefused(f"the cap of the liquid cut is refused at every height: {attempts}")
+    summary = lc.summary()
+    summary.pop("checks")
+    record["cap"].update(summary, tip=lc.tip)
+    record["tip"] = lc.tip
+
+    stage("plan")
+    lp = build_liquid_plan(named, lc, s.reservoir_depth)
+    record["plan"] = {"cap_zeta": list(lp.cap_zeta), "table_rows": int(len(lp.table)),
+                      "new_chains": [{"points": len(nc.points), "zeta": [float(nc.zeta[0]),
+                                                                         float(nc.zeta[-1])],
+                                      "cap_points": int(np.sum(np.asarray(nc.origin) < 0))}
+                                     for nc in lp.plan.new_chains]}
+
+    stage("budgets")
+    R_b = max(ls.box_radius * delta, 2.0 * lc.L_rem)
+    grid, grid20 = box_grid(lc.z_n, R_b), box_grid(lc.z_n, LOCAL_RADIUS * delta)
+    global_before = pb.cut_observables()
+    box_before = box_integrals(pb, grid, {"removed": lc.removed})
+    box20_before = box_integrals(pb, grid20)
+    poly_before = box_polyline_budgets([c for _, c in named], lc.z_n, R_b, s.reservoir_depth)
+    q = box_before.pop("removed")
+    removed = {"V": lc.V_rem, "V_grid": q["V_grid"], "Pz": q["Pz"], "KE": q["KE"],
+               "area": lc.A_rem, "cap_area": lc.A_cap, "length": lc.L_rem,
+               "U": q["Pz"] / lc.V_rem, "points": q["points"]}
+    record["removed"] = removed
+    rmin = float(pb.cut.get("rmin") or pb.cut["delta"])
+    h_cut = s.focus_size * rmin
+    size = float(np.clip(lc.r_n / elements_per_scale, h_floor, h_cut))
+    Qc, sc = _cap_polyline(lc)
+    m = CAP_FILL_DENSITY * 2 * int(math.ceil(sc[-1] / size)) + 1
+    su = np.linspace(0.0, sc[-1], m)
+    pts = np.column_stack([np.interp(su, sc, Qc[:, 0]), np.interp(su, sc, Qc[:, 1])])
+    f, found = sample_fields(pb, pts[:, 0], pts[:, 1], ("velocity_x", "velocity_y"))
+    samples = {"s": su, "u_r": f["velocity_x"], "u_z": f["velocity_y"], "found": found}
+
+    template = pb.get_mesh("liquid")._templatemesh
+    old_focus = template.focus
+    region = FocusRegion("event_cap", size=size, r=0.0, z=lc.z_tip_new, radius=8.0 * lc.r_n)
+    if old_focus is None:
+        regions, grading = (region,), pb.mesh_settings.grading
+    else:  # a focus without regions is its own axial region beside the cap's
+        regions = tuple(old_focus.regions) or (FocusRegion("focus", size=old_focus.size, r=0.0,
+                                                           z=0.0, radius=old_focus.radius,
+                                                           axial=True),)
+        regions, grading = regions + (region,), old_focus.grading
+    record["mesh"] = {"focus_before": None if old_focus is None else old_focus.to_dict(),
+                      "event_cap": {"size": size, "radius": 8.0 * lc.r_n, "z": lc.z_tip_new,
+                                    "h_floor": h_floor, "h_cut": h_cut}}
+    old_chains = [np.column_stack([segs[name]["r"], segs[name]["z"]]) for name, _ in named]
+    remeshing = False
+    try:
+        template.focus = Focus(size=min(g.size for g in regions),
+                               radius=max(g.radius for g in regions), grading=grading,
+                               regions=regions)
+        park_plan(pb, lp.plan, lp.table, rmin=lc.r_n)
+        stage("remesh")
+        remeshing = True
+        with captured_stdout() as printed:
+            pb.force_remesh({template})
+        pb._domains_to_remesh.clear()
+    except BaseException as e:
+        clear_plan(pb)
+        if not remeshing:  # nothing has changed but the focus and the plan: put them back
+            template.focus = old_focus
+        if not isinstance(e, Exception):  # an interruption is no outcome of the cut
+            raise
+        if not remeshing:
+            raise CutRefused(f"the plan could not be parked ({type(e).__name__}: {e})") from e
+        raise CutFailed(f"the remesh of the liquid cut failed ({type(e).__name__}: {e})",
+                        record["dumps"]["precut"]) from e
+
+    stage("mesh-check")
+    transfer = transfer_warnings("".join(printed))
+    record["transfer"] = transfer
+    new_named, new_segs = _named_chains(pb)
+    ends = {name: c.end_types for name, c in named}
+    record["mesh"]["chains"] = [{"chain": name, "nodes": len(c.points),
+                                 "end_types": list(c.end_types)} for name, c in new_named]
+    if {name: c.end_types for name, c in new_named} != ends:
+        raise CutFailed(f"the liquid cut's mesh has the chains {record['mesh']['chains']}, not "
+                        f"those of the plan")
+    spans = _axis_spans_of_mesh(pb)
+    expected = liquid_axis_spans([z for _, c in new_named for _, z in c.axis_ends()])
+    record["mesh"].update(axis_spans=spans, expected_axis_spans=[list(x) for x in expected],
+                          nodes=pb.get_mesh("liquid").nnode())
+    if len(spans) != len(expected) or any(abs(a - b) > 1e-9 * max(1.0, pb.nd.radius)
+                                          for x, y in zip(spans, expected) for a, b in zip(x, y)):
+        raise CutFailed(f"the liquid cut's mesh has the axis spans {spans}, expected {expected}")
+    nodes = mesh_nodes(pb.get_mesh(INTERFACE))
+    X = np.array([[n.x(0), n.x(1)] for n in nodes]).reshape(-1, 2)
+    predicted = predict_unlocated(X, old_chains)
+    dist, u = _onto_polyline(X, Qc, sc)
+    on_cap = (u > 1e-9 * sc[-1]) & (dist <= CAP_NODE_TOL * lc.r_n)
+    reported = transfer["unlocated"].get(INTERFACE, [0, 0])[0]
+    others = {name: v for name, v in transfer["unlocated"].items() if name != INTERFACE}
+    no_value = transfer["no_value"]
+    transfer.update(predicted_unlocated=int(predicted.sum()), reported_unlocated=int(reported),
+                    predicted_off_cap=int(np.sum(predicted & ~on_cap)),
+                    cap_nodes=int(on_cap.sum()),
+                    corner_fields=sorted(pb.get_mesh(INTERFACE + "/axis")
+                                         .get_nodal_field_indices()))
+    problems = []
+    if abs(reported - int(predicted.sum())) > UNLOCATED_SLACK:
+        problems.append(f"{reported} interface nodes unlocated, {int(predicted.sum())} predicted")
+    if transfer["predicted_off_cap"]:
+        problems.append(f"{transfer['predicted_off_cap']} unlocated interface nodes off the cap")
+    if any(v[0] > 0 for v in others.values()):
+        problems.append(f"unlocated nodes of the bulk or the axis: {others}")
+    corner = INTERFACE + "/axis"
+    if set(no_value) - {corner} or no_value.get(corner, [0])[0] > 1:
+        problems.append(f"nodes without a value beyond the stump's tip: {no_value}")
+    if problems:
+        raise CutFailed("the transfer of the liquid cut is not as planned: " + "; ".join(problems))
+    global_transfer = pb.cut_observables()
+    poly_after = box_polyline_budgets([c for _, c in new_named], lc.z_n, R_b, s.reservoir_depth)
+
+    stage("fill")
+    record["cap_fill"] = _fill_cap(pb, lc, samples, apply=ls.cap_fill == "sample")
+
+    stage("projection")
+    record["projection"] = {}
+    settings = replace(s, dt0=dt_prev, restart=ls.restart or s.restart, projection=ls.projection)
+    project(pb, settings, t_now, record["projection"], box=(lc.z_n, R_b))
+    stage("chart")
+    orient_interface_chart(pb)
+
+    stage("postcut")
+    global_after = pb.cut_observables()
+    box = record["projection"].get("box")
+    if box is not None:  # the box before and after the projection, from its own samples
+        box_transfer, box_after = box["before"], box["after"]
+    else:
+        box_transfer = box_after = box_integrals(pb, grid)
+    box20_after = box_integrals(pb, grid20)
+    record["budgets"] = {
+        "box": {"z": lc.z_n, "R": R_b, "n": grid["n"]},
+        "polylines": {"before": poly_before, "after": poly_after},
+        "grid": {"before": box_before, "after_transfer": box_transfer,
+                 "after_projection": box_after},
+        "box20": {"before": box20_before, "after": box20_after},
+        "global": {"before": global_before, "after_transfer": global_transfer,
+                   "after": global_after}}
+    closures = _closures(removed, record["budgets"]["polylines"],
+                         {"before": box_before, "after_transfer": box_transfer,
+                          "after_projection": box_after})
+    closures["F3_phi"] = {x: (box or {}).get(x, math.nan)
+                          for x in ("phi_lhs", "phi_rhs", "phi_error", "phi_relative_error")}
+    record["closures"] = closures
+    if closures["hard"]:
+        raise CutFailed(f"the budget of the liquid cut does not close: {closures['hard']} beyond "
+                        f"their limits ({ {x: closures[x] for x in closures['hard']} })")
+    record["outcome"] = "made"
+    record["wall_seconds"] = time.time() - wall0
+    made = _jsonable(record)
+    pb.events = list(getattr(pb, "events", None) or []) + [made]
+    if on_made is not None:
+        on_made(made)
+    made["dumps"]["postcut"] = _keep(pb, driver, out, f"postcut_e{k:03d}",
+                                     {"cut_stage": "postcut-event", "event_k": k})["path"]
+    pb.events[-1] = made
+    full = dict(made, removed=dict(made["removed"], polygon=lc.removed.tolist()))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_jsonable(full), indent=1) + "\n")
+    rel = ", ".join(f"{x} {closures['relative'][x]:.3g}" for x in BUDGET_LIMITS)
+    log(f"liquid cut {k} at the {lc.chain} neck (r_n {lc.r_n:.6g}, r_n/s {lc.r_n / lc.s:.3g}): "
+        f"removed {lc.V_rem:.6g} ({lc.V_rem / lc.s**3:.3g} s^3), P_z {removed['Pz']:.6g}; "
+        f"closures relative to the removal {rel}")
+    return made

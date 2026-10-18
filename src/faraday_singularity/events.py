@@ -1175,3 +1175,15 @@ def predict_unlocated(nodes, old_chains, *, factor: float = PROJECTION_OFFSET,
         located |= best <= factor * size[e]
     return ~located
 
+
+NECK_KEYS = ("chain", "index", "r_n", "z_n", "depth", "shoulder", "h_loc", "s", "ratio", "status",
+             "head", "side", "direction", "z_tip", "head_volume", "head_volume_over_s3")
+
+
+def event_neck(request: dict) -> dict:
+    """The tracked neck an event request lands (:func:`post_cut_events`): the request's own fields
+    for a landed liquid neck (``liquid-neck``), its ``a_head`` for a fold that reaches a head
+    (``a-head``)."""
+    if request.get("kind") == "a-head":
+        return {k: v for k, v in (request.get("a_head") or {}).items() if k in NECK_KEYS}
+    return {k: request[k] for k in NECK_KEYS if k in request}
