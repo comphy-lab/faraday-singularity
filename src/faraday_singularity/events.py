@@ -124,17 +124,18 @@ class PostCutSettings:
     ``h_floor`` replaces the collapse's ``h_floor`` after the cut (the smallest focus and feature
     size, the floor of the interface guard and of its kink regions, and the open chain's neck stop
     through ``neck_stop_elements h_floor``); ``neck_floor`` is the smallest size of the region of a
-    neck (the cut's focus size without it) and ``neck_elements_per_scale`` its elements per neck
-    radius (``reconnect.elements_per_scale`` without it); ``rise_tol`` replaces the collapse's
-    ``rise_tol`` (the rise of a bump above its base that makes a jet); ``dt_min`` the step-size
-    floor of the driver; ``minimum_dt`` is oomph-lib's smallest step after the cut (``Problem::
-    Minimum_dt``, :func:`minimum_dt_after_cut`: 1e-3 times the driver's floor without it, never
-    above oomph-lib's default), below which it gives up on a step, and below which it also
+    neck (the cut's focus size without it; liquid events need it set, so that the region follows
+    a neck below the cut radius to its landing) and ``neck_elements_per_scale`` its elements per
+    neck radius (``reconnect.elements_per_scale`` without it); ``rise_tol`` replaces the
+    collapse's ``rise_tol`` (the rise of a bump above its base that makes a jet); ``dt_min`` the
+    step-size floor of the driver; ``minimum_dt`` is oomph-lib's smallest step after the cut
+    (``Problem::Minimum_dt``, :func:`minimum_dt_after_cut`: 1e-3 times the driver's floor without
+    it, never above oomph-lib's default), below which it gives up on a step, and below which it also
     refuses an accepted step whose next candidate, four times the step, would fall; it lowers
     oomph-lib's default (1e-12), never raises it, and lies at most half the driver's floor, so
     that a step failing at that floor is still halved once; before the cut it stays at the
-    default. ``open_neck_stop`` false drops the
-    open chain's neck stop after the cut (``collapse.neck_stop``), which liquid events need.
+    default. ``open_neck_stop`` false drops the open chain's neck stop after the cut
+    (``collapse.neck_stop``), which liquid events need.
     ``bubble_bottom_sizing`` ``frozen`` meshes the bubble's bottom (far from the cut) never coarser
     than ``bubble_bottom_size`` instead of never coarser than the landing state's focus there
     (``kept``), so that the bubbles of a study in ``delta`` are meshed alike."""
@@ -200,6 +201,10 @@ class EventSettings:
             raise ValueError(f"collapse.{EVENTS_BLOCK}: liquid events need post.open_neck_stop "
                              "false (the open chain's neck stop would end the run before its "
                              "liquid neck lands)")
+        if self.liquid.enabled and self.post.neck_floor is None:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}: liquid events need post.neck_floor (the "
+                             "region of a neck is otherwise floored at the cut's focus size, "
+                             "which cannot follow a neck to its landing below the cut radius)")
 
     @classmethod
     def from_dict(cls, data) -> "EventSettings":

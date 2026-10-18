@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from faraday_singularity import events as ev  # noqa: E402
 
-LIQUID = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False}}
+LIQUID = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False, "neck_floor": 2e-6}}
 
 
 def test_the_block_parses_with_its_defaults_and_round_trips():
@@ -46,6 +46,7 @@ def test_the_block_parses_with_its_defaults_and_round_trips():
     ({"gap": {"mode": "fill"}}, "gap: unknown key"),
     ({"liquid": []}, "liquid must be an object"),
     ({"liquid": {"enabled": True}}, "open_neck_stop false"),
+    ({"liquid": {"enabled": True}, "post": {"open_neck_stop": False}}, "post.neck_floor"),
     ({"liquid": {"enabled": 1}}, "true or false"),
     ({"liquid": {"eps_d": 0.6}}, "eps_d <= eps_max < 1"),
     ({"liquid": {"eps_max": 1.0}}, "eps_d <= eps_max < 1"),
@@ -110,11 +111,12 @@ def test_changed_keys_count_a_key_the_record_lacks_at_its_default():
     del recorded["liquid"]["resolution"]  # recorded before the key existed: its default
     assert s.changed_keys(recorded) == []
     other = ev.EventSettings.from_dict({**LIQUID, "liquid": {"enabled": True, "eps_d": 0.1},
-                                        "post": {"open_neck_stop": False, "h_floor": 1e-7}})
+                                        "post": {"open_neck_stop": False, "neck_floor": 2e-6,
+                                                 "h_floor": 1e-7}})
     assert other.changed_keys(recorded) == ["liquid.eps_d", "post.h_floor"]
     assert ev.EventSettings().changed_keys(None) == []  # against the defaults
     assert other.changed_keys(None) == ["liquid.enabled", "liquid.eps_d", "post.h_floor",
-                                        "post.open_neck_stop"]
+                                        "post.neck_floor", "post.open_neck_stop"]
 
 
 def test_a_class_is_fixed_after_its_first_event_but_from_the_state_before_one():
@@ -125,7 +127,8 @@ def test_a_class_is_fixed_after_its_first_event_but_from_the_state_before_one():
     recorded = s.to_dict()
     other = ev.EventSettings.from_dict({"liquid": {"enabled": True, "eps_d": 0.1},
                                         "gap": {"kappa_g": 0.1},
-                                        "post": {"open_neck_stop": False, "h_floor": 1e-7}})
+                                        "post": {"open_neck_stop": False, "neck_floor": 2e-6,
+                                                 "h_floor": 1e-7}})
     none = {"liquid": 0, "gap": 0}
     assert other.refused_changes(recorded, none, None) == []
     assert other.refused_changes(recorded, {"liquid": 2, "gap": 0}, None) == ["liquid.eps_d"]
@@ -134,8 +137,8 @@ def test_a_class_is_fixed_after_its_first_event_but_from_the_state_before_one():
     assert other.refused_changes(recorded, {"liquid": 2, "gap": 1}, 3) == []
     assert other.refused_changes(None, {"liquid": 2, "gap": 1}, None) == []
     legs = ev.EventSettings.from_dict({"liquid": {"enabled": True},
-                                       "post": {"open_neck_stop": False, "dt_min": 1e-14,
-                                                "bubble_bottom_sizing": "frozen",
+                                       "post": {"open_neck_stop": False, "neck_floor": 2e-6,
+                                                "dt_min": 1e-14, "bubble_bottom_sizing": "frozen",
                                                 "bubble_bottom_size": 5.53e-5}})
     assert legs.refused_changes(recorded, {"liquid": 5, "gap": 5}, None) == []
 

@@ -436,7 +436,8 @@ collapse's own otherwise, so that a study in `delta` can scale them with `delta`
 smallest focus and feature size, the floor of the interface guard and its kink regions, and the open
 chain's neck stop through `neck_stop_elements h_floor`), `rise_tol` (the rise that makes a jet),
 `dt_min` (the step-size floor), and for the regions of the necks `neck_floor` (the cut's focus size
-without it, so that a neck can be followed below the cut radius) and `neck_elements_per_scale`
+without it; liquid events need it set, so that a neck can be followed below the cut radius to its
+landing) and `neck_elements_per_scale`
 (`reconnect.elements_per_scale` without it). The fold limit after the cut, also that of the groove
 gaps `chains.txt` reports, is `gap.kappa_g delta`. With `post.open_neck_stop` false the open chain's
 own neck stop (`collapse.neck_stop`) is off after the cut, as liquid events need: its liquid neck is

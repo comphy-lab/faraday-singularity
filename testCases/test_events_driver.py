@@ -26,7 +26,7 @@ from faraday_singularity import events as ev  # noqa: E402
 from faraday_singularity.driver import CollapseDriver  # noqa: E402
 from faraday_singularity.reconnect import ReconnectSettings  # noqa: E402
 
-LIQUID = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False}}
+LIQUID = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False, "neck_floor": 2e-6}}
 
 
 class HeadProblem(CutProblem):
@@ -97,7 +97,7 @@ def test_an_event_without_a_handler_stops_the_run_resumably(tmp_path, monkeypatc
     eps = json.loads(json.dumps(case))
     eps["case_id"] = "sigterm-eps"
     eps["collapse"]["reconnect_events"] = {"liquid": {"enabled": True, "eps_d": 0.1},
-                                           "post": {"open_neck_stop": False}}
+                                           "post": {"open_neck_stop": False, "neck_floor": 2e-6}}
     eps_path = tmp_path / "eps.json"
     eps_path.write_text(json.dumps(eps))
     record, mode = _admit(precut, eps, eps_path)

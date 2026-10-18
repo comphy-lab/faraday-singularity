@@ -34,7 +34,7 @@ from faraday_singularity import reconnect as rc  # noqa: E402
 R_C = 3.8317059702075125
 Z_APEX = 4.68  # the height of the groove's apex, the base of the hanging jet
 LIQUID = ev.EventSettings.from_dict({"liquid": {"enabled": True},
-                                     "post": {"open_neck_stop": False}})
+                                     "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
 RUNS = [Path(p) for p in os.environ.get("FARADAY_POSTCUT_RUNS", "").split(os.pathsep) if p]
 
 
@@ -240,7 +240,7 @@ def test_a_landed_liquid_neck_is_an_event_with_its_head():
     assert req["status"] == "head" and 3.0 < req["head_volume_over_s3"] < 4.5
     # a head too large to delete: the event has no handler (L-unhandled)
     big = ev.EventSettings.from_dict({"liquid": {"enabled": True, "max_head_volume": 2.0},
-                                      "post": {"open_neck_stop": False}})
+                                      "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
     req = _stops([bubble, cavity()], events=big)
     assert req["class"] == "L-unhandled" and req["status"] == "head-too-large"
     assert req["kind"] == "liquid-neck" and req["handler"] is None
@@ -265,7 +265,7 @@ def test_the_handler_of_an_event_is_its_classs_and_an_unhandled_class_has_none()
                            "L-unhandled": None, "A-groove": "groove-fill", "G": "n-chain-split",
                            "B": None, "X": None}
     big = ev.EventSettings.from_dict({"liquid": {"enabled": True, "max_head_volume": 2.0},
-                                      "post": {"open_neck_stop": False}})
+                                      "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
     bubble, apex = bubble_with_head(1e-3, r_n=0.2, r_w=0.54)
     req = _stops([bubble, cavity()], events=big, apexes=_apexes(apex))
     assert (req["kind"], req["class"], req["handler"]) == ("a-head", "L-unhandled", None)
@@ -323,7 +323,7 @@ def test_a_fold_closes_at_kappa_g_delta_and_one_that_reaches_a_head_lands_its_ne
     assert (req["kind"], req["class"], req["handler"]) == ("groove", "A-groove", "groove-fill")
     assert req["a_head"]["r_n_over_s"] == pytest.approx(0.6, rel=1e-3)
     narrow = ev.EventSettings.from_dict({"liquid": {"enabled": True}, "gap": {"kappa_g": 0.02},
-                                         "post": {"open_neck_stop": False}})
+                                         "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
     assert _stops([bubble, cavity()], events=narrow) is None
     # kappa_g null: the collapse's absolute fold_stop in its place (liquid events off, a neck too
     # shallow for the cut's second-pinch test)
@@ -608,7 +608,7 @@ def test_the_stop_states_of_runs_after_a_cut_go_on_with_the_block(run):
     if stop["reason"] == "annular-contact-approach":
         wide = ev.EventSettings.from_dict({"liquid": {"enabled": True},
                                            "gap": {"kappa_g": c["fold_stop"] / s.delta},
-                                           "post": {"open_neck_stop": False}})
+                                           "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
         req = rc.post_cut_stops(chains, cut, s, h_tip, events=wide, apexes=apexes, **kw)
         assert req["kind"] == "groove" and req["fold_pair"] == stop["fold_pair"]
         assert req["jet"] == stop["jet"]
@@ -619,7 +619,7 @@ def test_the_stop_states_of_runs_after_a_cut_go_on_with_the_block(run):
     eps = 1.01 * neck["r_n"] / neck["s"]
     landed = ev.EventSettings.from_dict({"liquid": {"enabled": True, "eps_d": eps,
                                                     "eps_max": max(eps, 0.5)},
-                                         "post": {"open_neck_stop": False}})
+                                         "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
     req = rc.post_cut_stops(chains, cut, s, h_tip, events=landed, **kw)
     assert req["kind"] == "liquid-neck" and req["index"] == neck["index"]
     assert req["chain"] == neck["chain"]

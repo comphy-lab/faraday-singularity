@@ -238,7 +238,9 @@ add a second top-level `cases/` tree.
   `_fold_stop`, `_neck_limit`): `post.h_floor` (focus floor, feature regions, guard, kink regions,
   the open chain's neck limit), `post.rise_tol`, `post.dt_min`, `gap.kappa_g delta` (also the groove
   gaps of `chains.txt`), `post.neck_floor` and `post.neck_elements_per_scale` (the neck regions of
-  `reconnect.feature_regions`); `post.open_neck_stop` false skips the open chain's neck stop. At
+  `reconnect.feature_regions`; liquid events need `post.neck_floor`, without which the region of a
+  neck stays at the cut's focus size and cannot follow it to its landing below the cut radius);
+  `post.open_neck_stop` false skips the open chain's neck stop. At
   the cut and at each restart after it the driver with the block sets oomph-lib's smallest step
   (`pb.DTSF_minimum_dt`) to `post.minimum_dt` or 1e-3 times its step-size floor
   (`CollapseDriver._lower_minimum_dt`, `minimum_dt` in the leg, with `minimum_dt_ulps`, that step

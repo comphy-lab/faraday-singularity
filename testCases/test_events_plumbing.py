@@ -25,7 +25,7 @@ from faraday_singularity import reconnect as rc  # noqa: E402
 from faraday_singularity.driver import CollapseDriver  # noqa: E402
 from faraday_singularity.reconnect import ReconnectSettings  # noqa: E402
 
-LIQUID = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False}}
+LIQUID = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False, "neck_floor": 2e-6}}
 
 
 def _cut_case(**collapse):
@@ -115,7 +115,7 @@ def test_the_keys_of_a_class_are_fixed_after_its_first_event_but_from_the_state_
             "events_settings": s.to_dict(), "events": [{"k": 1, "kind": "liquid-neck"}], "legs": []}
     _write_meta(state, **made)
     changed = _cut_case(reconnect_events={"liquid": {"enabled": True, "eps_d": 0.1},
-                                          "post": {"open_neck_stop": False}})
+                                          "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
     changed["case_id"] = "sigterm-eps"
     path = _write(tmp_path, changed, "eps.json")
     with pytest.raises(SystemExit, match="liquid.eps_d"):
@@ -124,7 +124,8 @@ def test_the_keys_of_a_class_are_fixed_after_its_first_event_but_from_the_state_
     assert proc.returncode != 0 and "liquid.eps_d" in proc.stderr
     assert not (tmp_path / "out").exists()
     leg = _cut_case(reconnect_events={"liquid": {"enabled": True},
-                                      "post": {"open_neck_stop": False, "h_floor": 1e-7}})
+                                      "post": {"open_neck_stop": False, "neck_floor": 2e-6,
+                                               "h_floor": 1e-7}})
     leg["case_id"] = "sigterm-leg"
     assert _admit(state, leg, _write(tmp_path, leg, "leg.json"))[1] == run_case.POST_CUT
     # from the state before event 2, the liquid keys apply anew
