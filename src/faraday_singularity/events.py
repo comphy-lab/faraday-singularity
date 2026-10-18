@@ -45,8 +45,8 @@ points start at the node spacing of the neck and grow by at most ``CAP_GROWTH`` 
 own spacing (:func:`cap_spacing`), so that the spline a rebuild draws through them has no jump in
 spacing at the splice. Hard checks refuse a cap that leaves the old liquid, folds back, makes a
 knife-edge angle at the splice, removes no simple region, or leaves chains a mesh cannot be built on
-(:class:`CapRefused`); the removed region ``Q`` (the head, the axis and the cap) gives the volume and
-the areas the cut takes away.
+(:class:`CapRefused`); the removed region ``Q`` (the head, the axis and the cap) gives the volume
+and the areas the cut takes away.
 """
 
 from __future__ import annotations
@@ -711,7 +711,7 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
     return None
 
 
-# --- the cut of a liquid neck: the head removed, the stump closed by a cap -------------------------
+# --- the cut of a liquid neck: the head removed, the stump closed by a cap ------------------------
 
 CAP_MIN_POINTS = 16  # points of a cap, at least
 # the cap points within this many of its intervals (r_n / elements_per_scale of arc) of the neck,
