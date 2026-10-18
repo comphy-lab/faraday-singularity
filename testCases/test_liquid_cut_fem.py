@@ -265,6 +265,16 @@ def _unparkable(*args, **kwargs):
     raise RuntimeError("not parked for the test")
 
 
+CAP_SAMPLES = surgery._cap_samples
+
+
+def _unsampled(problem, lc, size):  # the old bulk velocity found at every other sample only
+    got = CAP_SAMPLES(problem, lc, size)
+    found = got["found"].copy()
+    found[1::2] = False
+    return dict(got, found=found)
+
+
 def _reload(pb, state: Path, record: dict):
     pb.load_state(str(state))
     surgery.restore_cut(pb, record)
@@ -374,6 +384,7 @@ def jets(tmp_path_factory):
         late = {}
         for name, owner, attr, fake in (("caps", ev, "truncate_chain", _refuse),
                                         ("plan", ev, "build_liquid_plan", _refuse),
+                                        ("budgets", surgery, "_cap_samples", _unsampled),
                                         ("park", surgery, "park_plan", _unparkable)):
             before = problem_state(pb)
             with pytest.MonkeyPatch.context() as mp:
@@ -466,10 +477,11 @@ def test_the_refused_cuts_leave_the_problem_unchanged(jets):
 
 
 def test_a_cut_refused_after_the_state_before_it_is_kept_leaves_the_problem_unchanged(jets):
-    """A cap refused at its height and at the retry's, a plan refused, a plan that cannot be
-    parked: each refusal comes after the state before the cut is kept (``precut_e<k>``, which it
-    names) and leaves the problem as it was (its degrees of freedom, its focus, no plan parked, no
-    remesh asked for, no event); the record names the stage it stopped at."""
+    """A cap refused at its height and at the retry's, a plan refused, the old bulk velocity found
+    at too few samples along the cap for its fill, a plan that cannot be parked: each refusal comes
+    after the state before the cut is kept (``precut_e<k>``, which it names) and leaves the problem
+    as it was (its degrees of freedom, its focus, no plan parked, no remesh asked for, no event);
+    the record names the stage it stopped at."""
     late = jets["late"]
     for name, got in late.items():
         rec = got["record"]
@@ -480,6 +492,9 @@ def test_a_cut_refused_after_the_state_before_it_is_kept_leaves_the_problem_unch
     assert [a["eta"] for a in attempts] == [1.0, ev.CAP_RETRY_HEIGHT]
     assert all(a["outcome"] == "refused" for a in attempts)
     assert "refused for the test" in late["plan"]["record"]["error"]
+    samples = late["budgets"]["record"]["cap"]["samples"]
+    assert samples["found"] < surgery.CAP_FILL_FOUND * samples["count"]
+    assert "samples along the cap" in late["budgets"]["record"]["error"]
     assert "the plan could not be parked" in late["park"]["record"]["error"]
 
 
@@ -554,6 +569,7 @@ def test_the_transfer_leaves_unlocated_only_the_cap_it_predicts(jets):
         fill = rec["cap_fill"]
         assert fill["mode"] == "sample" and fill["nodes"] == tr["cap_nodes"]
         assert fill["samples_found"] == fill["samples"]
+        assert rec["cap"]["samples"] == {"count": fill["samples"], "found": fill["samples"]}
 
 
 def test_a_transfer_not_as_predicted_fails_the_cut_after_its_remesh(jets):

@@ -1021,6 +1021,10 @@ LIQUID_CUT_CLASSES = {"liquid-neck": "L", "a-head": "A-head"}
 # the stages of a liquid cut before it changes the problem: any failure up to them is a refusal
 LIQUID_UNCHANGED_STAGES = ("admission", "precut", "caps", "plan", "budgets", "park")
 CAP_FILL_DENSITY = 4  # samples of the old bulk velocity per node of the new mesh along the cap
+# the fill of the cap's nodes needs the old bulk velocity at this share of its samples at least (a
+# cap inside the old liquid has it at every one, but perhaps at its ends on the old surface and the
+# axis)
+CAP_FILL_FOUND = 0.9
 CAP_NODE_TOL = 0.05  # a new interface node within this times r_n of the planned cap lies on it
 UNLOCATED_SLACK = 2  # the transfer may leave this many interface nodes more or fewer than predicted
 # the budgets of a liquid cut within its box (closures F1-F5; sigma, the box noise of an ordinary
@@ -1077,6 +1081,19 @@ def _on_cap(lc, X, chain) -> np.ndarray:
     own = {(float(r), float(z)) for r, z in zip(chain["r"], chain["z"])}
     mine = np.array([(float(x), float(y)) in own for x, y in X], dtype=bool)
     return mine & (u > 1e-9 * s[-1]) & (dist <= CAP_NODE_TOL * lc.r_n)
+
+
+def _cap_samples(problem, lc, size: float) -> dict:
+    """The old bulk velocity along the planned cap of the cut ``lc`` (:func:`_cap_polyline`), at
+    ``CAP_FILL_DENSITY`` evenly spaced samples per node of the new mesh there (of size ``size``)
+    from the neck to the tip: their arclengths ``s``, ``u_r``, ``u_z`` and which were found in the
+    liquid (``found``; ``nan`` velocities elsewhere)."""
+    Qc, sc = _cap_polyline(lc)
+    m = CAP_FILL_DENSITY * 2 * int(math.ceil(sc[-1] / size)) + 1
+    su = np.linspace(0.0, sc[-1], m)
+    pts = np.column_stack([np.interp(su, sc, Qc[:, 0]), np.interp(su, sc, Qc[:, 1])])
+    f, found = sample_fields(problem, pts[:, 0], pts[:, 1], ("velocity_x", "velocity_y"))
+    return {"s": su, "u_r": f["velocity_x"], "u_z": f["velocity_y"], "found": found}
 
 
 def _fill_cap(problem, lc, samples: dict, chain: dict, *, apply: bool) -> dict:
@@ -1190,7 +1207,8 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        interface from the polylines (:func:`box_polyline_budgets`) and the momentum and kinetic
        energy on a polar grid (:func:`box_integrals`), of the box and of the removed region ``Q``,
        the same within ``LOCAL_RADIUS delta``, and the old bulk velocity along the cap
-       (``CAP_FILL_DENSITY`` samples per node of the new mesh there).
+       (``CAP_FILL_DENSITY`` samples per node of the new mesh there, :func:`_cap_samples`), with
+       ``cap_fill`` ``sample`` refused unless found at ``CAP_FILL_FOUND`` of them.
     4. **Remesh at once** from the plan (:func:`park_plan`, ``rmin`` the neck radius), the focus the
        driver's with the region ``event_cap`` at the cap's tip, meshed at ``clip(r_n/
        elements_per_scale, h_floor, h_cut)``, ``h_cut`` the gas cut's focus size. From here a
@@ -1355,12 +1373,12 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     rmin = float(pb.cut.get("rmin") or pb.cut["delta"])
     h_cut = s.focus_size * rmin
     size = float(np.clip(lc.r_n / elements_per_scale, h_floor, h_cut))
-    Qc, sc = _cap_polyline(lc)
-    m = CAP_FILL_DENSITY * 2 * int(math.ceil(sc[-1] / size)) + 1
-    su = np.linspace(0.0, sc[-1], m)
-    pts = np.column_stack([np.interp(su, sc, Qc[:, 0]), np.interp(su, sc, Qc[:, 1])])
-    f, found = sample_fields(pb, pts[:, 0], pts[:, 1], ("velocity_x", "velocity_y"))
-    samples = {"s": su, "u_r": f["velocity_x"], "u_z": f["velocity_y"], "found": found}
+    samples = _cap_samples(pb, lc, size)
+    found = samples["found"]
+    record["cap"]["samples"] = {"count": int(len(found)), "found": int(found.sum())}
+    if ls.cap_fill == "sample" and not found.sum() >= CAP_FILL_FOUND * len(found):
+        raise CutRefused(f"the old bulk velocity is found at {int(found.sum())} of the "
+                         f"{len(found)} samples along the cap, fewer than {CAP_FILL_FOUND:.0%}")
 
     template = pb.get_mesh("liquid")._templatemesh
     old_focus = template.focus

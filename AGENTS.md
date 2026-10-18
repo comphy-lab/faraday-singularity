@@ -248,10 +248,11 @@ add a second top-level `cases/` tree.
   `surgery.park_plan`), the transfer checked against the geometry (`surgery.transfer_problems`:
   pyoomph's count of unlocated interface nodes within two of the count `events.predict_unlocated`
   predicts, every predicted one on the cap, none of the bulk or the axis, at most the stump's tip
-  without a value), the cap's nodes given the old bulk velocity, the
-  projection, and the budgets within the box (`surgery.box_polyline_budgets`, `box_integrals`, the
-  cutoff's identity in `project(..., box=)`), the volume and the momentum of the removal hard
-  checks (`surgery.HARD_CLOSURES`); its record is `events/event_<k>.json`, its dumps
+  without a value), the cap's nodes given the old bulk velocity (refused unless found at
+  `surgery.CAP_FILL_FOUND` of its samples along the cap), the projection, and the budgets within the
+  box (`surgery.box_polyline_budgets`, `box_integrals`, the cutoff's identity in
+  `project(..., box=)`), the volume and the momentum of the removal hard checks
+  (`surgery.HARD_CLOSURES`); its record is `events/event_<k>.json`, its dumps
   `precut_e<k>` and `postcut_e<k>` (`testCases/test_liquid_cut_fem.py`, a synthetic state with a
   jet on each chain). The driver has no handler yet, so every event is a resumable stop
   (`event-unhandled`, event number `k`) with the dump of the state before it
