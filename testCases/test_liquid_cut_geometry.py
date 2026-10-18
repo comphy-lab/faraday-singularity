@@ -230,7 +230,8 @@ def test_a_cap_on_a_neck_whose_nodes_lie_far_apart_is_refused():
 def test_the_angles_about_the_splice_are_read_over_four_nodes_on_either_side():
     """A radial spike (an inner angle of about 19 degrees) at the fourth node from the neck on the
     side kept makes a knife-edge angle within the window of check (iii), CAP_ANGLE_NODES nodes on
-    either side of the splice: the cap is refused; at the fifth node, outside it, the cut is made."""
+    either side of the splice: the cap is refused; at the fifth node, outside it, the cut is
+    made."""
     bubble, _ = stops.bubble_with_head(1e-3, r_n=0.09)
     named = (("bubble", bubble), ("open", stops.cavity()))
     i = _neck(named, "bubble")["index"]
@@ -463,7 +464,8 @@ def test_the_checks_of_the_transfer_find_each_departure_from_the_plan():
 
 
 CLOSED = {"removed": {"V": 1.0, "Pz": 2.0, "KE": 3.0, "area": 5.0, "cap_area": 1.0},
-          "poly": {"before": {"V_liquid": 100.0, "A": 50.0}, "after": {"V_liquid": 99.0, "A": 46.0}},
+          "poly": {"before": {"V_liquid": 100.0, "A": 50.0},
+                   "after": {"V_liquid": 99.0, "A": 46.0}},
           "box": {"before": {"Pz": 10.0, "KE": 100.0}, "after_transfer": {"Pz": 8.0, "KE": 97.0},
                   "after_projection": {"Pz": 8.0, "KE": 97.0}}}
 
@@ -516,7 +518,8 @@ def test_the_limits_of_the_closures_are_floored_at_a_multiple_of_the_noise_of_th
     """Each limit is the head's own times its coefficient but never below its multiple of the noise
     of the box in an ordinary rebuild (NOISE_FLOORS: five of the volume's for F1, of the momentum's
     for F2 and F3, three and five of the energy's for F4 and F6; none for the area): a miss of the
-    volume of twice its limit passes over a noise of half that limit, and fails over a fifth of it."""
+    volume of twice its limit passes over a noise of half that limit, and fails over a fifth of
+    it."""
     pytest.importorskip("pyoomph")
     from faraday_singularity import surgery
 
