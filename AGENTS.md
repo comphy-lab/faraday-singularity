@@ -215,12 +215,15 @@ add a second top-level `cases/` tree.
   raise, spline contact, on a fresh mesh a tracked liquid neck below `liquid.resolution h_loc`,
   `liquid-neck-unresolved`, the guard, the driver's curved-element check passed as `invalid`), then
   the end of the window (`bubble-vanishing` with `window_end`), then the events as requests
-  (`event-request`: `kind`, `class`, the `handler` it is to have) in the order `piercing` (W1, the
-  bubble's tips within `delta`), `liquid-neck` (L, landed at `r_n <= eps_d s`, nearest first;
-  `L-unhandled` without a single head or with one beyond `max_head_volume s^3`; with liquid events
-  off the cut's second-pinch test), the fold closest to `max(kappa_g delta, fold_stop_elements
-  h_elem)` (`a-head` when it reaches the head of a tracked neck with `r_n <= eps_max s`, else
-  `groove`), `gas-neck`, `bridge-closing`, `chain-contact`. Heads and tracked necks:
+  (`event-request`: `kind`, `class`, the `handler` of its class, `events.HANDLERS`, none for
+  `L-unhandled`) in the order `piercing` (W1, the bubble's tips within `delta`), `liquid-neck` (L,
+  landed at `r_n <= eps_d s`, nearest first; `L-unhandled` without a single head or with one beyond
+  `max_head_volume s^3`, and with liquid events off at the cut's second-pinch test, its head never
+  classified), the fold closest to `max(kappa_g delta, fold_stop_elements h_elem)` (`a-head` when
+  it reaches the head of a tracked neck with `r_n <= eps_max s`, `L-unhandled` for a head too
+  large, else `groove`; a fold at the scale of the mesh, `contact` `kink`, is no event but the
+  cut's own `self-contact-approach` or `annular-contact-approach`), `gas-neck`, `bridge-closing`,
+  `chain-contact`. Heads and tracked necks:
   `events.head_sides`, `liquid_necks`, `head_of_fold`. The driver has no handler yet, so every event
   is a resumable stop (`event-unhandled`, event number `k`) with the dump of the state before it
   (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`) besides the end

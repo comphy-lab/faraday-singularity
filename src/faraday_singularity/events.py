@@ -84,8 +84,9 @@ class LiquidEventSettings:
     A tracked neck narrower than ``resolution`` times the element length at it on a freshly built
     mesh stops the run (``liquid-neck-unresolved``). A fold one of whose sides lies on the head of a
     tracked neck (the head's bulb coming up to the groove wall around it) lands that neck at once if
-    ``r_n <= eps_max s``. With ``enabled`` false a liquid neck is met as before the block, at the
-    stop of the cut's settings (``secondary-pinch-approach`` below ``delta``)."""
+    ``r_n <= eps_max s``. With ``enabled`` false no neck is tracked: a liquid neck is met where the
+    cut's own test of a second pinch-off finds it (below ``delta``), as an event without a handler
+    (class ``L-unhandled``, ``detected_by`` ``secondary-pinch``), its head never classified."""
     enabled: bool = False
     eps_d: float = 0.2
     eps_max: float = 0.5
@@ -274,11 +275,12 @@ def split_events_block(collapse: dict) -> tuple[dict, dict | None]:
 # handler, and stops on one that has none yet, resumably (EVENT_UNHANDLED)
 EVENT_REQUEST = "event-request"
 EVENT_UNHANDLED = "event-unhandled"
-# the handler of each kind of event (None: to be designed when one occurs); the driver has none
+# the handler of each class of event (None: none, an unhandled event or one to be designed when it
+# occurs), by class and not by kind: a liquid neck without a single head, with one too large, or
+# met with liquid events off (L-unhandled) has none, whatever found it. The driver has no handler
 # yet, so every event is a resumable stop
-HANDLERS = {"liquid-neck": "liquid-cut", "a-head": "liquid-cut", "groove": "groove-fill",
-            "piercing": "ring", "gas-neck": "n-chain-split", "bridge-closing": None,
-            "chain-contact": None}
+HANDLERS = {"W1": "ring", "L": "liquid-cut", "A-head": "liquid-cut", "L-unhandled": None,
+            "A-groove": "groove-fill", "G": "n-chain-split", "B": None, "X": None}
 HEAD_SIDE_TOL = 0.05  # a head lies on one side of its neck's height to within this * r_n
 
 
@@ -390,7 +392,7 @@ def _neck_fields(x: dict) -> dict:
 
 
 def _request(kind: str, cls: str, **fields) -> dict:
-    return {"reason": EVENT_REQUEST, "kind": kind, "class": cls, "handler": HANDLERS[kind],
+    return {"reason": EVENT_REQUEST, "kind": kind, "class": cls, "handler": HANDLERS[cls],
             **fields}
 
 
@@ -411,17 +413,21 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
     2. The end of the window: the bubble emptied below ``bubble_stop`` of its volume at the cut
        (``bubble-vanishing``, ``window_end``).
     3. The events, each returned as a request (reason ``event-request``, its ``kind``, ``class`` and
-       the ``handler`` it is to have): the bubble's two tips within ``max(delta, 3 h_min)``, the
-       downward jet piercing the bubble (``piercing``); a landed liquid neck, the one nearest its
-       landing first (``liquid-neck``: class ``L``, or ``L-unhandled`` where the neck has no single
-       head or one too large; with ``liquid.enabled`` false, a liquid neck at the cut's
-       secondary-pinch test instead); the fold closest to its limit ``max(kappa_g delta,
-       fold_stop_elements h_elem)`` (``gap``), which lands the neck of a head it reaches when
-       ``r_n <= eps_max s`` (``a-head``, class ``A-head``) and is otherwise a closing groove
-       (``groove``, class ``A-groove``, with the head's neck as ``a_head`` where one is reached and
-       the jet whose base the pair straddles); a gas neck at the cut's secondary-pinch test
-       (``gas-neck``, class ``G``); the bridge closing (``bridge-closing``, ``B``) and the chains
-       approaching (``chain-contact``, ``X``)."""
+       the ``handler`` its class is to have, :data:`HANDLERS`, None for ``L-unhandled``): the
+       bubble's two tips within ``max(delta, 3 h_min)``, the downward jet piercing the bubble
+       (``piercing``, class ``W1``); a landed liquid neck, the one nearest its landing first
+       (``liquid-neck``: class ``L``, or ``L-unhandled`` where the neck has no single head or one
+       too large; with ``liquid.enabled`` false, a liquid neck at the cut's secondary-pinch test
+       instead, ``L-unhandled``, its head never classified); the fold closest to its limit
+       ``max(kappa_g delta, fold_stop_elements h_elem)`` (``gap``), which lands the neck of a head
+       it reaches when ``r_n <= eps_max s`` (``a-head``, class ``A-head``, or ``L-unhandled`` for
+       a head too large) and is otherwise a closing groove (``groove``, class ``A-groove``, with
+       the head's neck as ``a_head`` where one is reached and the jet whose base the pair
+       straddles), but a fold at the scale of the mesh (``contact`` ``kink``) is no event and stops
+       the run as the cut's stops do (``self-contact-approach``, or ``annular-contact-approach``
+       across the base of a jet, trigger ``fold-gap``); a gas neck at the cut's secondary-pinch
+       test (``gas-neck``, class ``G``); the bridge closing (``bridge-closing``, ``B``) and the
+       chains approaching (``chain-contact``, ``X``)."""
     from .reconnect import (Chain, chains_disjoint, chain_necks, edge_reading, fold_contact,
                             interface_guard, revolved_volume, spline_contact_stop)
     from .selfcontact import InterfaceSelfIntersection, fold_gap
@@ -501,8 +507,8 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
                             eps_d=ls.eps_d, **_neck_fields(x))
     else:
         found = secondary("liquid")
-        if found is not None:
-            return _request("liquid-neck", "L", detected_by="secondary-pinch", **found)
+        if found is not None:  # no head classified: none to cut
+            return _request("liquid-neck", "L-unhandled", detected_by="secondary-pinch", **found)
     closing = []
     for name, fold in folds:
         fold_limit = max(stop_abs, fold_stop_elements * fold.h_elem)
@@ -521,13 +527,19 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
                        apex_r=jet.get("r", math.nan), apex_z=jet.get("z", math.nan),
                        R_apex=jet.get("R_apex", math.nan),
                        groove_angle=jet.get("groove_angle", math.nan))
+        if rec["contact"] == "kink":
+            # a contact at the scale of the mesh, not a groove of the resolved surface: no event
+            # (nothing to fill or cut), the stop of the cut's own stops
+            reason = "self-contact-approach" if jet is None else "annular-contact-approach"
+            return {"reason": reason, "trigger": "fold-gap", **rec}
         head = head_of_fold(fold.pair, [x for x in necks if x["chain"] == name]) \
             if ls.enabled else None
         if head is not None:
             rec["a_head"] = {**_neck_fields(head), "r_n_over_s": head["r_n"] / head["s"],
                              "eps_max": ls.eps_max}
-            if head["status"] == "head" and head["r_n"] <= ls.eps_max * head["s"]:
-                return _request("a-head", "A-head", **rec)
+            if head["r_n"] <= ls.eps_max * head["s"]:  # the head's neck lands
+                return _request("a-head", "A-head" if head["status"] == "head" else "L-unhandled",
+                                **rec)
         return _request("groove", "A-groove", **rec)
     found = secondary("gas")
     if found is not None:

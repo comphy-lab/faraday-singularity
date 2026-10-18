@@ -243,14 +243,66 @@ def test_a_landed_liquid_neck_is_an_event_with_its_head():
                                       "post": {"open_neck_stop": False}})
     req = _stops([bubble, cavity()], events=big)
     assert req["class"] == "L-unhandled" and req["status"] == "head-too-large"
+    assert req["kind"] == "liquid-neck" and req["handler"] is None
     # the nearest its landing first, on either chain
     req = _stops([bubble_with_head(1e-3, r_n=0.095)[0], cavity_with_head(1e-3, r_n=0.05)])
     assert req["chain"] == "open" and req["ratio"] == pytest.approx(0.5, rel=1e-3)
-    # liquid events off: a liquid neck at the cut's second-pinch test, below delta
+    # liquid events off: a liquid neck at the cut's second-pinch test, below delta, whose head is
+    # never classified: no handler (L-unhandled), and no head, s or direction
     off = ev.EventSettings.from_dict({})
     req = _stops([bubble_with_head(1e-3, r_n=0.3)[0], cavity()], events=off)
     assert req["kind"] == "liquid-neck" and req["detected_by"] == "secondary-pinch"
-    assert req["neck_depth"] == pytest.approx(0.4, rel=1e-3) and req["handler"] == "liquid-cut"
+    assert req["neck_depth"] == pytest.approx(0.4, rel=1e-3)
+    assert req["class"] == "L-unhandled" and req["handler"] is None
+    assert not {"head", "s", "direction"} & set(req)
+
+
+def test_the_handler_of_an_event_is_its_classs_and_an_unhandled_class_has_none():
+    """The handler a request names is that of its class (``events.HANDLERS``), whatever found it:
+    a fold that reaches a head too large to delete lands its neck as an L-unhandled event (no
+    handler), not as a groove to fill."""
+    assert ev.HANDLERS == {"W1": "ring", "L": "liquid-cut", "A-head": "liquid-cut",
+                           "L-unhandled": None, "A-groove": "groove-fill", "G": "n-chain-split",
+                           "B": None, "X": None}
+    big = ev.EventSettings.from_dict({"liquid": {"enabled": True, "max_head_volume": 2.0},
+                                      "post": {"open_neck_stop": False}})
+    bubble, apex = bubble_with_head(1e-3, r_n=0.2, r_w=0.54)
+    req = _stops([bubble, cavity()], events=big, apexes=_apexes(apex))
+    assert (req["kind"], req["class"], req["handler"]) == ("a-head", "L-unhandled", None)
+    assert req["a_head"]["status"] == "head-too-large"
+    assert req["a_head"]["r_n_over_s"] == pytest.approx(0.4, rel=1e-3)
+    # beyond eps_max the head's neck does not land: the fold is a groove, whatever the head
+    bubble, apex = bubble_with_head(1e-3, r_n=0.3, r_w=0.54)
+    req = _stops([bubble, cavity()], events=big, apexes=_apexes(apex))
+    assert (req["kind"], req["class"], req["handler"]) == ("groove", "A-groove", "groove-fill")
+
+
+def test_a_fold_at_the_scale_of_the_mesh_stops_the_run_as_the_cuts_stops_do():
+    """A spike of one node three spacings off the bubble (its spline simple) is a fold two node
+    intervals long, a kink at the scale of the mesh: no groove to fill nor head to cut, but the
+    cut's own stop (``self-contact-approach``, trigger ``fold-gap``, contact ``kink``), with and
+    without liquid events."""
+    from test_reconnect_geometry import _bubble, _cavity
+
+    from faraday_singularity.selfcontact import first_contact
+
+    bubble, cav = _bubble(), _cavity()
+    P, k = bubble.points.copy(), 300
+    t = P[k + 1] - P[k]
+    h = math.hypot(*t)
+    t /= h
+    P[k + 1] = P[k] + 0.5 * h * t + 3.0 * h * np.array([-t[1], t[0]])
+    P[k + 2] = P[k] + 1.3 * h * t
+    spike = rc.Chain(P, bubble.end_types)
+    assert first_contact(spike.points) is None
+    cut = rc.cut_geometry([bubble, cav], 3.0, gas_before=1.0)
+    legacy = _stops([spike, cav], cut=cut, events=None)
+    assert legacy["reason"] == "self-contact-approach" and legacy["contact"] == "kink"
+    for events in (ev.EventSettings(), LIQUID):
+        stop = _stops([spike, cav], cut=cut, events=events)
+        assert stop["reason"] == "self-contact-approach" and stop["trigger"] == "fold-gap"
+        assert stop["contact"] == "kink" and stop["fold_pair"] == [k, k + 2]
+        assert stop["fold_limit"] == legacy["fold_limit"]  # 3 h_elem, above kappa_g delta
 
 
 def test_a_fold_closes_at_kappa_g_delta_and_one_that_reaches_a_head_lands_its_neck():

@@ -410,7 +410,8 @@ cut) ends the window (`bubble-vanishing`, with `window_end`). Every change of to
 event, in this order: the bubble's two tips within `delta` of each other, the downward jet piercing
 the bubble (`piercing`); a landed liquid neck (`liquid-neck`); the fold closest to its limit
 (`a-head` or `groove`); a gas neck (`gas-neck`); the bridge closing (`bridge-closing`) and the
-chains approaching (`chain-contact`). A neck on the liquid side is followed from
+chains approaching (`chain-contact`). A fold at the scale of the mesh (`contact` `kink`) is no
+event: it stops the run as the cut's own stops do. A neck on the liquid side is followed from
 `liquid.track_depth` (0.05) below its shoulder. Its head is the side of it whose far end lies on the
 axis, that holds neither the wall end nor the bubble's widest point, lies on one side of the neck's
 height and bounds a simple section of at most `liquid.max_head_volume` (20) times the cube of its
@@ -418,9 +419,12 @@ largest radius `s`; the neck lands once `r_n <= liquid.eps_d s` (0.2), the one n
 first. A fold of either chain closes at `max(gap.kappa_g delta, fold_stop_elements h_elem)`
 (`kappa_g` 0.05; null for the collapse's absolute `fold_stop`), and one that reaches the head of a
 tracked neck lands that neck at once if `r_n <= liquid.eps_max s` (0.5). With `liquid.enabled`
-false a liquid neck is met at the cut's own test of a second pinch-off instead. No event has a
-handler yet: the run stops on the first (`event-unhandled`, with the event's number `k`, its
-`kind`, `class` and the handler it is to have) and keeps the state before it as
+false a liquid neck is met at the cut's own test of a second pinch-off instead. Each event names
+the handler of its class (`events.HANDLERS`); a landed neck without a single head or with one too
+large, or met with liquid events off, whose head is then never classified, is of class
+`L-unhandled`, which has none. No event has a handler yet: the run stops on the first
+(`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of its class)
+and keeps the state before it as
 `states/precut_e<k>.dump` (`cut_stage` `precut-event`), besides the state it ends on; a
 continuation from it meets the event again, and its handler once one exists.
 
