@@ -1015,6 +1015,8 @@ def restore_cut(problem, record: dict) -> None:
 # --- the cut of a liquid neck after the gas cut ---------------------------------------------------
 
 EVENT_SCHEMA = "faraday-event/2"
+# the kinds of event a liquid cut is made for, and the class of each (events.post_cut_events)
+LIQUID_CUT_CLASSES = {"liquid-neck": "L", "a-head": "A-head"}
 # the stages of a liquid cut before it changes the problem: any failure up to them is a refusal
 LIQUID_UNCHANGED_STAGES = ("admission", "precut", "caps", "plan", "budgets")
 CAP_FILL_DENSITY = 4  # samples of the old bulk velocity per node of the new mesh along the cap
@@ -1147,9 +1149,12 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
     class ``L``, or ``a-head``, class ``A-head``), the ``k``-th event after the gas cut, and
     project.
 
-    1. **Admission**: a gas cut was made (``problem.cut``), the request names a tracked neck of the
-       state with a single head (``events.liquid_necks`` with ``events.liquid``); ``precut_e<k>``
-       is kept (``cut_stage`` ``precut-event``, the request as its ``event``).
+    1. **Admission**: a gas cut was made (``problem.cut``), the request is of a kind and class
+       this cut is for (``LIQUID_CUT_CLASSES``) and names a tracked neck of the state with a single
+       head (``events.liquid_necks`` with ``events.liquid``) that lands under ``events.liquid`` as
+       its class says (``r_n <= eps_d s`` for ``L``, ``r_n <= eps_max s`` for ``A-head``), whatever
+       settings the request was made under; ``precut_e<k>`` is kept (``cut_stage``
+       ``precut-event``, the request as its ``event``).
     2. **Cap** (``events.truncate_chain``): the head removed, the stump closed at the neck by the
        half-spheroid of ``liquid.cap_height`` (tried once more at ``events.CAP_RETRY_HEIGHT`` if
        refused), ``elements_per_scale`` elements per neck radius, refused unless its hard checks
@@ -1238,10 +1243,9 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
         raise CutRefused("the problem was not made with reconnect settings")
     if pb.cut is None:
         raise CutRefused("a liquid cut follows the gas cut: the problem has none")
-    if request.get("kind") not in EVENT_CLASSES["liquid"] or \
-            request.get("class") not in ("L", "A-head"):
-        raise CutRefused(f"no liquid cut for an event of kind {request.get('kind')!r} and class "
-                         f"{request.get('class')!r}")
+    kind, cls = request.get("kind"), request.get("class")
+    if kind not in EVENT_CLASSES["liquid"] or LIQUID_CUT_CLASSES.get(kind) != cls:
+        raise CutRefused(f"no liquid cut for an event of kind {kind!r} and class {cls!r}")
     if not (dt_prev > 0.0 and math.isfinite(dt_prev)):
         raise CutRefused(f"the step before the cut must be positive, not {dt_prev!r}")
     t_now = pb.get_current_time(dimensional=False, as_float=True)
@@ -1267,6 +1271,14 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
         "r_n_over_s": neck["r_n"] / neck["s"], "u_r": u_r,
         "Re_n": neck["r_n"] * abs(u_r) / Oh if Oh > 0.0 else math.nan,
         "We_n": neck["r_n"] * u_r**2})
+    # the class of the request holds of the neck under these settings, not only under those it was
+    # made with (a restart from the state before an event may change the keys of the class)
+    if cls == "L" and not neck["landed"]:
+        raise CutRefused(f"the neck has not landed at liquid.eps_d {ls.eps_d:g}: r_n/s "
+                         f"{neck['r_n'] / neck['s']:.6g}")
+    if cls == "A-head" and not neck["r_n"] <= ls.eps_max * neck["s"]:
+        raise CutRefused(f"the neck of the head the fold reaches lies above liquid.eps_max "
+                         f"{ls.eps_max:g}: r_n/s {neck['r_n'] / neck['s']:.6g}")
     record["dumps"] = {}
 
     stage("precut")

@@ -239,10 +239,11 @@ add a second top-level `cases/` tree.
   mesh (`contact` `kink`), no event but the cut's own `self-contact-approach` or
   `annular-contact-approach`, then the groove closest to its limit (`groove`), then `gas-neck`,
   `bridge-closing`, `chain-contact`. Heads and tracked necks: `events.head_sides`, `liquid_necks`,
-  `head_of_fold`. The keys of `liquid` also set the cut of a landed neck (`surgery.liquid_cut`),
-  which the driver does not make yet (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`,
-  `restart`; class keys like the rest of `liquid`): the head removed and the stump capped at the
-  neck (`events.truncate_chain`, refused unless its hard checks hold), the mesh rebuilt from a plan
+  `head_of_fold`. The keys of `liquid` also set the cut of a neck that lands under them
+  (`surgery.liquid_cut`, which refuses a request made under others), which the driver does not make
+  yet (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`, `restart`; class keys like the
+  rest of `liquid`): the head removed and the stump capped at the neck (`events.truncate_chain`,
+  refused unless its hard checks hold), the mesh rebuilt from a plan
   built in the project (`events.build_liquid_plan`, parked as pyoomph parks its own,
   `surgery.park_plan`), the transfer checked against the geometry (`events.predict_unlocated`: the
   unlocated interface nodes exactly those predicted, all on the cap, none of the bulk or the axis,

@@ -447,9 +447,10 @@ null for the cut's `restart`), and the radius of the budgets of the cut (`liquid
 within `max(box_radius delta, 2 L_rem)` of the neck, `L_rem` the reach of the removed head along
 the axis).
 
-**The cut of a liquid neck** (`surgery.liquid_cut`) removes the head of a landed neck and closes the
-stump at the neck by a half-spheroid of `liquid.cap_height` neck radii, tangent to the neck and
-inside the old liquid, whose points start at the node spacing of the neck and grow to the cap's own
+**The cut of a liquid neck** (`surgery.liquid_cut`) removes the head of a neck that lands under its
+own `liquid` keys (a request made under others is refused) and closes the stump at the neck by a
+half-spheroid of `liquid.cap_height` neck radii, tangent to the neck and inside the old liquid,
+whose points start at the node spacing of the neck and grow to the cap's own
 (`events.truncate_chain`); a cap that leaves the old liquid, folds back, makes a knife-edge angle at
 the splice, has too few points for the neck's spacing or leaves chains that cannot be meshed is
 refused, and tried once more at half the height. pyoomph's planner sees only the necks of the gas,

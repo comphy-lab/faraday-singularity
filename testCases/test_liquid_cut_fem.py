@@ -214,6 +214,12 @@ def impose(pb, velocity, necks):
     pb.assign_initial_values_impulsive()
 
 
+def settings(**liquid) -> ev.EventSettings:
+    """The events block of the tests with the keys ``liquid`` of its ``liquid`` part changed."""
+    return ev.EventSettings.from_dict({"liquid": {"enabled": True, **liquid},
+                                       "post": {"open_neck_stop": False, "neck_floor": 1e-5}})
+
+
 def request(pb, events=EVENTS):
     """The request of the events branch on the state, as the driver's stops would make it."""
     named, _ = surgery._named_chains(pb)
@@ -324,11 +330,18 @@ def jets(tmp_path_factory):
         req = request(pb)
         res["request1"] = req
         refusals = {}
-        for name, bad in (("unhandled", dict(req, **{"class": "L-unhandled"})),
-                          ("no-neck", dict(req, index=req["index"] + 7)),
-                          ("gas-neck", dict(req, kind="gas-neck", **{"class": "G"}))):
+        a_head = dict(req, kind="a-head", **{"class": "A-head"},
+                      a_head={k: req[k] for k in ev.NECK_KEYS if k in req})
+        for name, bad, events in (
+                ("unhandled", dict(req, **{"class": "L-unhandled"}), EVENTS),
+                ("no-neck", dict(req, index=req["index"] + 7), EVENTS),
+                ("gas-neck", dict(req, kind="gas-neck", **{"class": "G"}), EVENTS),
+                ("crossed", dict(req, **{"class": "A-head"}), EVENTS),
+                # a request made under other keys of its class than the cut is given
+                ("unlanded", req, settings(eps_d=0.05)),
+                ("a-head-above", a_head, settings(eps_d=0.1, eps_max=0.15))):
             with pytest.raises(surgery.CutRefused) as err:
-                surgery.liquid_cut(pb, EVENTS, RECON, out / f"refused-{name}", bad, k=1,
+                surgery.liquid_cut(pb, events, RECON, out / f"refused-{name}", bad, k=1,
                                    **CUT_KW)
             refusals[name] = err.value.record
         res["refusals"] = refusals
@@ -379,14 +392,23 @@ def jets(tmp_path_factory):
 
 
 def test_the_refused_cuts_leave_the_problem_unchanged(jets):
-    """A request of a class without this handler, or one that names no tracked neck with a single
-    head, is refused at admission: no plan, no remesh, no event, the partial record written."""
-    for name, rec in jets["refusals"].items():
+    """A request of a class without this handler, of a kind and a class that do not go together,
+    one that names no tracked neck with a single head, or one whose neck does not land under the
+    keys of the cut (a landed neck above ``eps_d``, a head's above ``eps_max``) is refused at
+    admission: no plan, no remesh, no event, the partial record written."""
+    refusals = jets["refusals"]
+    for name, rec in refusals.items():
         assert rec["outcome"] == "refused" and rec["failed_at"] == "admission", name
         assert rec["schema"] == surgery.EVENT_SCHEMA and rec["k"] == 1
         path = jets["out"] / f"refused-{name}" / "events" / "event_001.json"
         assert json.loads(path.read_text()) == rec
-    assert "no tracked neck" in jets["refusals"]["no-neck"]["error"]
+    assert "no tracked neck" in refusals["no-neck"]["error"]
+    assert "no liquid cut for an event of kind 'liquid-neck' and class 'A-head'" in \
+        refusals["crossed"]["error"]
+    assert "has not landed at liquid.eps_d 0.05" in refusals["unlanded"]["error"]
+    assert refusals["unlanded"]["trigger"]["landed"] is False
+    assert "above liquid.eps_max 0.15" in refusals["a-head-above"]["error"]
+    assert 0.15 < refusals["a-head-above"]["trigger"]["r_n_over_s"] < 0.2
     assert jets["unchanged"] == (jets["remesh_count"], False, 0)
 
 
