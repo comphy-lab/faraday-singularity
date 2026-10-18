@@ -56,8 +56,9 @@ and the areas the cut takes away.
 Of the events a run makes, :class:`CascadeMonitor` follows the sequence at each tip on the axis
 (:func:`event_tip`) and judges whether it shrinks (a cascade that stops the run), grows or stays
 stationary; the removed head of each liquid cut is followed as a ghost that moves rigidly at its
-mean axial speed while its rear retracts (:func:`ghost_place`), whose recontacts with the stump it
-left and with the far tip of the bubble are flagged (:func:`ghost_recontacts`).
+mean axial speed while its rear retracts until it is as long as the sphere of its volume
+(:func:`ghost_place`), whose recontacts with the stump it left and with the far tip of the bubble
+are flagged (:func:`ghost_recontacts`).
 """
 
 from __future__ import annotations
@@ -1420,11 +1421,21 @@ def ghost_place(ghost: dict, t: float) -> tuple[float, float]:
     """The ends on the axis of the ghost of a removed head (a liquid cut's ``ghost``) at time
     ``t``: it moves rigidly at its mean axial speed ``U``, so that its front, the head's old tip,
     is at ``z_front0 + U (t - t0)``, while its rear, at the stump's new tip at the cut, retracts
-    towards the head at ``v_ret`` besides, ``z_rear0 + (U + direction v_ret) (t - t0)``."""
+    towards the head at ``v_ret`` besides, ``z_rear0 + (U + direction v_ret) (t - t0)``, until the
+    ghost is as long as the sphere of its volume, ``2 a`` (``a``, its equivalent radius; a head
+    shorter than that at the cut keeps its length, and a ghost without ``a`` retracts until its
+    rear meets its front): the thread behind a retracting head ends in it, and its rear never
+    passes its front."""
     dt = float(t) - float(ghost["t0"])
-    U, d = float(ghost["U"]), float(ghost["direction"])
-    return (float(ghost["z_front0"]) + U * dt,
-            float(ghost["z_rear0"]) + (U + d * float(ghost["v_ret"])) * dt)
+    U, d, v_ret = float(ghost["U"]), float(ghost["direction"]), float(ghost["v_ret"])
+    front = float(ghost["z_front0"]) + U * dt
+    rear = float(ghost["z_rear0"]) + (U + d * v_ret) * dt
+    length0 = d * (float(ghost["z_front0"]) - float(ghost["z_rear0"]))
+    a = ghost.get("a")
+    shortest = min(length0, 2.0 * float(a) if a is not None and math.isfinite(float(a)) else 0.0)
+    if length0 - v_ret * dt < shortest:  # retracted to the sphere: the rear follows the front
+        rear = front - d * shortest
+    return front, rear
 
 
 def ghost_recontacts(ghost: dict, t: float, step: int, tips: dict) -> list[dict]:

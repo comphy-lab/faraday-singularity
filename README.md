@@ -517,8 +517,10 @@ gets an event `liquid-cut`, `profiles/` a profile, and `events.txt` a row per ev
 the cap, the removed head and its ghost, the jet's base before and after, the closures relative to
 the head's own, the transfer, the interval since the event before at its tip, the cascade's verdict,
 the totals removed). The ghost of each removed head is followed after its cut, rigidly at its mean
-axial speed with its rear retracting towards it at `r_n^(-1/2)`: the stump's tip catching its rear
-and its front reaching the far tip of the bubble (from two steps after the cut on) are flags only,
+axial speed with its rear retracting towards it at `r_n^(-1/2)` until the ghost is as long as the
+sphere of its volume (twice its equivalent radius; a head shorter than that keeps its length), so
+that its rear never passes its front: the stump's tip catching its rear and its front reaching the
+far tip of the bubble (from two steps after the cut on) are flags only,
 the bubble mattering only for the entrainment, its collapse and the budgets (`ghost.recontacts` in
 the record and its file, an event `ghost-recontact`, a row of `drops.txt`, which also has a row for
 each ghost made). Every removal enters the budget of the run: `budget.txt` has a row per step

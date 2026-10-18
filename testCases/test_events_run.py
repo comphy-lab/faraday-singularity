@@ -127,6 +127,28 @@ def test_a_ghost_moves_rigidly_and_its_rear_retracts_towards_its_head():
     assert front == pytest.approx(0.9 - 0.05) and rear == pytest.approx(0.99 - 0.07)
 
 
+def test_a_ghost_retracts_until_it_is_as_long_as_the_sphere_of_its_volume():
+    """The ghost 0.09 long, of equivalent radius 0.02: its rear retracts at 20 relative to its front
+    until the ghost is 0.04 long (at 2.5e-3), and then moves with its front; a head shorter than
+    its sphere at the cut keeps its length; without its radius the rear stops at the front."""
+    g = _ghost(a=0.02)
+    front, rear = ev.ghost_place(g, 2e-3)
+    assert front == pytest.approx(0.8) and rear == pytest.approx(0.85)  # 0.05 long
+    for t in (2.5e-3, 4e-3, 1.0):
+        front, rear = ev.ghost_place(g, t)
+        assert front == pytest.approx(0.9 - 50.0 * t) and rear - front == pytest.approx(0.04)
+    squat = _ghost(a=0.1)  # its sphere, 0.2 long, is longer than the head
+    for t in (0.0, 1e-3, 1.0):
+        front, rear = ev.ghost_place(squat, t)
+        assert rear - front == pytest.approx(0.09)
+    front, rear = ev.ghost_place(_ghost(), 1.0)
+    assert rear == pytest.approx(front)
+    # the stump is caught up with by the rear as it stands, not as the uncapped retraction has it
+    tips = {"bubble_top": 0.9 - 50.0 * 4e-3 + 0.03, "bubble_bottom": -10.0}
+    (hit,) = ev.ghost_recontacts(g, 4e-3, 12, tips)
+    assert hit["kind"] == "rear" and hit["z_ghost"] == pytest.approx(0.74)
+
+
 def test_a_ghost_flags_the_stump_that_catches_it_and_the_far_tip_it_reaches_once_each():
     """Rear: the stump's tip past the ghost's rear; front: the ghost's front at the bubble's
     bottom; neither before two steps after the cut, each once; the head of the cavity's tip rises

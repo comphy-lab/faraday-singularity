@@ -277,9 +277,11 @@ add a second top-level `cases/` tree.
   stand-ins and a stand-in cut; `testCases/test_events_run_fem.py`, two events in one finite-element
   run, a refused cut, and a run resumed in a new process from the dump of an event a driver without
   the handler stopped on). The ghost of each removed head is followed after each step
-  (`CollapseDriver._follow_ghosts`, `events.ghost_place`): its recontacts with the stump and with
-  the far tip of the bubble (`events.ghost_recontacts`, from `GHOST_SKIP_STEPS` after the cut) are
-  flags only, in `ghost.recontacts` of the record and its file, events `ghost-recontact` and rows of
+  (`CollapseDriver._follow_ghosts`, `events.ghost_place`: rigidly at its mean axial speed, its rear
+  retracting at `r_n^(-1/2)` until the ghost is as long as the sphere of its volume, `2 a`, so that
+  its rear never passes its front): its recontacts with the stump and with the far tip of the
+  bubble (`events.ghost_recontacts`, from `GHOST_SKIP_STEPS` after the cut) are flags only, in
+  `ghost.recontacts` of the record and its file, events `ghost-recontact` and rows of
   `drops.txt` (with one per ghost made). Every removal enters the run's budget (`budget.txt`, a row
   per step after the cut: the mesh's volume, axial momentum and kinetic energy of `chains.txt`, the
   removals' since the gas cut, `CollapseDriver._removed`, and the sums; the volume and the momentum
