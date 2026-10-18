@@ -438,7 +438,14 @@ classified, is of class `L-unhandled`, which has none. No event has a handler ye
 the first (`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of
 its class) and keeps the state before it as `states/precut_e<k>.dump` (`cut_stage` `precut-event`),
 besides the state it ends on; a continuation from it meets the event again, and its handler once one
-exists.
+exists. The keys of `liquid` also set the cut of a landed neck, which the driver does not make yet:
+the cap that closes the stump (`liquid.cap`, `hemispheroid`, of height `liquid.cap_height`, 1, in
+neck radii and at most one), the velocity of the cap's nodes (`liquid.cap_fill`: `sample`, the old
+bulk velocity at their places, or `transfer`, what pyoomph's transfer gives them, an arm only), the
+projection after the cut (`liquid.projection`, true) and the first step after it (`liquid.restart`,
+null for the cut's `restart`), and the radius of the budgets of the cut (`liquid.box_radius`, 4:
+within `max(box_radius delta, 2 L_rem)` of the neck, `L_rem` the reach of the removed head along
+the axis).
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus

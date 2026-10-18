@@ -239,7 +239,9 @@ add a second top-level `cases/` tree.
   mesh (`contact` `kink`), no event but the cut's own `self-contact-approach` or
   `annular-contact-approach`, then the groove closest to its limit (`groove`), then `gas-neck`,
   `bridge-closing`, `chain-contact`. Heads and tracked necks: `events.head_sides`, `liquid_necks`,
-  `head_of_fold`. The driver has no handler yet, so every event is a resumable stop
+  `head_of_fold`. The keys of `liquid` also set the cut of a landed neck, which the driver does not
+  make yet (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`, `restart`; class keys
+  like the rest of `liquid`). The driver has no handler yet, so every event is a resumable stop
   (`event-unhandled`, event number `k`) with the dump of the state before it
   (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`) besides the end
   state; a continuation from it is a post-cut restart from which the keys of every class apply anew

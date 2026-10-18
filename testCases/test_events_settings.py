@@ -23,11 +23,17 @@ def test_the_block_parses_with_its_defaults_and_round_trips():
     assert not s.liquid.enabled and s.liquid.eps_d == 0.2 and s.liquid.eps_max == 0.5
     assert s.gap.kappa_g == 0.05 and s.post.open_neck_stop
     assert s.post.bubble_bottom_sizing == "kept" and s.post.h_floor is None
+    # the cut of a liquid neck: a half sphere, the cap's nodes from the old bulk, the projection,
+    # the restart of the cut, the budgets within 4 delta
+    assert (s.liquid.cap, s.liquid.cap_height, s.liquid.cap_fill) == ("hemispheroid", 1.0, "sample")
+    assert s.liquid.projection and s.liquid.restart is None and s.liquid.box_radius == 4.0
     d = json.loads(json.dumps(s.to_dict()))
     assert ev.EventSettings.from_dict(d) == s
     full = ev.EventSettings.from_dict({
         "liquid": {"enabled": True, "eps_d": 0.1, "eps_max": 0.4, "track_depth": 0.1,
-                   "max_head_volume": 10.0, "resolution": 6.0},
+                   "max_head_volume": 10.0, "resolution": 6.0, "cap": "hemispheroid",
+                   "cap_height": 0.5, "cap_fill": "transfer", "box_radius": 8.0,
+                   "projection": False, "restart": "impulsive"},
         "gap": {"kappa_g": None},
         "post": {"open_neck_stop": False, "h_floor": 1e-7, "neck_floor": 2e-7,
                  "neck_elements_per_scale": 16, "rise_tol": 1e-7, "dt_min": 1e-14,
@@ -35,6 +41,7 @@ def test_the_block_parses_with_its_defaults_and_round_trips():
                  "bubble_bottom_size": 5.53e-5}})
     assert ev.EventSettings.from_dict(json.loads(json.dumps(full.to_dict()))) == full
     assert full.gap.kappa_g is None and full.post.neck_elements_per_scale == 16
+    assert full.liquid.restart == "impulsive" and not full.liquid.projection
     assert len(full.sha256()) == 64 and full.sha256() != s.sha256()
     assert ev.EventSettings.from_dict(full.to_dict()).sha256() == full.sha256()
 
@@ -53,6 +60,13 @@ def test_the_block_parses_with_its_defaults_and_round_trips():
     ({"liquid": {"eps_d": 0.0}}, "eps_d must be positive"),
     ({"liquid": {"track_depth": 1.0}}, r"track_depth must lie in \[0, 1\)"),
     ({"liquid": {"resolution": float("inf")}}, "resolution must be positive and finite"),
+    ({"liquid": {"cap": "arc"}}, "cap must be one of"),
+    ({"liquid": {"cap_height": 1.5}}, r"cap_height must lie in \(0, 1\]"),
+    ({"liquid": {"cap_height": 0.0}}, "cap_height must be positive"),
+    ({"liquid": {"cap_fill": "zero"}}, "cap_fill must be one of"),
+    ({"liquid": {"box_radius": -4.0}}, "box_radius must be positive"),
+    ({"liquid": {"projection": 1}}, "projection must be true or false"),
+    ({"liquid": {"restart": "bdf2"}}, "restart must be one of"),
     ({"gap": {"kappa_g": 0.0}}, "kappa_g must be positive and finite, or null"),
     ({"post": {"h_floor": -1e-7}}, "h_floor must be positive"),
     ({"post": {"dt_min": True}}, "dt_min must be positive"),

@@ -61,6 +61,8 @@ import numpy as np
 EVENTS_BLOCK = "reconnect_events"  # the key of the block in a case's collapse block
 OOMPH_MINIMUM_DT = 1e-12  # oomph-lib's smallest step by default (Problem::Minimum_dt)
 BUBBLE_BOTTOM_SIZINGS = ("kept", "frozen")
+CAP_SHAPES = ("hemispheroid",)  # the cap that closes the stump of a cut liquid neck
+CAP_FILLS = ("sample", "transfer")  # the velocity of its nodes: the old bulk's, or the transfer's
 # the kinds of the events a run makes, by class: the keys of a class are fixed after its first event
 EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head"), "gap": ("groove-fill",)}
 # a dump of the state before an event, from which a restart may change the keys of its class
@@ -103,22 +105,50 @@ class LiquidEventSettings:
     tracked neck (the head's bulb coming up to the groove wall around it) lands that neck at once if
     ``r_n <= eps_max s``. With ``enabled`` false no neck is tracked: a liquid neck is met where the
     cut's own test of a second pinch-off finds it (below ``delta``), as an event without a handler
-    (class ``L-unhandled``, ``detected_by`` ``secondary-pinch``), its head never classified."""
+    (class ``L-unhandled``, ``detected_by`` ``secondary-pinch``), its head never classified.
+
+    The cut of a neck (``surgery.liquid_cut``) removes the head and closes the stump by a
+    half-spheroid (``cap``, ``hemispheroid``) of height ``cap_height`` neck radii (one, a half
+    sphere; refused caps are tried once at ``CAP_RETRY_HEIGHT``); the velocity of the cap's nodes is
+    the old bulk's at their places (``cap_fill`` ``sample``), or what pyoomph's transfer gives them
+    (``transfer``, from the old surface near the neck: an arm only); with ``projection`` the
+    pressure-impulse projection of the cut follows, and the first step after it is ``restart``
+    (``reconnect.restart`` when null). The budgets of the cut are taken within ``max(box_radius
+    delta, 2 L_rem)`` of the neck, ``L_rem`` the reach of the removed head along the axis."""
     enabled: bool = False
     eps_d: float = 0.2
     eps_max: float = 0.5
     track_depth: float = 0.05
     max_head_volume: float = 20.0
     resolution: float = 4.0
+    cap: str = "hemispheroid"
+    cap_height: float = 1.0
+    cap_fill: str = "sample"
+    box_radius: float = 4.0
+    projection: bool = True
+    restart: str | None = None
 
     def __post_init__(self):
+        from .reconnect import RESTARTS
+
         _flag("liquid", "enabled", self.enabled)
-        for name in ("eps_d", "eps_max", "max_head_volume", "resolution"):
+        for name in ("eps_d", "eps_max", "max_head_volume", "resolution", "cap_height",
+                     "box_radius"):
             _positive("liquid", name, getattr(self, name))
         if not self.eps_d <= self.eps_max < 1.0:
             raise ValueError(f"collapse.{EVENTS_BLOCK}.liquid: eps_d <= eps_max < 1")
         if not (_number(self.track_depth) and 0.0 <= self.track_depth < 1.0):
             raise ValueError(f"collapse.{EVENTS_BLOCK}.liquid.track_depth must lie in [0, 1)")
+        if not self.cap_height <= 1.0:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.liquid.cap_height must lie in (0, 1] (neck "
+                             "radii): a taller cap reaches beyond the half sphere")
+        for name, allowed in (("cap", CAP_SHAPES), ("cap_fill", CAP_FILLS)):
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"collapse.{EVENTS_BLOCK}.liquid.{name} must be one of {allowed}")
+        _flag("liquid", "projection", self.projection)
+        if self.restart is not None and self.restart not in RESTARTS:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.liquid.restart must be one of {RESTARTS}, "
+                             "or null")
 
 
 @dataclass(frozen=True)
