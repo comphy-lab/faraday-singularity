@@ -194,73 +194,74 @@ add a second top-level `cases/` tree.
   `testCases/test_reconnect_fem.py`; check them when the pin moves. Planner tests on stored neck
   profiles run when `FARADAY_RECONNECT_PROFILES` names their directory; a synthetic slender thread
   covers the same planner classes by default.
-- The events after the cut are set by `collapse.reconnect_events` (`events.EventSettings`:
-  `liquid`, `gap`, `post`), a block beside the cut's own that needs a `reconnect` block; without it a
-  run is the same to the byte as at 1b65916 (`testCases/test_events_fem.py`: a cut of the synthetic
-  necked cavity, the run after it with rebuilds and dumps to its step limit, and a restart from a
-  dump, which meet no neck, no jet at the bubble's bottom and no other stop;
+- The events after the cut are set by `collapse.reconnect_events` (`events.EventSettings`: `liquid`,
+  `gap`, `post`), a block beside the cut's own that needs a `reconnect` block; without it a run is
+  the same to the byte as at 1b65916 (`testCases/test_events_fem.py`: a cut of the synthetic necked
+  cavity, the run after it with rebuilds and dumps to its step limit, and a restart from a dump,
+  which meet no neck, no jet at the bubble's bottom and no other stop;
   `testCases/test_events_legacy.py`: stand-in problems through those, the bubble's bottom with a jet
   and its kept focus, the necks of both chains, the open chain's neck stop, a groove at a jet's
   base, the dt floor and the stops after a cut; a replay of a production run after its cut is the
-  gate still to pass). It applies after a cut only: a cut restart may
-  add, drop or change it (`run_case.CUT_EVENTS_DERIVED_KEYS`), a post-cut continuation may add or
-  change it (`run_case.POST_CUT_DERIVED_KEYS`, `run_case._check_events`), and a run from the start or
-  an ordinary restart with it is refused before any output; `run_case.CUT_DERIVED_KEYS` and the
+  gate still to pass). It applies after a cut only: a cut restart may add, drop or change it
+  (`run_case.CUT_EVENTS_DERIVED_KEYS`), a post-cut continuation may add or change it
+  (`run_case.POST_CUT_DERIVED_KEYS`, `run_case._check_events`), and a run from the start or an
+  ordinary restart with it is refused before any output; `run_case.CUT_DERIVED_KEYS` and the
   prototype, which refuses the block, are unchanged. Dumps written after the cut with it carry
   `events_settings`, `events` (the events made), `legs` (the cut and each restart: step, time,
-  commit, hash of the block, changed keys, the limits and floors it runs with, resolved and in
-  units of `delta` and `delta^2`, `limits`; events `leg`) and `mesh_fresh` (no step has run on the
-  mesh since it was built: a restart checks it as a fresh mesh, as the run that dumped it did,
-  unless it changes a key that sizes the mesh, `events.SIZING_KEYS`, whose new sizes the rule of
-  rebuilds then meets), and only a case with the block continues them. The keys of `liquid` and `gap` are fixed once an event of their class was made, except in a
-  restart from the state before an event (`precut_e<k>`, `cut_stage` `precut-event`), from which they
-  apply anew (`event_keys_changed_at` in its leg); the keys of `post` change at any restart (a key a
-  recorded block lacks counts at its default). `post.bubble_bottom_sizing` `frozen` meshes the
-  bubble's bottom never coarser than `post.bubble_bottom_size` instead of the landing focus
-  (`reconnect.feature_regions`), except within a few of the cut's tip sizes of the bottom's tip,
-  where the cut's tip attractor at every axis end (`tip_size delta`) still applies, and on the
-  cut's own mesh, which has the size the cut keeps there (`focus.kept`) until the first rebuild
-  after the cut. An unknown key of the `collapse` block is refused with a message.
-  With the block, `reconnect.post_cut_stops` hands over to `events.post_cut_events` (without it the
-  cut's stops are untouched): invalid states first (chains not two, crossed nodes or touching chains
-  raise, spline contact, and on a fresh mesh a tracked liquid neck below `liquid.resolution h_loc`,
-  `liquid-neck-unresolved`, the guard, the driver's curved-element check passed as `invalid`; on a
-  mesh a step has run on the guard comes last, after the events, as in the cut's own stops), then
-  the end of the window (`bubble-vanishing` with `window_end`), then the events as requests
-  (`event-request`: `kind`, `class`, the `handler` of its class, `events.HANDLERS`, none for
-  `L-unhandled`) in the order `piercing` (W1, the bubble's tips within `delta`), `liquid-neck` (L,
-  landed at `r_n <= eps_d s`, nearest first; `L-unhandled` without a single head or with one beyond
-  `max_head_volume s^3`, and with liquid events off at the cut's second-pinch test, its head never
-  classified), a closing fold, below `max(kappa_g delta, fold_stop_elements h_elem)`, among the
-  fold of each chain and that of each tracked head (`events.head_fold`, so that a closer fold
-  elsewhere on its chain hides none): first one that reaches the head of a tracked neck with
-  `r_n <= eps_max s` on either chain (`a-head`, `L-unhandled` for a head too large; the narrowest
-  `r_n/s` first), then one at the scale of the mesh (`contact` `kink`), no event but the cut's own
-  `self-contact-approach` or `annular-contact-approach`, then the groove closest to its limit
-  (`groove`), then `gas-neck`, `bridge-closing`, `chain-contact`. Heads and tracked necks:
-  `events.head_sides`, `liquid_necks`, `head_of_fold`. The driver has no handler yet, so every event
-  is a resumable stop (`event-unhandled`, event number `k`) with the dump of the state before it
+  commit, hash of the block, changed keys, the limits and floors it runs with, resolved and in units
+  of `delta` and `delta^2`, `limits`; events `leg`) and `mesh_fresh` (no step has run on the mesh
+  since it was built: a restart checks it as a fresh mesh, as the run that dumped it did, unless it
+  changes a key that sizes the mesh, `events.SIZING_KEYS`, whose new sizes the rule of rebuilds then
+  meets), and only a case with the block continues them. The keys of `liquid` and `gap` are fixed
+  once an event of their class was made, except in a restart from the state before an event
+  (`precut_e<k>`, `cut_stage` `precut-event`), from which they apply anew (`event_keys_changed_at`
+  in its leg); the keys of `post` change at any restart (a key a recorded block lacks counts at its
+  default). `post.bubble_bottom_sizing` `frozen` meshes the bubble's bottom never coarser than
+  `post.bubble_bottom_size` instead of the landing focus (`reconnect.feature_regions`), except
+  within a few of the cut's tip sizes of the bottom's tip, where the cut's tip attractor at every
+  axis end (`tip_size delta`) still applies, and on the cut's own mesh, which has the size the cut
+  keeps there (`focus.kept`) until the first rebuild after the cut. An unknown key of the `collapse`
+  block is refused with a message. With the block, `reconnect.post_cut_stops` hands over to
+  `events.post_cut_events` (without it the cut's stops are untouched): invalid states first (chains
+  not two, crossed nodes or touching chains raise, spline contact, and on a fresh mesh a tracked
+  liquid neck below `liquid.resolution h_loc`, `liquid-neck-unresolved`, the guard, the driver's
+  curved-element check passed as `invalid`; on a mesh a step has run on the guard comes last, after
+  the events, as in the cut's own stops), then the end of the window (`bubble-vanishing` with
+  `window_end`), then the events as requests (`event-request`: `kind`, `class`, the `handler` of its
+  class, `events.HANDLERS`, none for `L-unhandled`) in the order `piercing` (W1, the bubble's tips
+  within `delta`), `liquid-neck` (L, landed at `r_n <= eps_d s`, nearest first; `L-unhandled`
+  without a single head or with one beyond `max_head_volume s^3`, and with liquid events off at the
+  cut's second-pinch test, its head never classified), a closing fold, below `max(kappa_g delta,
+  fold_stop_elements h_elem)`, among the fold of each chain and that of each tracked head
+  (`events.head_fold`, so that a closer fold elsewhere on its chain hides none): first one that
+  reaches the head of a tracked neck with `r_n <= eps_max s` on either chain (`a-head`,
+  `L-unhandled` for a head too large; the narrowest `r_n/s` first), then one at the scale of the
+  mesh (`contact` `kink`), no event but the cut's own `self-contact-approach` or
+  `annular-contact-approach`, then the groove closest to its limit (`groove`), then `gas-neck`,
+  `bridge-closing`, `chain-contact`. Heads and tracked necks: `events.head_sides`, `liquid_necks`,
+  `head_of_fold`. The driver has no handler yet, so every event is a resumable stop
+  (`event-unhandled`, event number `k`) with the dump of the state before it
   (`states/precut_e<k>.dump`, `cut_stage` `precut-event`, the event under `event`) besides the end
-  state; a continuation from it is a post-cut restart from which the keys of every class apply
-  anew (`events.EventSettings.refused_changes`), the events before it staying as made. The
-  tests of the branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names
-  their run directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k`
-  cover it by default. After the cut the driver reads its limits through accessors that return the
-  collapse's own value before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`,
-  `_fold_stop`, `_neck_limit`): `post.h_floor` (focus floor, feature regions, guard, kink regions,
-  the open chain's neck limit), `post.rise_tol`, `post.dt_min`, `gap.kappa_g delta` (also the groove
-  gaps of `chains.txt`), `post.neck_floor` and `post.neck_elements_per_scale` (the neck regions of
+  state; a continuation from it is a post-cut restart from which the keys of every class apply anew
+  (`events.EventSettings.refused_changes`), the events before it staying as made. The tests of the
+  branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run
+  directories (`os.pathsep`-separated); synthetic states scaled with `delta` by `2^-k` cover it by
+  default. After the cut the driver reads its limits through accessors that return the collapse's
+  own value before the cut and without the block (`_h_floor`, `_rise_tol`, `_dt_min`, `_fold_stop`,
+  `_neck_limit`): `post.h_floor` (focus floor, feature regions, guard, kink regions, the open
+  chain's neck limit), `post.rise_tol`, `post.dt_min`, `gap.kappa_g delta` (also the groove gaps of
+  `chains.txt`), `post.neck_floor` and `post.neck_elements_per_scale` (the neck regions of
   `reconnect.feature_regions`; liquid events need `post.neck_floor`, without which the region of a
   neck stays at the cut's focus size and cannot follow it to its landing below the cut radius);
-  `post.open_neck_stop` false skips the open chain's neck stop. At
-  the cut and at each restart after it the driver with the block sets oomph-lib's smallest step
-  (`pb.DTSF_minimum_dt`) to `post.minimum_dt` or 1e-3 times its step-size floor
-  (`CollapseDriver._lower_minimum_dt`, `minimum_dt` in the leg, with `minimum_dt_ulps`, that step
-  over the spacing of doubles at the leg's time), never above oomph-lib's default and at most half
-  the step-size floor after the cut (`events.minimum_dt_after_cut`, refused before any output and
-  where the driver is made: a step failing at the floor must still be halved), never before the cut, where
-  `classify_failure` reads oomph-lib's message at 1e-12; at 1e-12 an accepted step below 2.5e-13
-  ends the solve and a failed one below 2e-12 is not halved (`testCases/test_events_fem.py`).
+  `post.open_neck_stop` false skips the open chain's neck stop. At the cut and at each restart after
+  it the driver with the block sets oomph-lib's smallest step (`pb.DTSF_minimum_dt`) to
+  `post.minimum_dt` or 1e-3 times its step-size floor (`CollapseDriver._lower_minimum_dt`,
+  `minimum_dt` in the leg, with `minimum_dt_ulps`, that step over the spacing of doubles at the
+  leg's time), never above oomph-lib's default and at most half the step-size floor after the cut
+  (`events.minimum_dt_after_cut`, refused before any output and where the driver is made: a step
+  failing at the floor must still be halved), never before the cut, where `classify_failure` reads
+  oomph-lib's message at 1e-12; at 1e-12 an accepted step below 2.5e-13 ends the solve and a failed
+  one below 2e-12 is not halved (`testCases/test_events_fem.py`).
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the

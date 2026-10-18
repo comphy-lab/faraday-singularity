@@ -383,82 +383,82 @@ a reconnected result counts only if the jets do not depend on `delta`.
 changes of topology that follow it. It has three parts: `liquid`, the necks on the liquid side at
 the roots of the jets the cut launched; `gap`, the closing folds of either chain (a gas groove
 narrowing); and `post`, the limits, floors and mesh sizes of the run after the cut, each by default
-the collapse's own. A case without the block runs exactly as before the block existed: the tests
-run a cut, the run after it with rebuilds and dumps, and a restart from one of those dumps, against
-the source of commit `1b65916`, to the byte. That finite-element run meets no neck, no jet at the
-bubble's bottom and no stop but its step limit; stand-in problems with prescribed chains cover
-those against the same source (`testCases/test_events_legacy.py`). A replay of a production run
-after its cut remains the full check. The block applies after the cut only, and needs a
-`reconnect` block: a cut restart may add, drop or change it together with the reconnect block
+the collapse's own. A case without the block runs exactly as before the block existed: the tests run
+a cut, the run after it with rebuilds and dumps, and a restart from one of those dumps, against the
+source of commit `1b65916`, to the byte. That finite-element run meets no neck, no jet at the
+bubble's bottom and no stop but its step limit; stand-in problems with prescribed chains cover those
+against the same source (`testCases/test_events_legacy.py`). A replay of a production run after its
+cut remains the full check. The block applies after the cut only, and needs a `reconnect` block: a
+cut restart may add, drop or change it together with the reconnect block
 (`run_case.CUT_EVENTS_DERIVED_KEYS`), a continuation from a dump written after the cut may add or
 change it (`run_case.POST_CUT_DERIVED_KEYS`), and a run from the start or an ordinary restart that
 carries it is refused before any output. The dumps written after the cut with the block record it
 (`events_settings`), the events made (`events`) and the legs of the run (`legs`, also as events
-`leg`: the cut and each restart, with the step and time it starts at, the source commit, the hash
-of the block, the keys in which it differs from the block the state was written with, and the
-limits and floors it runs with, resolved, also in units of `delta` and `delta^2`, `limits`, so that
-a study in `delta` shows which of them it scaled with `delta`) and whether a step has run on its
-mesh since it was built (`mesh_fresh`): a restart from a mesh no step
-has run on checks it as a fresh mesh, as the run that dumped it did, unless the restart changes a
-key that sizes the mesh. Such a dump continues only under a case with the block. The keys of `liquid` and of `gap` are the keys of
-a class of events: once an event of the class has been made they may not change, except in a
-restart from the state before an event (`precut_e<k>`), from which they apply anew; the keys of
-`post` may change at any restart. With `post.bubble_bottom_sizing` `frozen` the bubble's bottom,
-far from the cut, is meshed never coarser than `post.bubble_bottom_size` rather than never
-coarser than at the landing (`kept`, the default), so that the bubbles of a study in `delta` are
-meshed alike there; within a few of the cut's tip sizes (`tip_size delta`) of the bottom's tip the
-cut's sizing of every end on the axis still applies, and the cut's own mesh has the size the cut
-keeps there from the landing until the first rebuild after the cut.
+`leg`: the cut and each restart, with the step and time it starts at, the source commit, the hash of
+the block, the keys in which it differs from the block the state was written with, and the limits
+and floors it runs with, resolved, also in units of `delta` and `delta^2`, `limits`, so that a study
+in `delta` shows which of them it scaled with `delta`) and whether a step has run on its mesh since
+it was built (`mesh_fresh`): a restart from a mesh no step has run on checks it as a fresh mesh, as
+the run that dumped it did, unless the restart changes a key that sizes the mesh. Such a dump
+continues only under a case with the block. The keys of `liquid` and of `gap` are the keys of a
+class of events: once an event of the class has been made they may not change, except in a restart
+from the state before an event (`precut_e<k>`), from which they apply anew; the keys of `post` may
+change at any restart. With `post.bubble_bottom_sizing` `frozen` the bubble's bottom, far from the
+cut, is meshed never coarser than `post.bubble_bottom_size` rather than never coarser than at the
+landing (`kept`, the default), so that the bubbles of a study in `delta` are meshed alike there;
+within a few of the cut's tip sizes (`tip_size delta`) of the bottom's tip the cut's sizing of every
+end on the axis still applies, and the cut's own mesh has the size the cut keeps there from the
+landing until the first rebuild after the cut.
 
-With the block, the stops of a state after the cut come in three ranks
-(`events.post_cut_events`). A state that is not valid stops the run: the chains not two, a spline
-through the nodes that contacts itself, on a freshly built mesh a tracked liquid neck narrower than
-`liquid.resolution` (4) element lengths at it (`liquid-neck-unresolved`), the guard of the interface
-and the check of the curved elements; on a mesh a step has run on, the guard comes last, after the
-events, as in the cut's own stops (an event's handler rebuilds the mesh). The bubble emptying (below `bubble_stop` of its volume at the
-cut) ends the window (`bubble-vanishing`, with `window_end`). Every change of topology is then an
-event, in this order: the bubble's two tips within `delta` of each other, the downward jet piercing
-the bubble (`piercing`); a landed liquid neck (`liquid-neck`); a closing fold, one that lands the
-neck of a head it reaches (`a-head`) on either chain before any closing groove (`groove`, the one
-closest to its limit), each head's own fold searched apart from the fold of its chain so that a
-closer fold elsewhere hides none; a gas neck (`gas-neck`); the bridge closing (`bridge-closing`)
-and the chains approaching (`chain-contact`). A fold at the scale of the mesh (`contact` `kink`)
-is no event: it stops the run as the cut's own stops do. A neck on the liquid side is followed from
-`liquid.track_depth` (0.05) below its shoulder. Its head is the side of it whose far end lies on the
-axis, that holds neither the wall end nor the bubble's widest point, lies on one side of the neck's
-height and bounds a simple section of at most `liquid.max_head_volume` (20) times the cube of its
-largest radius `s`; the neck lands once `r_n <= liquid.eps_d s` (0.2), the one nearest its landing
-first. A fold of either chain closes at `max(gap.kappa_g delta, fold_stop_elements h_elem)`
-(`kappa_g` 0.05; null for the collapse's absolute `fold_stop`), and one that reaches the head of a
-tracked neck lands that neck at once if `r_n <= liquid.eps_max s` (0.5). With `liquid.enabled`
-false a liquid neck is met at the cut's own test of a second pinch-off instead. Each event names
-the handler of its class (`events.HANDLERS`); a landed neck without a single head or with one too
-large, or met with liquid events off, whose head is then never classified, is of class
-`L-unhandled`, which has none. No event has a handler yet: the run stops on the first
-(`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of its class)
-and keeps the state before it as
-`states/precut_e<k>.dump` (`cut_stage` `precut-event`), besides the state it ends on; a
-continuation from it meets the event again, and its handler once one exists.
+With the block, the stops of a state after the cut come in three ranks (`events.post_cut_events`). A
+state that is not valid stops the run: the chains not two, a spline through the nodes that contacts
+itself, on a freshly built mesh a tracked liquid neck narrower than `liquid.resolution` (4) element
+lengths at it (`liquid-neck-unresolved`), the guard of the interface and the check of the curved
+elements; on a mesh a step has run on, the guard comes last, after the events, as in the cut's own
+stops (an event's handler rebuilds the mesh). The bubble emptying (below `bubble_stop` of its volume
+at the cut) ends the window (`bubble-vanishing`, with `window_end`). Every change of topology is
+then an event, in this order: the bubble's two tips within `delta` of each other, the downward jet
+piercing the bubble (`piercing`); a landed liquid neck (`liquid-neck`); a closing fold, one that
+lands the neck of a head it reaches (`a-head`) on either chain before any closing groove (`groove`,
+the one closest to its limit), each head's own fold searched apart from the fold of its chain so
+that a closer fold elsewhere hides none; a gas neck (`gas-neck`); the bridge closing
+(`bridge-closing`) and the chains approaching (`chain-contact`). A fold at the scale of the mesh
+(`contact` `kink`) is no event: it stops the run as the cut's own stops do. A neck on the liquid
+side is followed from `liquid.track_depth` (0.05) below its shoulder. Its head is the side of it
+whose far end lies on the axis, that holds neither the wall end nor the bubble's widest point, lies
+on one side of the neck's height and bounds a simple section of at most `liquid.max_head_volume`
+(20) times the cube of its largest radius `s`; the neck lands once `r_n <= liquid.eps_d s` (0.2),
+the one nearest its landing first. A fold of either chain closes at `max(gap.kappa_g delta,
+fold_stop_elements h_elem)` (`kappa_g` 0.05; null for the collapse's absolute `fold_stop`), and one
+that reaches the head of a tracked neck lands that neck at once if `r_n <= liquid.eps_max s` (0.5).
+With `liquid.enabled` false a liquid neck is met at the cut's own test of a second pinch-off
+instead. Each event names the handler of its class (`events.HANDLERS`); a landed neck without a
+single head or with one too large, or met with liquid events off, whose head is then never
+classified, is of class `L-unhandled`, which has none. No event has a handler yet: the run stops on
+the first (`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of
+its class) and keeps the state before it as `states/precut_e<k>.dump` (`cut_stage` `precut-event`),
+besides the state it ends on; a continuation from it meets the event again, and its handler once one
+exists.
 
-The limits and floors of the run after the cut are the block's `post` keys where set, the
-collapse's own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the
-smallest focus and feature size, the floor of the interface guard and its kink regions, and the open
-chain's neck stop through `neck_stop_elements h_floor`), `rise_tol` (the rise that makes a jet),
-`dt_min` (the step-size floor), and for the regions of the necks `neck_floor` (the cut's focus size
-without it; liquid events need it set, so that a neck can be followed below the cut radius to its
-landing) and `neck_elements_per_scale`
-(`reconnect.elements_per_scale` without it). The fold limit after the cut, also that of the groove
-gaps `chains.txt` reports, is `gap.kappa_g delta`. With `post.open_neck_stop` false the open chain's
-own neck stop (`collapse.neck_stop`) is off after the cut, as liquid events need: its liquid neck is
-then followed as an event. At the cut and at every restart after it the block also sets oomph-lib's
-smallest step (`DTSF_minimum_dt`, 1e-12 by default) to `post.minimum_dt`, or 1e-3 times the
-step-size floor without it, never above the default, and records it in the leg, also in units of
-the spacing of doubles at the leg's time (`minimum_dt_ulps`). A `minimum_dt` above the default, or
-above half the step-size floor after the cut (a step failing at the floor would not be halved and
-would end the run as a failed one), is refused before any output. oomph-lib gives up on a step below it, and
-also after an accepted step whose next candidate, four times the step, would fall below it, so that
-at the steps a small cut radius needs the default would end the run on a converged step. Before the
-cut it keeps the default, on which the classification of a failure before a cut relies.
+The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
+own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus
+and feature size, the floor of the interface guard and its kink regions, and the open chain's neck
+stop through `neck_stop_elements h_floor`), `rise_tol` (the rise that makes a jet), `dt_min` (the
+step-size floor), and for the regions of the necks `neck_floor` (the cut's focus size without it;
+liquid events need it set, so that a neck can be followed below the cut radius to its landing) and
+`neck_elements_per_scale` (`reconnect.elements_per_scale` without it). The fold limit after the cut,
+also that of the groove gaps `chains.txt` reports, is `gap.kappa_g delta`. With
+`post.open_neck_stop` false the open chain's own neck stop (`collapse.neck_stop`) is off after the
+cut, as liquid events need: its liquid neck is then followed as an event. At the cut and at every
+restart after it the block also sets oomph-lib's smallest step (`DTSF_minimum_dt`, 1e-12 by default)
+to `post.minimum_dt`, or 1e-3 times the step-size floor without it, never above the default, and
+records it in the leg, also in units of the spacing of doubles at the leg's time
+(`minimum_dt_ulps`). A `minimum_dt` above the default, or above half the step-size floor after the
+cut (a step failing at the floor would not be halved and would end the run as a failed one), is
+refused before any output. oomph-lib gives up on a step below it, and also after an accepted step
+whose next candidate, four times the step, would fall below it, so that at the steps a small cut
+radius needs the default would end the run on a converged step. Before the cut it keeps the default,
+on which the classification of a failure before a cut relies.
 
 `simulationCases/reconnect_prototype.py` is a development tool beside this: it cuts a landing state
 at `--delta` or `--delta-ratio` times its neck radius, with options that override the case's
