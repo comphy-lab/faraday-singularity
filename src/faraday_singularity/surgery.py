@@ -1225,9 +1225,10 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        settings the request was made under; ``precut_e<k>`` is kept (``cut_stage``
        ``precut-event``, the request as its ``event``).
     2. **Cap** (``events.truncate_chain``): the head removed, the stump closed at the neck by the
-       half-spheroid of ``liquid.cap_height`` (tried once more at ``events.CAP_RETRY_HEIGHT`` if
-       refused), ``elements_per_scale`` elements per neck radius, refused unless its hard checks
-       hold; and the plan for the transfer (``events.build_liquid_plan``).
+       half-spheroid of ``liquid.cap_height`` (tried once more at ``events.CAP_RETRY_HEIGHT`` neck
+       radii if refused, unless that is its height), ``elements_per_scale`` elements per neck
+       radius, refused unless its hard checks hold; and the plan for the transfer
+       (``events.build_liquid_plan``).
     3. **Budgets before**: the global ones (``cut_observables``), within the box of radius
        ``max(liquid.box_radius delta, 2 L_rem)`` about the neck the volume and the area of the
        interface from the polylines (:func:`box_polyline_budgets`) and the momentum and kinetic

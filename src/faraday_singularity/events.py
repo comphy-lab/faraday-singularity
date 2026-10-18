@@ -114,16 +114,16 @@ class LiquidEventSettings:
 
     The cut of a neck (``surgery.liquid_cut``) removes the head and closes the stump by a
     half-spheroid (``cap``, ``hemispheroid``) of height ``cap_height`` neck radii (one, a half
-    sphere; refused caps are tried once at ``CAP_RETRY_HEIGHT``); the velocity of the cap's nodes is
-    the old bulk's at their places (``cap_fill`` ``sample``), or what pyoomph's transfer gives them
-    (``transfer``, from the old surface near the neck: an arm only); with ``projection`` the
-    pressure-impulse projection of the cut follows, and the first step after it is ``restart``
-    (``reconnect.restart`` when null). The budgets of the cut are taken within ``max(box_radius
-    delta, 2 L_rem)`` of the neck, ``L_rem`` the reach of the removed head along the axis, and the
-    limit of each is a multiple of the head's own but never below a multiple of the noise of the box
-    in an ordinary rebuild (``surgery.NOISE_FLOORS``): ``sigma_V`` of its liquid volume,
-    ``sigma_Pz`` of its axial momentum, ``sigma_KE`` of its kinetic energy, in the solver's units,
-    none (zero) until calibrated."""
+    sphere; a refused cap is tried once more at ``CAP_RETRY_HEIGHT`` neck radii, unless that is its
+    height); the velocity of the cap's nodes is the old bulk's at their places (``cap_fill``
+    ``sample``), or what pyoomph's transfer gives them (``transfer``, from the old surface near the
+    neck: an arm only); with ``projection`` the pressure-impulse projection of the cut follows, and
+    the first step after it is ``restart`` (``reconnect.restart`` when null). The budgets of the cut
+    are taken within ``max(box_radius delta, 2 L_rem)`` of the neck, ``L_rem`` the reach of the
+    removed head along the axis, and the limit of each is a multiple of the head's own but never
+    below a multiple of the noise of the box in an ordinary rebuild (``surgery.NOISE_FLOORS``):
+    ``sigma_V`` of its liquid volume, ``sigma_Pz`` of its axial momentum, ``sigma_KE`` of its
+    kinetic energy, in the solver's units, none (zero) until calibrated."""
     enabled: bool = False
     eps_d: float = 0.2
     eps_max: float = 0.5
@@ -738,8 +738,8 @@ CAP_ANGLE_NODES = 4  # interior angles are read over the splice and this many no
 CAP_RETRY_HEIGHT = 0.5  # the height of the cap of the one retry of a refused cap, in neck radii
 # from the neck the spacing of the cap's points grows (or shrinks) by at most this factor per point
 # from the neck's node spacing to its own: the uniform Catmull-Rom spline a mesh is built on loops
-# where the spacing of its points jumps (on the stop states of the runs after a cut the nodes at
-# the neck lie 0.010-0.014 r_n apart, ten times closer than a cap at r_n/8)
+# where the spacing of its points jumps, and the nodes at a neck can lie many times closer than a
+# cap at r_n / elements_per_scale
 CAP_GROWTH = 1.25
 
 

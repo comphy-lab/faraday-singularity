@@ -14,7 +14,7 @@ radial inflow that is not solenoidal.
 * the identity of the box's cutoff in the projection, on the manufactured field of
   ``test_reconnect_fem.py`` (``u~ = u_s + grad(phi)``);
 * two cuts, one on each chain, each landed as the events branch requests it: the transfer leaves
-  unlocated exactly the interface nodes the geometry predicts, all on the cap, and no other; the
+  unlocated as many interface nodes as the geometry predicts, every predicted one on the cap; the
   stump's tip on the axis is the only node without a value; the chains and the axis spans are those
   planned; the budgets close (the removed volume, momentum and kinetic energy against the box's,
   the projection's change of momentum and energy there, the area); steps after both, and a restart
@@ -589,9 +589,10 @@ def test_each_cut_removes_its_head_and_rebuilds_the_mesh_as_planned(jets):
 
 
 def test_the_transfer_leaves_unlocated_only_the_cap_it_predicts(jets):
-    """pyoomph's transfer leaves unlocated exactly the new interface nodes the geometry predicts
-    (farther than half an element size from every old element), all of them on the cap, none of
-    the bulk or the axis, and only the stump's tip on the axis without a value."""
+    """pyoomph's transfer leaves unlocated as many new interface nodes as the geometry predicts
+    (those farther than half an element size from every old element its locator tries; pyoomph
+    reports the count, not the nodes), every predicted one on the cap, none of the bulk or the
+    axis, and only the stump's tip on the axis without a value."""
     for rec in (jets["record1"], jets["record2"]):
         tr = rec["transfer"]
         assert tr["reported_unlocated"] == tr["predicted_unlocated"] > 0

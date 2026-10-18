@@ -191,9 +191,10 @@ add a second top-level `cases/` tree.
   `pinch`), and report the result with that `delta` study. `simulationCases/reconnect_prototype.py`
   is a development wrapper of the same cut and driver (its own manifest schema; no figures, no
   continuation). The cut relies on private names of the pinned pyoomph release, pinned by
-  `testCases/test_reconnect_fem.py`; check them when the pin moves. Planner tests on stored neck
-  profiles run when `FARADAY_RECONNECT_PROFILES` names their directory; a synthetic slender thread
-  covers the same planner classes by default.
+  `testCases/test_reconnect_fem.py`, and the cut of a liquid neck on more of them (the parking of
+  its plan), pinned by `testCases/test_liquid_cut_fem.py`; check them when the pin moves. Planner
+  tests on stored neck profiles run when `FARADAY_RECONNECT_PROFILES` names their directory; a
+  synthetic slender thread covers the same planner classes by default.
 - The events after the cut are set by `collapse.reconnect_events` (`events.EventSettings`: `liquid`,
   `gap`, `post`), a block beside the cut's own that needs a `reconnect` block; without it a run is
   the same to the byte as at 1b65916 (`testCases/test_events_fem.py`: a cut of the synthetic necked
