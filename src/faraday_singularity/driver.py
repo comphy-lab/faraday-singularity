@@ -276,9 +276,9 @@ other event, the event after ``max_events``, one the cascade test of its tip jud
 (``events.CascadeMonitor``), a cut refused and one whose hard budgets do not close it stops
 resumably, with the dump of the state before the event (``precut_e<k>``) and the record of the
 event (``events/event_<k>.json``, :meth:`CollapseDriver._write_stop_record`), as every event made
-has its own. ``events.txt`` holds a row per event made. The dumps of the events are kept as ``post.keep_event_dumps`` says, and with
-``post.prune_gmsh`` the meshes no dump refers to are deleted after every dump and every event
-(:meth:`CollapseDriver._prune_meshes`).
+has its own. ``events.txt`` holds a row per event made. The dumps of the events are kept as
+``post.keep_event_dumps`` says, and with ``post.prune_gmsh`` the meshes no dump refers to are
+deleted after every dump and every event (:meth:`CollapseDriver._prune_meshes`).
 
 Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore` restores
 (``surgery.restore_cut``), only into a driver whose reconnect settings are those of the cut but for
