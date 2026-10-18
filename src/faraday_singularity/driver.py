@@ -2136,7 +2136,8 @@ class CollapseDriver:
         """Under ``post.keep_event_dumps`` ``first<N>-last<M>`` (``events.event_dumps_kept``,
         over the events of every leg): delete the dumps of the events made that the policy no
         longer keeps, of those this run wrote (``states/precut_e<k>``, ``postcut_e<k>``), noting
-        them in the event's record (``dumps.dropped``). Returns the dumps deleted."""
+        them in the event's record (``dumps.dropped``), in the one the dumps keep and in its file.
+        Returns the dumps deleted."""
         policy = event_dump_policy(self.events.post.keep_event_dumps)
         if policy is None:
             return []
@@ -2145,6 +2146,7 @@ class CollapseDriver:
         out = []
         for e in made:
             k = int(e["k"])
+            dropped = False
             for stage in ("precut", "postcut"):
                 path = self.outdir / "states" / f"{stage}_e{k:03d}.dump"
                 if stage in kept.get(k, ()) or not path.is_file():
@@ -2154,6 +2156,9 @@ class CollapseDriver:
                 dumps = e.setdefault("dumps", {})
                 dumps["dropped"] = sorted(set(dumps.get("dropped") or []) | {stage})
                 out.append(str(path))
+                dropped = True
+            if dropped:
+                self._rewrite_event_file(e, ("dumps",))
         self._dumps_dropped += len(out)
         return out
 
@@ -2307,16 +2312,21 @@ class CollapseDriver:
                   "v_ret": g.get("v_ret"), "V": g.get("V")}
         self._drops.write("\t".join(_table_cell(values.get(c)) for c in DROP_COLUMNS) + "\n")
 
-    def _rewrite_event_file(self, rec: dict):
-        """Put an event's ghost, as the run follows it, into its record's file
-        (``events/event_<k>.json``), where this run wrote it, the polygon the file alone holds
-        kept."""
+    def _rewrite_event_file(self, rec: dict, keys: tuple[str, ...] = ("ghost",)):
+        """Put the ``keys`` of an event's record as the run keeps it (its ghost as the run follows
+        it, the dumps the policy deleted) into the record's file (``events/event_<k>.json``), where
+        this run wrote it, the ghost's polygon, which the file alone holds, kept."""
         path = self.outdir / "events" / f"event_{int(rec['k']):03d}.json"
         if not path.is_file():  # made in an earlier leg, in its own run directory
             return
         full = json.loads(path.read_text())
-        full["ghost"] = {**rec["ghost"], **({"polygon": full["ghost"]["polygon"]}
-                                            if "polygon" in (full.get("ghost") or {}) else {})}
+        for key in keys:
+            if key == "ghost":
+                full["ghost"] = {**rec["ghost"],
+                                 **({"polygon": full["ghost"]["polygon"]}
+                                    if "polygon" in (full.get("ghost") or {}) else {})}
+            else:
+                full[key] = rec.get(key)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(full, indent=1) + "\n")
         tmp.replace(path)

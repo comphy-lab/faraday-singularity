@@ -579,6 +579,17 @@ def test_the_dumps_of_the_events_are_kept_as_the_policy_says(tmp_path, monkeypat
     assert all(e["dumps"]["dropped"] == ["postcut", "precut"] for e in made[1:-1])
     assert "dropped" not in made[-1]["dumps"]
     assert out["events"]["dumps_dropped"] == 1 + 2 * (len(made) - 2)
+    # the record's file says so too, as the table of the events reads it, its ghost kept
+    files = [json.loads((tmp_path / "policy" / "events" / f"event_{e['k']:03d}.json")
+                        .read_text()) for e in made]
+    assert [f["dumps"] for f in files] == [e["dumps"] for e in made]
+    assert all(f["ghost"]["polygon"] for f in files)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "postProcess"))
+    import event_table
+
+    rows = event_table.event_rows(tmp_path / "policy")
+    assert [r["dumps_dropped"] for r in rows] == (["postcut"] + ["postcut precut"]
+                                                  * (len(made) - 2) + [""])
     drv, out, _ = _run(tmp_path / "all", monkeypatch, RegrowingHead(period=3e-6), max_steps=20)
     assert len(list((tmp_path / "all" / "states").glob("p*cut_e*.dump"))) == 2 * len(drv.pb.events)
     assert out["events"]["dumps_dropped"] == 0

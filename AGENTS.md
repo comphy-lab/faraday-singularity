@@ -285,9 +285,9 @@ add a second top-level `cases/` tree.
   removals' since the gas cut, `CollapseDriver._removed`, and the sums; the volume and the momentum
   of each removal are hard checks of its cut, within its box). The dumps of events that
   `post.keep_event_dumps` no longer keeps are deleted as events come
-  (`CollapseDriver._drop_event_dumps`, `dumps.dropped` in the record), and with `post.prune_gmsh`
-  the meshes of `_gmsh` that no dump of the run directory or of the driver's `states` refers to
-  (pyoomph's `get_state_file_mesh_files`) and that the problem's templates do not hold, after every
+  (`CollapseDriver._drop_event_dumps`, `dumps.dropped` in the record and its file), and with
+  `post.prune_gmsh` the meshes of `_gmsh` that no dump of the run directory or of the driver's
+  `states` refers to (pyoomph's `get_state_file_mesh_files`) and that the problem's templates do not hold, after every
   rotating dump and every event (`CollapseDriver._prune_meshes`, none where a dump cannot be read;
   `testCases/test_events_fem.py` restarts the dumps kept in new processes). Every other event is a
   resumable stop with the dump of the state before it (`states/precut_e<k>.dump`, `cut_stage`
