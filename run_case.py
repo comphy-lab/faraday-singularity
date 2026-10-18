@@ -85,7 +85,10 @@ refused before any output. A state written with the block continues only under a
 the keys of a class of events of which the state has made one must be those it recorded, unless the
 state is the one before an event (``precut_e<k>``), from which they apply anew
 (``_check_events``). ``parameters.json`` and the manifest record the block (``reconnect_events``).
-An unknown key of the ``collapse`` block is refused with a message before any output.
+An unknown key of the ``collapse`` block is refused with a message before any output, as is an
+invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
+or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
+step-size floor after the cut (``events.minimum_dt_after_cut``).
 """
 
 from __future__ import annotations

@@ -216,6 +216,8 @@ def test_the_precut_state_of_a_cut_is_cut_again_under_a_block_added_changed_or_d
 @pytest.mark.parametrize("collapse, message", [
     ({"reconnect_events": {"post": {"courant_mode": "ale"}}}, "post: unknown key"),
     ({"reconnect_events": {"liquid": {"enabled": True}}}, "open_neck_stop false"),
+    ({"reconnect_events": {"liquid": {"enabled": True}, "post": {"open_neck_stop": False}}},
+     "post.neck_floor"),
     ({"reconnect_events": []}, "must be an object"),
     ({"reconnect_events": {"post": {"minimum_dt": 9e-13}}}, "at most half the step-size floor"),
     ({"fold_stopp": 1e-4}, "collapse: .*fold_stopp"),
