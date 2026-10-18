@@ -1071,7 +1071,13 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
       larger of its jet's region and the one the landing resolved, within its half of the bubble.
       With ``bubble_bottom_sizing`` ``frozen`` (the events block's ``post``) the size it may not
       exceed is ``bubble_bottom_size`` instead of the landing's, whatever the landing state: the
-      bubbles of a study in ``delta`` are then meshed alike there, far from the cut.
+      bubbles of a study in ``delta`` are then meshed alike there, far from the cut, but for two
+      exceptions. The cut's tip attractor (``h_tip + grading d``, ``h_tip`` the cut's
+      ``tip_size delta``), which the mesh template sets at every end of a chain on the axis, the
+      bubble's bottom included, still makes the mesh finer near the bottom's tip where ``h_tip``
+      lies below the frozen size, within a few tip sizes of it; and the cut's own rebuild, which
+      this function does not size, meshes the bottom at the landing's size, the frozen size
+      applying from the first rebuild after the cut (by the bounded factors of the rebuilds).
     * Each neck of either chain: ``r_n/elements_per_scale``, floored at the cut's focus size, within
       ``focus_extent r_n`` of it; with the events block's ``post`` at ``neck_elements_per_scale``
       elements per neck radius and floored at ``neck_floor``, so that a neck can be followed below

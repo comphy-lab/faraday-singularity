@@ -143,7 +143,10 @@ class PostCutSettings:
     (``collapse.neck_stop``), which liquid events need.
     ``bubble_bottom_sizing`` ``frozen`` meshes the bubble's bottom (far from the cut) never coarser
     than ``bubble_bottom_size`` instead of never coarser than the landing state's focus there
-    (``kept``), so that the bubbles of a study in ``delta`` are meshed alike."""
+    (``kept``), so that the bubbles of a study in ``delta`` are meshed alike, but within a few of
+    the cut's tip sizes (``tip_size delta``) of the bottom's tip on the axis, where the cut's tip
+    attractor still applies, and on the mesh of the cut itself, which keeps the landing's size
+    until the first rebuild after it (``reconnect.feature_regions``)."""
     open_neck_stop: bool = True
     h_floor: float | None = None
     neck_floor: float | None = None
