@@ -252,8 +252,8 @@ def test_with_the_block_the_meshes_no_dump_refers_to_are_pruned_and_every_dump_r
     assert results["kept"]["events"]["meshes_pruned"] == 0
     assert results["pruned"]["events"]["meshes_pruned"] > 0
     meshes, referred = _mesh_files(runs["pruned"])
-    first = (runs["pruned"] / "_gmsh" / "FaradayCylinderMesh.msh").resolve()
-    assert meshes - {first} <= referred <= meshes
+    first = {p for p in meshes if "_REMESH_" not in p.name}  # the problem's first mesh
+    assert len(first) == 1 and meshes - first <= referred <= meshes
     all_meshes, _ = _mesh_files(runs["kept"])
     assert len(meshes) < len(all_meshes)
     assert not [p for p in (runs["pruned"] / "_gmsh").iterdir()
