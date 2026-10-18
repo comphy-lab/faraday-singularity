@@ -1213,7 +1213,10 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
                on_made=None, log=print) -> dict:
     """Cut the liquid neck an event request lands (``events.post_cut_events``: ``liquid-neck``,
     class ``L``, or ``a-head``, class ``A-head``), the ``k``-th event after the gas cut, and
-    project.
+    project. ``elements_per_scale`` is the run's after the cut (``reconnect.elements_per_scale``,
+    or the collapse's without it: a key of the cut, as the regions of its features have it) and
+    ``h_floor`` the run's floor of the sizes after it (``post.h_floor``, a key of the leg); the
+    record keeps both with the cap (``cap.elements_per_scale``, ``mesh.event_cap``).
 
     1. **Admission**: a gas cut was made (``problem.cut``), the request is of a kind and class
        this cut is for (``LIQUID_CUT_CLASSES``) and names a tracked neck of the state with a single
@@ -1379,7 +1382,7 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
         raise CutRefused(f"the cap of the liquid cut is refused at every height: {attempts}")
     summary = lc.summary()
     summary.pop("checks")
-    record["cap"].update(summary, tip=lc.tip)
+    record["cap"].update(summary, tip=lc.tip, elements_per_scale=elements_per_scale)
     record["tip"] = lc.tip
 
     stage("plan")
@@ -1424,7 +1427,8 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
         regions, grading = regions + (region,), old_focus.grading
     record["mesh"] = {"focus_before": None if old_focus is None else old_focus.to_dict(),
                       "event_cap": {"size": size, "radius": 8.0 * lc.r_n, "z": lc.z_tip_new,
-                                    "h_floor": h_floor, "h_cut": h_cut}}
+                                    "h_floor": h_floor, "h_cut": h_cut,
+                                    "elements_per_scale": elements_per_scale}}
     old_chains = [np.column_stack([segs[name]["r"], segs[name]["z"]]) for name, _ in named]
     stage("park")
     remeshing = False

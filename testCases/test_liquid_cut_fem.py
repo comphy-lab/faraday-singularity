@@ -533,6 +533,8 @@ def test_each_cut_removes_its_head_and_rebuilds_the_mesh_as_planned(jets):
         assert {c["chain"]: c["end_types"] for c in mesh["chains"]} == {
             "bubble": ["axis", "axis"], "open": ["axis", "fixed"]}
         assert mesh["event_cap"]["size"] == pytest.approx(cap["r_n"] / EPS)
+        assert cap["elements_per_scale"] == mesh["event_cap"]["elements_per_scale"] == EPS
+        assert mesh["event_cap"]["h_floor"] == CUT_KW["h_floor"]
     # the cavity's tip and the bubble's top as planned, after both cuts
     named = dict(jets["segs2"])
     assert named["open"].points[0, 1] == pytest.approx(r1["cap"]["z_tip_new"], abs=1e-12)
