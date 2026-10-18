@@ -493,6 +493,8 @@ def test_the_ghost_of_each_removed_head_is_followed_and_its_recontacts_flagged(t
     drv, out, _ = _run(tmp_path / "rest", monkeypatch, RegrowingHead(period=1e3),
                        surgery=resting, max_steps=6)
     assert drv.pb.events == [] and out["events"]["ghost_recontacts"] == {"rear": 0, "front": 0}
+    assert out["events"]["removed_total"] == {"V": 0.0, "Pz": 0.0, "KE": 0.0}
+    assert all(isinstance(v, float) for v in out["events"]["removed_total"].values())
     drv, out, _ = _run(tmp_path / "rear", monkeypatch, RegrowingHead(), surgery=resting)
     assert out["stop"]["reason"] == "max-steps" and drv.pb.events
     first = drv.pb.events[0]

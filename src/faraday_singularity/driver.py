@@ -1219,8 +1219,9 @@ class CollapseDriver:
         momentum and kinetic energy of each removed head at its cut (its record's ``removed``),
         summed, and the number of events."""
         liquid = [e for e in self._made_events() if e.get("kind") in EVENT_CLASSES["liquid"]]
-        return {"events": len(liquid), **{key: sum(float((e.get("removed") or {}).get(key) or 0.0)
-                                                   for e in liquid) for key in ("V", "Pz", "KE")}}
+        return {"events": len(liquid), **{key: sum((float((e.get("removed") or {}).get(key) or 0.0)
+                                                    for e in liquid), 0.0)
+                                          for key in ("V", "Pz", "KE")}}
 
     def _write_budget_row(self, values: dict):
         """The row of ``budget.txt`` of a step after the cut, from the values of its row of
