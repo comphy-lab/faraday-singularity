@@ -1237,9 +1237,12 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        (``CAP_FILL_DENSITY`` samples per node of the new mesh there, :func:`_cap_samples`), with
        ``cap_fill`` ``sample`` refused unless found at ``CAP_FILL_FOUND`` of them.
     4. **Remesh at once** from the plan (:func:`park_plan`, ``rmin`` the neck radius), the focus the
-       driver's with the region ``event_cap`` at the cap's tip, meshed at ``clip(r_n/
-       elements_per_scale, h_floor, h_cut)``, ``h_cut`` the gas cut's focus size. From here a
-       failure is :class:`CutFailed`. The transfer is checked (:func:`transfer_problems`): the
+       driver's with the cap's region at the cap's tip, named after the cut tip and meshed at
+       ``clip(r_n/elements_per_scale, h_floor, h_cut)``, ``h_cut`` the gas cut's focus size
+       (``mesh.event_cap``); the regions the cut tip and the cut neck had keep their sizes for this
+       mesh under the event's names (``events.event_focus_regions``, ``mesh.renamed``), so that a
+       later rebuild sizes the new tip from the cap and a new neck of the chain from its own
+       spacing. From here a failure is :class:`CutFailed`. The transfer is checked (:func:`transfer_problems`): the
        count of the interface nodes it leaves unlocated within ``UNLOCATED_SLACK`` of the count
        predicted from the geometry (``events.predict_unlocated``), every predicted one on the cap,
        none of the bulk or the axis, and at most the stump's tip on the axis without a value; the
@@ -1312,8 +1315,8 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     from dataclasses import replace
 
     from .events import (CAP_RETRY_HEIGHT, EVENT_CLASSES, PRECUT_EVENT, CapRefused,
-                         build_liquid_plan, event_neck, liquid_necks, predict_unlocated,
-                         truncate_chain)
+                         build_liquid_plan, event_focus_regions, event_neck, liquid_necks,
+                         predict_unlocated, truncate_chain)
 
     def stage(name):
         progress["stage"] = name
@@ -1419,18 +1422,23 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
 
     template = pb.get_mesh("liquid")._templatemesh
     old_focus = template.focus
-    region = FocusRegion("event_cap", size=size, r=0.0, z=lc.z_tip_new, radius=8.0 * lc.r_n)
+    # the cap's region, named after the cut tip: the region the fresh mesh's tip is sized from
+    region = FocusRegion(lc.tip, size=size, r=0.0, z=lc.z_tip_new, radius=8.0 * lc.r_n)
+    renamed = {}
     if old_focus is None:
         regions, grading = (region,), pb.mesh_settings.grading
     else:  # a focus without regions is its own axial region beside the cap's
         regions = tuple(old_focus.regions) or (FocusRegion("focus", size=old_focus.size, r=0.0,
                                                            z=0.0, radius=old_focus.radius,
                                                            axial=True),)
-        regions, grading = regions + (region,), old_focus.grading
+        regions, renamed = event_focus_regions(regions, region, k=k, chain=lc.chain, r_n=lc.r_n,
+                                               z_n=lc.z_n)
+        grading = old_focus.grading
     record["mesh"] = {"focus_before": None if old_focus is None else old_focus.to_dict(),
-                      "event_cap": {"size": size, "radius": 8.0 * lc.r_n, "z": lc.z_tip_new,
-                                    "h_floor": h_floor, "h_cut": h_cut,
-                                    "elements_per_scale": elements_per_scale}}
+                      "event_cap": {"name": region.name, "size": size, "radius": 8.0 * lc.r_n,
+                                    "z": lc.z_tip_new, "h_floor": h_floor, "h_cut": h_cut,
+                                    "elements_per_scale": elements_per_scale},
+                      "renamed": renamed}
     old_chains = [np.column_stack([segs[name]["r"], segs[name]["z"]]) for name, _ in named]
     stage("park")
     remeshing = False

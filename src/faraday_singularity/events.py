@@ -1224,6 +1224,39 @@ def build_liquid_plan(named, cut: LiquidCut, reservoir_depth: float) -> LiquidPl
     return LiquidPlan(plan=plan, table=table, chains=built, cap_zeta=(z0, z1))
 
 
+def event_focus_regions(regions, cap, *, k: int, chain: str, r_n: float,
+                        z_n: float) -> tuple[tuple, dict]:
+    """The regions of the focus of the mesh the ``k``-th event's liquid cut builds
+    (``surgery.liquid_cut``): the driver's ``regions`` (``mesh.FocusRegion``, or any dataclass with
+    ``name``, ``r``, ``z`` and ``radius``) and the cap's, ``cap``, named after the cut tip
+    (``<tip>``), with the two regions of the features the cut ends kept for this mesh under the
+    event's names: the region of the cut tip (``<tip>``, the removed head's tip) as ``<tip>_e<k>``
+    and the region of the neck of the cut chain (``neck_<chain>``) whose disc holds the cut neck
+    ``(r_n, z_n)`` as ``neck_<chain>_e<k>``. Every region keeps its size, place and radius, so the
+    event's mesh is the one the regions under their old names make; but a later rebuild, which names
+    the features of the fresh mesh (``reconnect.feature_regions``) and sizes each from the region of
+    its name in the current mesh (``driver.CollapseDriver._regions_focus``), then sizes the new tip
+    from the cap, a rebuild for distortion keeping the cap's size there, and a new neck of the chain
+    from the spacing it measures, not from the cut neck's size; no two regions share a name.
+    Returns the regions and the names changed (old to new)."""
+    from dataclasses import replace
+
+    neck = f"neck_{chain}"
+    renamed, out = {}, []
+    for g in regions:
+        cut_feature = g.name == cap.name or (g.name == neck and math.hypot(
+            float(g.r) - float(r_n), float(g.z) - float(z_n)) <= float(g.radius))
+        if cut_feature:
+            renamed[g.name] = f"{g.name}_e{int(k):03d}"
+            g = replace(g, name=renamed[g.name])
+        out.append(g)
+    out.append(cap)
+    names = [g.name for g in out]
+    if len(set(names)) != len(names):
+        raise ValueError(f"the regions of the mesh of event {k} share names: {names}")
+    return tuple(out), renamed
+
+
 # pyoomph's transfer places a new interface node on the old interface by projection onto the old
 # element nearest it, accepted within this fraction of that element's size (the larger extent of
 # its bounding box; pointlocator max_projection_offset_factor); farther from every old element it

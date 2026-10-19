@@ -169,6 +169,63 @@ def test_a_ghost_flags_the_stump_that_catches_it_and_the_far_tip_it_reaches_once
     assert [x["kind"] for x in ev.ghost_recontacts(up, 1.0, 100, {"cavity_tip": 1e3})] == ["rear"]
 
 
+# --- the regions of the mesh of an event ----------------------------------------------------------
+
+
+def test_the_mesh_of_an_event_renames_the_regions_of_the_features_its_cut_ends():
+    """The focus of an event's mesh: the driver's regions and the cap's, named after the cut tip;
+    the region the cut tip had and the neck region of its chain that holds the cut neck keep their
+    sizes, places and radii under the event's names, a neck region elsewhere on the chain and the
+    other chain's keep theirs, and no two regions share a name. On that mesh a rebuild for distortion
+    keeps the cap's size at the new tip, and the rule's rebuild sizes a new neck of the chain from
+    the spacing it measures there, not from the cut neck's size."""
+    from test_bookkeeping import _settings
+
+    from faraday_singularity.driver import CollapseDriver
+    from faraday_singularity.mesh import Focus, FocusRegion
+
+    old = (FocusRegion("cavity_tip", size=3e-3, r=0.0, z=1.0, radius=0.05),
+           FocusRegion("cavity_tip_cut", size=4e-3, r=0.0, z=1.0, radius=0.2),
+           FocusRegion("neck_open", size=1e-5, r=1e-4, z=0.95, radius=1e-3),
+           FocusRegion("neck_bubble", size=2e-5, r=1e-4, z=0.9501, radius=2e-3),
+           FocusRegion("jet_base_cavity_tip", size=1e-4, r=6e-4, z=0.94, radius=4e-3))
+    cap = FocusRegion("cavity_tip", size=1.25e-5, r=0.0, z=0.9502, radius=8e-4)
+    regions, renamed = ev.event_focus_regions(old, cap, k=3, chain="open", r_n=1e-4, z_n=0.9501)
+    assert renamed == {"cavity_tip": "cavity_tip_e003", "neck_open": "neck_open_e003"}
+    assert [g.name for g in regions] == ["cavity_tip_e003", "cavity_tip_cut", "neck_open_e003",
+                                         "neck_bubble", "jet_base_cavity_tip", "cavity_tip"]
+    for g, h in zip(old, regions):
+        assert (g.size, g.r, g.z, g.radius) == (h.size, h.r, h.z, h.radius)
+    assert regions[-1] is cap
+    # a neck region of the chain whose disc does not hold the cut neck is another neck's: kept
+    far = ev.event_focus_regions(old, cap, k=4, chain="open", r_n=1e-4, z_n=0.99)[1]
+    assert far == {"cavity_tip": "cavity_tip_e004"}
+    with pytest.raises(ValueError, match="share names"):
+        ev.event_focus_regions(old + (FocusRegion("cavity_tip_e003", size=1.0, r=0.0, z=0.0,
+                                                  radius=1.0),), cap, k=3, chain="open",
+                               r_n=1e-4, z_n=0.9501)
+    # the rebuilds on the fresh mesh, from the features measured on it
+    s = _settings(t_end=1.0, dt_max=1.0)
+    focus = Focus(size=min(g.size for g in regions), radius=0.2, grading=s.focus_grading,
+                  regions=regions)
+    fake = SimpleNamespace(s=s, pb=SimpleNamespace(
+        active_mesh_template=lambda: SimpleNamespace(focus=focus)))
+    measured = [{"name": "cavity_tip", "target": 1.3e-5, "h_max": 1.3e-5, "h_min": 1.2e-5,
+                 "r": 0.0, "z": 0.9502, "radius": 5e-4},
+                {"name": "cavity_tip_cut", "target": 4e-3, "h_max": 4e-3, "h_min": 3e-3, "r": 0.0,
+                 "z": 0.9502, "radius": 0.2},
+                {"name": "neck_open", "target": 1e-4, "h_max": 2e-4, "h_min": 1.5e-4, "r": 3e-4,
+                 "z": 0.7, "radius": 2e-3}]
+    kept = CollapseDriver._regions_focus(fake, measured, keep=True)
+    assert kept.region("cavity_tip").size == cap.size  # not the removed head's tip, 3e-3
+    assert kept.region("cavity_tip_cut").size == 4e-3
+    rule = CollapseDriver._regions_focus(fake, measured, keep=False)
+    # its target, 1e-4: bound by the coarsening of the spacing measured (1.5e-4), not of the cut
+    # neck's region (1e-5, which would hold it at 2e-5)
+    assert rule.region("neck_open").size == pytest.approx(1e-4)
+    assert s.max_coarsen_factor * 1e-5 < rule.region("neck_open").size
+
+
 # --- the events the driver makes within a run, on stand-ins ---------------------------------------
 
 LIQUID = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False, "neck_floor": 2e-6}}

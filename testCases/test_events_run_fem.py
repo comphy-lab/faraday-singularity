@@ -111,6 +111,23 @@ def test_two_events_in_one_run_are_made_and_the_run_goes_on(two_events):
         for stage in ("precut", "postcut"):
             assert Path(e["dumps"][stage]).is_file()
     assert made[1]["t"] == made[0]["t"]  # both at the cut's time, the second on the first's mesh
+    # the mesh of each event: the cap's region named after its tip, the region of the cut neck kept
+    # under the event's name with its size, place and radius (the synthetic focus has no region of
+    # a tip), no name twice
+    regions = json.loads((out / "states" / "postcut_e002.json").read_text())["focus"]["regions"]
+    names = [g["name"] for g in regions]
+    assert len(set(names)) == len(names)
+    by_name = {g["name"]: g for g in regions}
+    assert [e["mesh"]["renamed"] for e in made] == [{"neck_open": "neck_open_e001"},
+                                                    {"neck_bubble": "neck_bubble_e002"}]
+    for e in made:
+        cap = e["mesh"]["event_cap"]
+        assert cap["name"] == e["tip"]
+        assert (by_name[e["tip"]]["z"], by_name[e["tip"]]["size"]) == (cap["z"], cap["size"])
+        before = {g["name"]: g for g in e["mesh"]["focus_before"]["regions"]}
+        for old, new in e["mesh"]["renamed"].items():
+            assert {x: by_name[new][x] for x in ("size", "r", "z", "radius")} == {
+                x: before[old][x] for x in ("size", "r", "z", "radius")}
     rows = _rows(out / "events.txt")
     assert [(r["k"], r["tip"]) for r in rows] == [("1", "cavity_tip"), ("2", "bubble_top")]
     assert [(r["k"], r["status"]) for r in _rows(out / "drops.txt")][:2] == [("1", "free"),

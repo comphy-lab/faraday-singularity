@@ -470,7 +470,12 @@ refused, and tried once more at half a neck radius (`events.CAP_RETRY_HEIGHT`) u
 height. pyoomph's planner sees only the necks of the gas, so the plan of the new chains is built in
 the project (`events.build_liquid_plan`) and parked as pyoomph parks its own (`surgery.park_plan`):
 the nodes kept keep their place on the old chart and the cap takes the chart just beyond the neck,
-so that the remesh carries the fields across as through a pinch pyoomph planned. The transfer is
+so that the remesh carries the fields across as through a pinch pyoomph planned. The mesh is built
+under the driver's focus with a region at the cap (`r_n` over the elements per scale), named after
+the cut tip, while the regions the cut tip and the cut neck had keep their sizes for this mesh
+under the event's names (`<tip>_e<k>`, `neck_<chain>_e<k>`; `events.event_focus_regions`): a later
+rebuild sizes each feature from the region of its name, so it sizes the new tip from the cap, a
+rebuild for distortion included, and a new neck of the chain from its own spacing. The transfer is
 checked against the geometry (`surgery.transfer_problems`): pyoomph reports counts, not nodes, so
 its count of unlocated interface nodes must lie within two of the count of those farther than half
 an element from every old element its locator tries (`events.predict_unlocated`), every predicted

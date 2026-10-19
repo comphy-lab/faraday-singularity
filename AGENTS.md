@@ -251,8 +251,13 @@ add a second top-level `cases/` tree.
   `sigma_KE`, `surgery.NOISE_FLOORS`, none until calibrated; class keys like the rest of `liquid`):
   the head removed and the stump capped at the neck (`events.truncate_chain`, refused unless its
   hard checks hold), the mesh rebuilt from a plan built in the project (`events.build_liquid_plan`,
-  parked as pyoomph parks its own,
-  `surgery.park_plan`), the transfer checked against the geometry (`surgery.transfer_problems`:
+  parked as pyoomph parks its own, `surgery.park_plan`) under the driver's focus with the cap's
+  region, named after the cut tip, and the regions the cut tip and the cut neck had kept for that
+  mesh under the event's names (`events.event_focus_regions`: `<tip>_e<k>`, `neck_<chain>_e<k>`;
+  `mesh.renamed` in the record), so that a later rebuild, which sizes each feature from the region
+  of its name, sizes the new tip from the cap, a rebuild for distortion included, and a new neck of
+  the chain from its own spacing, not from the cut neck's size, the transfer checked against the
+  geometry (`surgery.transfer_problems`:
   pyoomph's count of unlocated interface nodes within two of the count `events.predict_unlocated`
   predicts, every predicted one on the cap, none of the bulk or the axis, at most the stump's tip
   without a value), the cap's nodes given the old bulk velocity (refused unless found at
