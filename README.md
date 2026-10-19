@@ -399,9 +399,13 @@ carries it is refused before any output. The dumps written after the cut with th
 `leg`: the cut and each restart, with the step and time it starts at, the source commit, the hash of
 the block, the keys in which it differs from the block the state was written with, and the limits
 and floors it runs with, resolved, also in units of `delta` and `delta^2`, `limits`, so that a study
-in `delta` shows which of them it scaled with `delta`) and whether a step has run on its mesh since
-it was built (`mesh_fresh`): a restart from a mesh no step has run on checks it as a fresh mesh, as
-the run that dumped it did, unless the restart changes a key that sizes the mesh. Such a dump
+in `delta` shows which of them it scaled with `delta`, and the events made before it, `events_made`;
+a leg restarted from a dump writes the record of each event made before it, as the dump holds it,
+into its own `events/`, `copy` naming its leg and the leg that made it, so that the directory of
+every leg holds the records of every event of its run up to its end) and whether a step has run on
+its mesh since it was built (`mesh_fresh`): a restart from a mesh no step has run on checks it as a
+fresh mesh, as the run that dumped it did, unless the restart changes a key that sizes the mesh.
+Such a dump
 continues only under a case with the block. The keys of `liquid` and of `gap` are the keys of a
 class of events: once an event of the class has been made they may not change, except in a restart
 from the state before an event (`precut_e<k>`), from which they apply anew; the keys of `post` may
@@ -532,8 +536,9 @@ sphere of its volume (twice its equivalent radius; a head shorter than that keep
 that its rear never passes its front: the stump's tip catching its rear and its front reaching the
 far tip of the bubble (from two steps after the cut on) are flags only,
 the bubble mattering only for the entrainment, its collapse and the budgets (`ghost.recontacts` in
-the record and its file, an event `ghost-recontact`, a row of `drops.txt`, which also has a row for
-each ghost made). Every removal enters the budget of the run: `budget.txt` has a row per step
+the record and its file in the directory of the leg that flags them, an event `ghost-recontact`, a
+row of `drops.txt`, which also has a row for each ghost made). Every removal enters the budget of
+the run: `budget.txt` has a row per step
 after the cut with the liquid of the mesh (its volume, axial momentum and kinetic energy, as in
 `chains.txt`), the volume, momentum and kinetic energy the events have removed since the gas cut
 (each head's at its cut, whose volume and momentum the cut checks against the change within its

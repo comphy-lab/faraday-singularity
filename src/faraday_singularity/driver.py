@@ -2107,9 +2107,11 @@ class CollapseDriver:
         with (``changed``; for a state written without the block, ``added``, from the block's
         defaults), oomph-lib's smallest step it sets (``minimum_dt``, :meth:`_lower_minimum_dt`;
         ``minimum_dt_ulps``, that step over the spacing of doubles at the leg's time), the limits
-        and floors it runs with (``limits``, :meth:`_leg_limits`), and, from the state before an
-        event, that event (``from_event_state``) and, where keys of a class of events change, the
-        event from which they apply anew (``event_keys_changed_at``)."""
+        and floors it runs with (``limits``, :meth:`_leg_limits`), the events made before it
+        (``events_made``), and, from the state before an event, that event (``from_event_state``)
+        and, where keys of a class of events change, the event from which they apply anew
+        (``event_keys_changed_at``). A leg restarted from a dump writes the records of the events
+        made before it into its own directory (:meth:`_copy_event_records`)."""
         st = self.state
         minimum_dt = self._lower_minimum_dt()
         leg = {"leg": len(st.legs), "start": start, "step": st.step, "time": m["time"],
@@ -2117,7 +2119,8 @@ class CollapseDriver:
                "changed": [], "added": False, "minimum_dt": minimum_dt,
                # oomph-lib's smallest step in units of the spacing of doubles at the leg's time:
                # a step of a few of them no longer advances the time by itself
-               "minimum_dt_ulps": _in_ulps(minimum_dt, m["time"]), "limits": self._leg_limits()}
+               "minimum_dt_ulps": _in_ulps(minimum_dt, m["time"]), "limits": self._leg_limits(),
+               "events_made": len(self._made_events())}
         if meta is not None:
             recorded = meta.get("events_settings")
             leg["added"] = recorded is None
@@ -2129,6 +2132,33 @@ class CollapseDriver:
                     leg["event_keys_changed_at"] = k
         st.legs.append(leg)
         self._event("leg", m, **{k: v for k, v in leg.items() if k not in ("time", "step")})
+        if meta is not None:
+            self._copy_event_records()
+
+    def _event_file(self, k) -> Path:
+        """The file of the record of event ``k`` in this leg's directory."""
+        return self.outdir / "events" / f"event_{int(k):03d}.json"
+
+    def _write_event_copy(self, rec: dict, path: Path):
+        """The record of an event made in an earlier leg, as this leg holds it, written into this
+        leg's directory (``copy``: this leg and the leg that made it, ``of_leg``); the ghost's
+        polygon is only in the file of the leg that made it."""
+        full = dict(_plain(rec), copy={"leg": len(self.state.legs) - 1, "of_leg": rec.get("leg")})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(full, indent=1) + "\n")
+        tmp.replace(path)
+
+    def _copy_event_records(self):
+        """At the start of a leg restarted from a dump: the record of each event made before it, as
+        the dump holds it (the ghost's recontacts and the dumps deleted until then), into this
+        leg's ``events/`` (:meth:`_write_event_copy`), so that the directory of every leg has the
+        record of every event of its run up to its end; a file there already (a leg in the
+        directory of the one before it) is kept."""
+        for e in self._made_events():
+            path = self._event_file(e["k"])
+            if not path.is_file():
+                self._write_event_copy(e, path)
 
     # --- after a cut: the events the run makes ------------------------------------------------
 
@@ -2343,7 +2373,8 @@ class CollapseDriver:
         ``m``, whose recontacts (``events.ghost_recontacts``: the stump catching the ghost's rear,
         its front reaching the far tip of the bubble) are flags only: each is added to the ghost
         (``recontacts``, ``status`` ``recontact``) in the record the dumps keep and in the record's
-        file, where this run wrote it, as an event ``ghost-recontact`` and a row of ``drops.txt``.
+        file in this leg's directory (:meth:`_rewrite_event_file`, a copy for an event an earlier
+        leg made), as an event ``ghost-recontact`` and a row of ``drops.txt``.
         Nothing stops: the bubble matters only for the entrainment, its collapse and the
         budgets."""
         if self.events is None or self._cut_record() is None:
@@ -2385,10 +2416,14 @@ class CollapseDriver:
 
     def _rewrite_event_file(self, rec: dict, keys: tuple[str, ...] = ("ghost",)):
         """Put the ``keys`` of an event's record as the run keeps it (its ghost as the run follows
-        it, the dumps the policy deleted) into the record's file (``events/event_<k>.json``), where
-        this run wrote it, the ghost's polygon, which the file alone holds, kept."""
-        path = self.outdir / "events" / f"event_{int(rec['k']):03d}.json"
+        it, the dumps the policy deleted) into the record's file in this leg's directory
+        (``events/event_<k>.json``), the ghost's polygon, which the file of the leg that made the
+        event alone holds, kept; for an event made in an earlier leg, whose directory this leg does
+        not write, the record as this leg holds it, as a copy (:meth:`_write_event_copy`) where
+        there is no file yet."""
+        path = self._event_file(rec["k"])
         if not path.is_file():  # made in an earlier leg, in its own run directory
+            self._write_event_copy(rec, path)
             return
         full = json.loads(path.read_text())
         for key in keys:

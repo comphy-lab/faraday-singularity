@@ -210,10 +210,14 @@ add a second top-level `cases/` tree.
   prototype, which refuses the block, are unchanged. Dumps written after the cut with it carry
   `events_settings`, `events` (the events made), `legs` (the cut and each restart: step, time,
   commit, hash of the block, changed keys, the limits and floors it runs with, resolved and in units
-  of `delta` and `delta^2`, `limits`; events `leg`) and `mesh_fresh` (no step has run on the mesh
-  since it was built: a restart checks it as a fresh mesh, as the run that dumped it did, unless it
-  changes a key that sizes the mesh, `events.SIZING_KEYS`, whose new sizes the rule of rebuilds then
-  meets), and only a case with the block continues them. The keys of `liquid` and `gap` are fixed
+  of `delta` and `delta^2`, `limits`, the events made before it, `events_made`; events `leg`; a leg
+  restarted from a dump writes the record of each event made before it, as the dump holds it, into
+  its own `events/`, `copy` naming its leg and the leg that made it, the ghost's polygon only in the
+  file of that leg, `CollapseDriver._copy_event_records`) and `mesh_fresh` (no step has run on the
+  mesh since it was built: a restart checks it as a fresh mesh, as the run that dumped it did,
+  unless it changes a key that sizes the mesh, `events.SIZING_KEYS`, whose new sizes the rule of
+  rebuilds then meets), and only a case with the block continues them. The keys of `liquid` and
+  `gap` are fixed
   once an event of their class was made, except in a restart from the state before an event
   (`precut_e<k>`, `cut_stage` `precut-event`), from which they apply anew (`event_keys_changed_at`
   in its leg); the keys of `post` change at any restart (a key a recorded block lacks counts at its
@@ -288,7 +292,8 @@ add a second top-level `cases/` tree.
   retracting at `r_n^(-1/2)` until the ghost is as long as the sphere of its volume, `2 a`, so that
   its rear never passes its front): its recontacts with the stump and with the far tip of the
   bubble (`events.ghost_recontacts`, from `GHOST_SKIP_STEPS` after the cut) are flags only, in
-  `ghost.recontacts` of the record and its file, events `ghost-recontact` and rows of
+  `ghost.recontacts` of the record and its file in the directory of the leg that flags them (the
+  copy of a later leg, `CollapseDriver._rewrite_event_file`), events `ghost-recontact` and rows of
   `drops.txt` (with one per ghost made). Every removal enters the run's budget (`budget.txt`, a row
   per step after the cut: the mesh's volume, axial momentum and kinetic energy of `chains.txt`, the
   removals' since the gas cut, `CollapseDriver._removed`, and the sums; the volume and the momentum

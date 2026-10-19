@@ -644,6 +644,66 @@ def test_the_ghost_of_each_removed_head_is_followed_and_its_recontacts_flagged(t
     assert out["stop"]["reason"] == "max-steps"
 
 
+def two_legs(tmp_path, monkeypatch) -> dict:
+    """A run after a cut in two legs on the stand-in problem: leg 1 (``leg1``) makes event 1, whose
+    ghost rests beyond the stump's tip, and ends one step later, before the ghost's rear recontact
+    (two steps after the cut); leg 2 (``leg2``, a directory of its own) restarts from the state leg
+    1 ended on and takes two steps, in which the recontact comes. Returns the directories, the step
+    of the event, its record in leg 1, leg 1's and leg 2's results."""
+    from test_bookkeeping import _settings
+
+    from faraday_singularity.driver import CollapseDriver
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    resting = {"U": 0.0, "v_ret": 0.0}
+    drv, _, _ = _run(tmp_path / "probe", monkeypatch, RegrowingHead(),
+                     surgery=fake_surgery(ghost=resting))
+    step = drv.pb.events[0]["step"]
+    drv, out, _ = _run(tmp_path / "leg1", monkeypatch, RegrowingHead(),
+                       surgery=fake_surgery(ghost=resting), max_steps=step + 1)
+    (first,) = drv.pb.events
+    meta = json.loads(Path(out["stop"]["end_state"]).with_suffix(".json").read_text())
+    pb = RegrowingHead()
+    pb.t, pb.last_cut = meta["time"], first["t"]
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", fake_surgery(ghost=resting))
+    again = CollapseDriver(pb, _settings(t_end=1.0, dt_max=1.0, max_steps=step + 3),
+                           tmp_path / "leg2", reconnect=ReconnectSettings(delta=1e-3, dt0=1e-6),
+                           events=ev.EventSettings.from_dict(LIQUID))
+    again.restore(meta)
+    res = again.run(1e-9)
+    again.close()
+    return {"leg1": tmp_path / "leg1", "leg2": tmp_path / "leg2", "step": step, "first": first,
+            "meta": meta, "out": out, "res": res}
+
+
+def test_a_later_leg_writes_the_records_of_the_events_before_it_and_their_recontacts(tmp_path,
+                                                                                    monkeypatch):
+    """Leg 1 makes event 1 and ends one step later, before its ghost's rear recontact (two steps
+    after the cut); leg 2, in a directory of its own, restarts from the state leg 1 ended on, with
+    the event made before it (``events_made`` of its leg), writes the event's record into its own
+    ``events/`` at its start (``copy``: its leg and the leg that made the event, the ghost's
+    polygon left in leg 1's file) and flags the recontact there; leg 1's file is left as it was."""
+    legs = two_legs(tmp_path, monkeypatch)
+    step, first, meta, res = legs["step"], legs["first"], legs["meta"], legs["res"]
+    assert first["step"] == step and first["ghost"]["recontacts"] == []
+    assert meta["step"] == step + 1 and [e["k"] for e in meta["events"]] == [1]
+    assert res["stop"]["reason"] == "max-steps" and res["events"]["ghost_recontacts"]["rear"] == 1
+    legs = [x for x in _jsonl(tmp_path / "leg2" / "events.jsonl") if x["event"] == "leg"]
+    assert [(x["leg"], x["events_made"], x["step"]) for x in legs] == [(1, 1, step + 1)]
+    assert [x["events_made"] for x in _jsonl(tmp_path / "leg1" / "events.jsonl")
+            if x["event"] == "leg"] == [0]
+    copy = json.loads((tmp_path / "leg2" / "events" / "event_001.json").read_text())
+    assert copy["copy"] == {"leg": 1, "of_leg": 0} and copy["outcome"] == "made"
+    assert [x["kind"] for x in copy["ghost"]["recontacts"]] == ["rear"]
+    assert copy["ghost"]["recontacts"][0]["step"] == step + ev.GHOST_SKIP_STEPS
+    assert "polygon" not in copy["ghost"]
+    assert (copy["k"], copy["tip"], copy["trigger"]["r_n"]) == (1, first["tip"],
+                                                                first["trigger"]["r_n"])
+    original = json.loads((tmp_path / "leg1" / "events" / "event_001.json").read_text())
+    assert original["ghost"]["recontacts"] == [] and original["ghost"]["polygon"]
+    assert "copy" not in original
+
+
 def test_the_budget_of_the_run_holds_the_liquid_of_the_mesh_and_every_removal(tmp_path,
                                                                             monkeypatch):
     """budget.txt, a row per step after the cut as chains.txt has: the liquid of the mesh (its
