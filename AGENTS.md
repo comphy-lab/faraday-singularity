@@ -382,7 +382,11 @@ add a second top-level `cases/` tree.
   event, made or not, with its outcome and the handler of its class, in units of `delta` and
   `T = t_p - t_cut`, from `events/event_<k>.json`; a row per run and tip of `--tip`, the upward jet
   by default, with the stop and the event it stopped on, `budget.txt`'s drifts and the removals'
-  shares of the axial momentum and the kinetic energy, the events made with a closure flagged,
+  shares of the whole liquid's axial momentum and kinetic energy (`*_share_liquid`, which the
+  standing wave dominates), the removals at that tip, the momentum signed along its jet, against
+  what the base carried into the jet (`Pz_jet`, `KE_jet`: the integrals of `Q_j V_j` and
+  `Q_j V_j^2/2` over time, a plug flow; `*_removed_jet_share`) and, per event, the head's share of
+  its cut's box (`Pz_rem_box_share`, `KE_rem_box_share`), the events made with a closure flagged,
   and the test of the base of that tip's jet widening after its own events, the slope of `ln r_j`
   against `ln t'` and of `Q_j` against `t'` over the rows of `chains.txt` after the step of the
   `--after-events`-th event made at that tip, `base_after_k`, not at any tip, and never the row of

@@ -571,12 +571,16 @@ a run stopped on, with its outcome and the handler of its class, in units of the
 at its tip, the jet's base before the cut and its ratio to the neck, the neck's distance from the
 base, the closures, the ghost's recontacts); each run with its stop and the event it stopped on,
 its events per tip and the cascade's verdicts, the drift of its liquid with and without the
-removals, the removals' shares of the axial momentum and the kinetic energy, the events made with a
-closure flagged, and a report on the base of the jet of each tip of `--tip` (the upward jet into
-the cavity by default; `--tip cavity_tip bubble_top` adds the downward one) after the
-`--after-events`-th event made at that tip (`base_after_k`; the events at the other tips do not
-start it), over the rows of the steps after that event's, whose own row is the state before its
-cut: the slopes of `ln r_j` against `ln t'` and of `Q_j` against `t'`, `t' = t - t_p`, with the
+removals, the removals' shares of the whole liquid's axial momentum and kinetic energy (labelled
+`_liquid`: the standing wave dominates them, and the heads of jets running in opposite directions
+cancel there), the removals at the row's tip, the momentum signed along its jet, against what the
+base of that jet carried into it (the integrals of `Q_j V_j` and `Q_j V_j^2/2` over time, a plug
+flow through the base), each head's share of the momentum and the energy in the box of its cut, the
+events made with a closure flagged, and a report on the base of the jet of each tip of `--tip`
+(the upward jet into the cavity by default; `--tip cavity_tip bubble_top` adds the downward one)
+after the `--after-events`-th event made at that tip (`base_after_k`; the events at the other tips
+do not start it), over the rows of the steps after that event's, whose own row is the state before
+its cut: the slopes of `ln r_j` against `ln t'` and of `Q_j` against `t'`, `t' = t - t_p`, with the
 verdict `widens` when both are positive, `narrows` when the first is negative, `stationary` when
 the first and the change of `Q_j` over the window relative to its median there both lie within
 their floors (`--stationary-alpha`, `--stationary-q`, 1e-3 each, recorded in the row; within them

@@ -23,8 +23,8 @@ import event_table  # noqa: E402
 DELTA = 1e-3
 T = 2e-6  # t_p - t_cut
 CHAIN_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "r_neck_open", "r_neck_bubble",
-                 "r_j_cavity_tip", "Q_j_cavity_tip", "jet_born_cavity_tip", "r_j_bubble_top",
-                 "Q_j_bubble_top", "jet_born_bubble_top")
+                 "r_j_cavity_tip", "Q_j_cavity_tip", "V_j_cavity_tip", "jet_born_cavity_tip",
+                 "r_j_bubble_top", "Q_j_bubble_top", "V_j_bubble_top", "jet_born_bubble_top")
 
 
 def _record(k, t, tip="cavity_tip", *, V=5e-10, r_n=1e-4, s=5e-4, r_j=6e-4, z_n=4.7, z_b=4.6995,
@@ -62,7 +62,7 @@ def _write_run(run: Path, records, rows, *, budget=None, status=None, budget_hea
     for rec in records:
         (run / "events" / f"event_{rec['k']:03d}.json").write_text(json.dumps(rec))
     lines = ["# " + "\t".join(CHAIN_COLUMNS)]
-    lines += ["\t".join(f"{r[c]:.12e}" for c in CHAIN_COLUMNS) for r in rows]
+    lines += ["\t".join(f"{r.get(c, math.nan):.12e}" for c in CHAIN_COLUMNS) for r in rows]
     (run / "chains.txt").write_text("\n".join(lines) + "\n")
     if budget is not None:
         (run / "budget.txt").write_text("\n".join(["# " + "\t".join(budget_head)] + [
@@ -76,11 +76,12 @@ def _rows(n=40, *, alpha=0.5, q=1.0, t0=1e-6, t1=2e-5):
     for i, t in enumerate(np.linspace(t0, t1, n)):
         tp = t - T
         r = 6e-4 * (tp / 1e-5) ** alpha if tp > 0 else 6e-4
+        Q = 1e-3 * (max(tp, 1e-9) / 1e-5) ** q
         out.append({"step": i, "time": t, "tau": t, "tau_p": tp, "dt": 2.2e-9,
                     "r_neck_open": 0.9 * r, "r_neck_bubble": 3e-4, "r_j_cavity_tip": r,
-                    "Q_j_cavity_tip": 1e-3 * (max(tp, 1e-9) / 1e-5) ** q,
+                    "Q_j_cavity_tip": Q, "V_j_cavity_tip": Q / (math.pi * r * r),
                     "jet_born_cavity_tip": 1.0, "r_j_bubble_top": 4e-4, "Q_j_bubble_top": 1e-4,
-                    "jet_born_bubble_top": 1.0})
+                    "V_j_bubble_top": 1e-4 / (math.pi * 1.6e-7), "jet_born_bubble_top": 1.0})
     return out
 
 
@@ -153,8 +154,8 @@ def test_the_base_of_a_jet_that_widens_after_the_events_and_of_one_that_narrows(
     _write_run(wide, records, _rows(alpha=0.5), budget=budget, budget_head=head, status=status)
     row = event_table.run_row(wide)
     assert (row["stop"], row["stop_kind"], row["stop_event"]) == ("event-unhandled", "piercing", 4)
-    assert row["Pz_removed_share"] == pytest.approx(0.04)
-    assert row["KE_removed_share"] == pytest.approx(0.025)
+    assert row["Pz_removed_share_liquid"] == pytest.approx(0.04)
+    assert row["KE_removed_share_liquid"] == pytest.approx(0.025)
     assert row["flagged"] == 2  # the two made, each with F4 flagged; the refused one not counted
     assert row["base_verdict"] == "widens" and row["alpha_r_j"] == pytest.approx(0.5)
     assert row["dQ_j_dt"] > 0.0 and row["alpha_Q_j"] == pytest.approx(1.0)
@@ -174,7 +175,7 @@ def test_the_base_of_a_jet_that_widens_after_the_events_and_of_one_that_narrows(
     row = event_table.run_row(narrow)
     assert row["base_verdict"] == "narrows" and row["alpha_r_j"] == pytest.approx(-0.3)
     assert row["stop"] == "max-steps" and row["stop_kind"] == "" and row["stop_event"] == ""
-    assert math.isnan(row["Pz_removed_share"])  # a budget without the columns: none
+    assert math.isnan(row["Pz_removed_share_liquid"])  # a budget without the columns: none
     late = event_table.run_row(wide, after_events=3)
     assert late["base_verdict"] == "no-events" and late["base_rows"] == 0
     start = event_table.run_row(wide, after_events=0)
@@ -209,6 +210,44 @@ def test_the_command_line_writes_both_tables(tmp_path, capsys):
     # the legs of one run, joined by os.pathsep, are one run
     assert event_table.main([f"{run}{os.pathsep}{run}", "--out", str(out)]) == 0
     assert "2 events" in capsys.readouterr().out
+
+
+def test_the_removals_at_a_tip_are_set_against_what_its_jet_carried(tmp_path):
+    """The heads removed at each tip against what the base of that jet carried into it: the upward
+    jet's heads move up and the downward jet's down, so that their momenta cancel in the whole
+    liquid's budget, whose share (labelled so) the standing wave dominates; signed along each jet
+    they add, against the integrals of ``Q_j V_j`` and ``Q_j V_j^2/2`` over the rows in which the
+    jet stands (the trapezoid rule). Each event gives its head's share of the box of its cut."""
+    up = dict(_record(1, 3e-6), removed={"V": 1e-9, "Pz": 5e-8, "KE": 2e-6},
+              budgets={"grid": {"before": {"Pz": 1e-6, "KE": 4e-5}}})
+    down = dict(_record(2, 5e-6, tip="bubble_top"), removed={"V": 2e-9, "Pz": -4e-8, "KE": 1e-6})
+    head = BUDGET_HEAD + ("Pz_removed", "momentum_z_total", "KE_removed", "kinetic_energy_total")
+    budget = [(0, 0.0, 100.0, 0.0, 100.0, 0.0, -1.03e-3, 0.0, 8.0),
+              (1, 1e-5, 100.0, 3e-9, 100.0, 1e-8, -1.03e-3 + 1e-8, 3e-6, 8.0)]
+    rows = _rows()
+    run = tmp_path / "run"
+    _write_run(run, [up, down], rows, budget=budget, budget_head=head)
+    events = event_table.event_rows(run)
+    assert events[0]["Pz_rem_box_share"] == pytest.approx(0.05)
+    assert events[0]["KE_rem_box_share"] == pytest.approx(0.05)
+    assert math.isnan(events[1]["Pz_rem_box_share"])  # a record without the box's budgets
+    t = np.array([r["time"] for r in rows])
+    for tip, Pz, KE, V in (("cavity_tip", 5e-8, 2e-6, 1.0), ("bubble_top", 4e-8, 1e-6, 2.0)):
+        row = event_table.run_row(run, tip=tip)
+        flux = np.array([r[f"Q_j_{tip}"] * r[f"V_j_{tip}"] for r in rows])
+        energy = 0.5 * np.array([r[f"Q_j_{tip}"] * r[f"V_j_{tip}"] ** 2 for r in rows])
+        P_jet = float(np.sum(0.5 * (flux[1:] + flux[:-1]) * np.diff(t)))
+        E_jet = float(np.sum(0.5 * (energy[1:] + energy[:-1]) * np.diff(t)))
+        assert row["Pz_removed_tip"] == pytest.approx(Pz) and row["KE_removed_tip"] == KE
+        assert row["V_removed_tip_over_delta3"] == pytest.approx(V)
+        assert row["Pz_jet"] == pytest.approx(P_jet) and row["KE_jet"] == pytest.approx(E_jet)
+        assert row["Pz_removed_jet_share"] == pytest.approx(Pz / P_jet)
+        assert row["KE_removed_jet_share"] == pytest.approx(KE / E_jet)
+        assert row["Pz_removed_share_liquid"] == pytest.approx(1e-8 / (-1.03e-3 + 1e-8))
+    # a tip without events removed nothing; one whose jet never stands carried nothing
+    none = event_table.run_row(run, tip="bubble_bottom")
+    assert (none["Pz_removed_tip"], none["KE_removed_tip"]) == (0.0, 0.0)
+    assert math.isnan(none["Pz_jet"]) and math.isnan(none["Pz_removed_jet_share"])
 
 
 def test_a_base_that_stands_still_is_stationary_whatever_the_round_off_of_its_fit(tmp_path):

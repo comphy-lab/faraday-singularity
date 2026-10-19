@@ -28,7 +28,9 @@ are the last leg's.
 ``delta`` and of ``T = t_p - t_cut`` (the time from the cut to the pinch time it recorded, read as
 ``tau - tau_p``): the event's time (``tau_over_delta2``, ``t_prime_over_T``), the neck at its
 landing (``r_n_over_delta``, ``r_n_over_s`` with ``s`` the head's largest radius), the removed head
-(``V_over_delta3``, ``V_over_s3``), the interval since the event before at its tip
+(``V_over_delta3``, ``V_over_s3``) and its share of the axial momentum and of the kinetic energy in
+the box of its cut before it (``Pz_rem_box_share``, ``KE_rem_box_share``: the jet about the neck,
+its head and stump), the interval since the event before at its tip
 (``interval_over_delta2``, ``interval_over_T``, ``events_per_T``) and the cascade's verdict there,
 the base of the jet whose neck was cut (``r_j_over_delta`` at the event, ``r_j_over_r_n``, the
 neck's distance from the base in neck radii and in jet radii, ``near_base`` where that is within
@@ -42,7 +44,14 @@ and the dumps of the event the run deleted.
 the volume the events removed (``delta^3``), the drift of the liquid of the mesh over the rows of
 ``budget.txt`` and of its sum with the removals (each relative to its first value: the removals
 account for the difference), the share of the removals in that sum of the axial momentum and of the
-kinetic energy at its last row, the ghosts' recontacts, the refused and failed cuts, the events made
+kinetic energy at its last row (``Pz_removed_share_liquid``, ``KE_removed_share_liquid``: of the
+whole liquid, which the standing wave dominates, the removals of every tip summed with their
+signs, so that they say little of a jet), the removals at the tip of the row against what the base
+of its jet carried into the jet (``V_removed_tip_over_delta3``; ``Pz_removed_tip``, signed along
+the jet, and ``KE_removed_tip`` against ``Pz_jet``, the integral of ``Q_j V_j`` over time, and
+``KE_jet``, that of ``Q_j V_j^2/2``, a plug flow through the base, by the trapezoid rule over the
+rows in which the jet stands: ``Pz_removed_jet_share``, ``KE_removed_jet_share``), the ghosts'
+recontacts, the refused and failed cuts, the events made
 with a closure flagged, the end of the window, the stop with the kind and number of the event it
 stopped on, and the test of the base of the jet of a tip (``--tip``, one row per run and tip; the
 upward jet into the cavity, ``cavity_tip``, by default, the downward one ``bubble_top``): over the
@@ -82,11 +91,14 @@ STATIONARY_Q = 1e-3
 TIP_NECKS = {"cavity_tip": "r_neck_open", "bubble_top": "r_neck_bubble",
              "bubble_bottom": "r_neck_bubble"}  # the root neck of each tip's chain (chains.txt)
 TIPS = ("cavity_tip", "bubble_top", "bubble_bottom")
+# the axial direction of the jet of each tip (reconnect.BUBBLE_TIP_SIGNS, and up from the cavity's)
+JET_SIGNS = {"cavity_tip": 1.0, "bubble_top": -1.0, "bubble_bottom": 1.0}
 
 EVENT_FIELDS = ("run", "case_id", "delta", "k", "outcome", "failed_at", "kind", "class", "handler",
                 "chain", "tip", "generation", "step", "leg", "t", "tau_over_delta2",
                 "t_prime_over_T", "r_n_over_delta", "s_over_delta", "r_n_over_s", "V_over_delta3",
-                "V_over_s3", "interval_over_delta2", "interval_over_T", "events_per_T", "cascade",
+                "V_over_s3", "Pz_rem_box_share", "KE_rem_box_share", "interval_over_delta2",
+                "interval_over_T", "events_per_T", "cascade",
                 "r_j_over_delta", "r_j_over_r_n", "neck_to_base_over_r_n",
                 "neck_to_base_over_r_j", "near_base", "r_j_after_over_r_j", "dt_over_delta2",
                 "Re_n", "We_n", "U_ghost", "du_stump", "F1", "F2", "F3", "F4", "F5", "F6",
@@ -96,8 +108,10 @@ EVENT_FIELDS = ("run", "case_id", "delta", "k", "outcome", "failed_at", "kind", 
 RUN_FIELDS = ("run", "case_id", "legs", "delta", "T", "state", "stop", "stop_kind", "stop_event",
               "window_end", "events", *(f"events_{tip}" for tip in TIPS),
               *(f"cascade_{tip}" for tip in TIPS), "V_removed_over_delta3", "volume_drift",
-              "volume_total_drift", "Pz_removed_share", "KE_removed_share", "rear_recontacts",
-              "front_recontacts", "refused", "unclosed", "failed", "flagged", "tip",
+              "volume_total_drift", "Pz_removed_share_liquid", "KE_removed_share_liquid",
+              "rear_recontacts", "front_recontacts", "refused", "unclosed", "failed", "flagged",
+              "tip", "V_removed_tip_over_delta3", "Pz_removed_tip", "KE_removed_tip", "Pz_jet",
+              "KE_jet", "Pz_removed_jet_share", "KE_removed_jet_share",
               "base_after_k", "base_after_step", "base_rows", "base_t_prime_lo",
               "base_t_prime_hi", "alpha_r_j", "dQ_j_dt", "dQ_j_rel", "alpha_Q_j",
               "base_verdict", "stationary_alpha", "stationary_q", "r_j_start_over_delta",
@@ -265,6 +279,7 @@ def event_rows(run, *, near_base: float = 3.0) -> list[dict]:
         r_n, s, r_j = _num(trig.get("r_n")), _num(trig.get("s")), _num(trig.get("r_j"))
         z_n, z_b = _num(trig.get("z_n")), _num(trig.get("z_b"))
         V = _num(removed.get("V"))
+        box = ((rec.get("budgets") or {}).get("grid") or {}).get("before") or {}
         gap = abs(z_n - z_b) if math.isfinite(z_n) and math.isfinite(z_b) else math.nan
         to_base = _ratio(gap, r_j)
         hits = {x.get("kind"): x for x in ghost.get("recontacts") or ()}
@@ -278,6 +293,8 @@ def event_rows(run, *, near_base: float = 3.0) -> list[dict]:
                "r_n_over_delta": _ratio(r_n, d), "s_over_delta": _ratio(s, d),
                "r_n_over_s": _ratio(r_n, s), "V_over_delta3": _ratio(V, d**3),
                "V_over_s3": _ratio(V, s**3),
+               "Pz_rem_box_share": _ratio(removed.get("Pz"), box.get("Pz")),
+               "KE_rem_box_share": _ratio(removed.get("KE"), box.get("KE")),
                "interval_over_delta2": _ratio(cascade.get("interval"), d * d),
                "interval_over_T": _ratio(cascade.get("interval"), T),
                "events_per_T": _num(cascade.get("events_per_T")),
@@ -309,6 +326,25 @@ def _slope(x, y) -> float:
     if len(x) < 2 or np.ptp(x) == 0.0:
         return math.nan
     return float(np.polyfit(x, y, 1)[0])
+
+
+def jet_delivery(chains: dict, tip: str) -> tuple[float, float]:
+    """What the base of the jet of ``tip`` carried into the jet over the rows of ``chains``: the axial
+    momentum, the integral of ``Q_j V_j`` over time, and the kinetic energy, that of
+    ``Q_j V_j^2/2``, both along the jet (as ``Q_j`` and ``V_j`` are), a plug flow through the base,
+    by the trapezoid rule over the pairs of successive rows in which the jet stands; NaN without
+    such a pair."""
+    names = ("time", f"Q_j_{tip}", f"V_j_{tip}", f"jet_born_{tip}")
+    if not all(chains.get(n) for n in names):
+        return math.nan, math.nan
+    t, Q, V, born = (np.asarray([_num(x) for x in chains[n]]) for n in names)
+    ok = (born > 0) & np.isfinite(Q) & np.isfinite(V) & np.isfinite(t)
+    pair = ok[:-1] & ok[1:]
+    if not pair.any():
+        return math.nan, math.nan
+    dt = np.diff(t)
+    flux = np.where(ok, Q * V, 0.0), np.where(ok, 0.5 * Q * V * V, 0.0)
+    return tuple(float(np.sum((0.5 * (f[:-1] + f[1:]) * dt)[pair])) for f in flux)
 
 
 def _sign(x: float, floor: float) -> int:
@@ -394,8 +430,9 @@ def run_row(run, *, tip: str = "cavity_tip", after_events: int = 1,
     for key, name in (("volume", "volume_drift"), ("volume_total", "volume_total_drift")):
         col = [_num(x) for x in budget.get(key, [])]
         row[name] = (col[-1] - col[0]) / col[0] if len(col) >= 2 and col[0] else math.nan
-    for removed, total, name in (("Pz_removed", "momentum_z_total", "Pz_removed_share"),
-                                 ("KE_removed", "kinetic_energy_total", "KE_removed_share")):
+    for removed, total, name in (("Pz_removed", "momentum_z_total", "Pz_removed_share_liquid"),
+                                 ("KE_removed", "kinetic_energy_total",
+                                  "KE_removed_share_liquid")):
         a, b = budget.get(removed) or [], budget.get(total) or []
         row[name] = _ratio(a[-1], b[-1]) if a and b else math.nan
     hits = [x for r in made for x in (r.get("ghost") or {}).get("recontacts") or ()]
@@ -404,8 +441,16 @@ def run_row(run, *, tip: str = "cavity_tip", after_events: int = 1,
     for outcome in ("refused", "unclosed", "failed"):
         row[outcome] = sum(r.get("outcome") == outcome for r in records)
     row["flagged"] = sum(bool((r.get("closures") or {}).get("flags")) for r in made)
-    # the window starts after the after_events-th event made at the tip tested, not at any tip
+    # the removals at the tip tested, against what the base of its jet carried into it
     own = [r for r in made if r.get("tip") == tip]
+    gone = [r.get("removed") or {} for r in own]
+    row["V_removed_tip_over_delta3"] = _ratio(sum(_num(x.get("V")) for x in gone), d**3)
+    row["Pz_removed_tip"] = JET_SIGNS.get(tip, 1.0) * sum(_num(x.get("Pz")) for x in gone)
+    row["KE_removed_tip"] = float(sum(_num(x.get("KE")) for x in gone))
+    row["Pz_jet"], row["KE_jet"] = jet_delivery(info["chains"], tip)
+    row["Pz_removed_jet_share"] = _ratio(row["Pz_removed_tip"], row["Pz_jet"])
+    row["KE_removed_jet_share"] = _ratio(row["KE_removed_tip"], row["KE_jet"])
+    # the window starts after the after_events-th event made at the tip tested, not at any tip
     anchor = own[after_events - 1] if 0 < after_events <= len(own) else None
     row.update(base_after_k=anchor.get("k", "") if anchor else "",
                base_after_step=anchor.get("step", "") if anchor else "")
