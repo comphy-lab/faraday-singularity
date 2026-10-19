@@ -336,7 +336,8 @@ add a second top-level `cases/` tree.
   the keys of every class apply anew (`events.EventSettings.refused_changes`), the events before it
   staying as made. The run's result with the block has `events` (made, by kind and tip, the last,
   the totals removed, the cascade's verdicts, the ghosts' recontacts, the dumps and meshes deleted,
-  the event stopped on) and `window_end` (`bubble-vanishing`, also an event `window-end`), which
+  the log of the box's noise, `box_noise`, the event stopped on) and `window_end`
+  (`bubble-vanishing`, also an event `window-end`), which
   `run_status.json` also has at its top level; a run failed in a liquid cut has `event` there
   (`run_case.event_failure_status`, the record's schema `events.EVENT_SCHEMA`). The tests of the
   branch on the stop states of runs after a cut run when `FARADAY_POSTCUT_RUNS` names their run

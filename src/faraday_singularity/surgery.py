@@ -1242,11 +1242,11 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        (``mesh.event_cap``); the regions the cut tip and the cut neck had keep their sizes for this
        mesh under the event's names (``events.event_focus_regions``, ``mesh.renamed``), so that a
        later rebuild sizes the new tip from the cap and a new neck of the chain from its own
-       spacing. From here a failure is :class:`CutFailed`. The transfer is checked (:func:`transfer_problems`): the
-       count of the interface nodes it leaves unlocated within ``UNLOCATED_SLACK`` of the count
-       predicted from the geometry (``events.predict_unlocated``), every predicted one on the cap,
-       none of the bulk or the axis, and at most the stump's tip on the axis without a value; the
-       chains, their ends and the axis spans as planned.
+       spacing. From here a failure is :class:`CutFailed`. The transfer is checked
+       (:func:`transfer_problems`): the count of the interface nodes it leaves unlocated within
+       ``UNLOCATED_SLACK`` of the count predicted from the geometry (``events.predict_unlocated``),
+       every predicted one on the cap, none of the bulk or the axis, and at most the stump's tip on
+       the axis without a value; the chains, their ends and the axis spans as planned.
     5. **Cap fill** (``liquid.cap_fill`` ``sample``; ``cap.fill``): the cap's nodes take the old
        bulk velocity at their places, not the nearest old surface's that pyoomph's transfer gives
        them.

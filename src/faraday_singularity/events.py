@@ -228,7 +228,7 @@ class PostCutSettings:
     about each tip on the axis, at ``liquid.box_radius delta`` (``box_noise.txt``,
     ``driver.CollapseDriver._box_noise_after``), the noise of the box from which the floors
     ``liquid.sigma_V``, ``sigma_Pz`` and ``sigma_KE`` are set; it reads the fields and changes
-    none, at a few samplings of the box's grid per box and rebuild."""
+    none, at the cost of two samplings of each box's grid per rebuild."""
     open_neck_stop: bool = True
     h_floor: float | None = None
     neck_floor: float | None = None
