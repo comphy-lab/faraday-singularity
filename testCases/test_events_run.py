@@ -929,3 +929,113 @@ def test_the_runner_records_the_events_the_window_and_a_failed_liquid_cut(tmp_pa
     assert status["event"] == {"k": 3, "kind": "a-head", "class": "A-head", "outcome": "failed",
                                "failed_at": "mesh-check", "record": "events/event_003.json",
                                "precut": "states/precut_e003.dump"}
+
+
+# the runner of a post-cut continuation without the block, with stand-ins of the problem and the
+# driver, which records the keywords the runner makes the driver with
+LEGACY_RUNNER = """
+import json, shutil, sys, types
+sys.path.insert(0, sys.argv[1])
+RESULT = json.loads(sys.argv[5])
+import run_case
+import pyoomph.output.states as states
+
+states.copy_state_file = lambda src, dst: shutil.copyfile(src, dst)  # a stand-in dump
+
+
+class Problem:
+    remesh_count = 0
+    def __init__(self, nd, **kw): pass
+    def set_output_directory(self, path): pass
+    def __enter__(self): return self
+    def __exit__(self, *exc): return False
+    def initialise(self): pass
+    def load_state(self, path): pass
+    def start_diagnostics(self, path): pass
+    def close_diagnostics(self): pass
+
+
+class Failed(RuntimeError):
+    def __init__(self, message, record=None):
+        super().__init__(message)
+        self.precut, self.record = None, record
+
+
+KW = []
+
+
+class Driver:
+    def __init__(self, problem, settings, outdir, **kw):
+        KW.append(sorted(kw))
+    def restore(self, meta): pass
+    def run(self, tol):
+        if "fail" in RESULT:
+            raise Failed("the run failed", RESULT["fail"])
+        return RESULT
+    def close(self): pass
+
+
+sys.modules["faraday_singularity.problem"] = types.SimpleNamespace(FaradayProblem=Problem)
+run_case.CollapseDriver = Driver
+sys.argv = ["run_case.py", sys.argv[2], "--outdir", sys.argv[3], "--restart-from", sys.argv[4]]
+try:
+    run_case.main()
+finally:
+    import faraday_singularity.driver as driver
+    print(json.dumps({"driver_kw": KW, "runner": run_case.__file__, "driver": driver.__file__}))
+"""
+
+
+def test_the_runner_writes_the_status_of_1b65916_for_a_run_without_the_block(tmp_path):
+    """A post-cut continuation under a case without the block, by the runner of this commit and by
+    that of 1b65916 (its runner and source archived) in fresh processes, with stand-ins of the
+    problem and of the driver: one run that completes, and one whose driver raises an error that
+    carries a record without the schema of an event. Both runners make the driver with the same
+    keywords and write ``run_status.json`` with the same keys and values, the times aside: no
+    ``events``, ``window_end`` or ``event``."""
+    import subprocess
+
+    from test_events_plumbing import _cut_case
+    from test_runner import ROOT as RUNNER_ROOT
+    from test_runner_manifest import RECON, _parent_run, _write_meta
+
+    try:
+        archive = subprocess.run(["git", "-C", str(RUNNER_ROOT), "archive", "1b65916",
+                                  "run_case.py", "src"], capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("commit 1b65916 is not available")
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    subprocess.run(["tar", "-x", "-C", str(ref)], input=archive, check=True)
+    state, _ = _parent_run(tmp_path, case=_cut_case())
+    _write_meta(state, cut={"delta": RECON.delta, "t_cut": 0.5 - 0.5e-4,
+                            "settings": RECON.to_dict()})
+    case_path = tmp_path / "parent-case.json"
+    results = {"done": {"stop": {"reason": "max-steps"}, "steps": 7},
+               "failed": {"fail": {"k": 3, "kind": "a-head", "outcome": "failed",
+                                   "failed_at": "mesh-check"}}}  # no event schema
+    got = {}
+    for source, root in (("ref", ref), ("head", RUNNER_ROOT)):
+        for name, result in results.items():
+            out = tmp_path / f"{source}-{name}"
+            proc = subprocess.run([sys.executable, "-c", LEGACY_RUNNER, str(root),
+                                   str(case_path), str(out), str(state), json.dumps(result)],
+                                  capture_output=True, text=True, timeout=120, check=False)
+            assert (proc.returncode == 0) == (name == "done"), proc.stderr[-3000:]
+            report = json.loads(proc.stdout.strip().splitlines()[-1])
+            assert Path(report["runner"]).parent == root and Path(report["driver"]).is_relative_to(
+                root / "src"), report  # each source's own runner and driver
+            got[source, name] = report["driver_kw"], json.loads((out / "run_status.json")
+                                                                .read_text())
+
+    def timeless(status):
+        return {k: v for k, v in status.items() if k not in ("started", "ended", "wall_seconds")}
+
+    for name in results:
+        (kw_ref, ref_status), (kw_head, head_status) = got["ref", name], got["head", name]
+        assert kw_head == kw_ref == [["reconnect"]], name
+        assert sorted(head_status) == sorted(ref_status), name
+        assert timeless(head_status) == timeless(ref_status), name
+        assert not {"events", "window_end", "event"} & set(head_status), name
+    assert got["head", "done"][1]["state"] == "completed"
+    assert got["head", "failed"][1]["state"] == "failed"

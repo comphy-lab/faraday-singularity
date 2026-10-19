@@ -202,7 +202,9 @@ add a second top-level `cases/` tree.
   which meet no neck, no jet at the bubble's bottom and no other stop;
   `testCases/test_events_legacy.py`: stand-in problems through those, the bubble's bottom with a jet
   and its kept focus, the necks of both chains, the open chain's neck stop, a groove at a jet's
-  base, the dt floor and the stops after a cut; a replay of a production run after its cut is the
+  base, the dt floor and the stops after a cut; `testCases/test_events_run.py`: the runner of a
+  post-cut continuation, the keywords it makes the driver with and its `run_status.json`, completed
+  and failed, against the runner of 1b65916; a replay of a production run after its cut is the
   gate still to pass). It applies after a cut only: a cut restart may add, drop or change it
   (`run_case.CUT_EVENTS_DERIVED_KEYS`), a post-cut continuation may add or change it
   (`run_case.POST_CUT_DERIVED_KEYS`, `run_case._check_events`), and a run from the start or an
