@@ -204,10 +204,37 @@ def test_the_command_line_writes_both_tables(tmp_path, capsys):
         rows = list(csv.DictReader(fh))
     assert [(r["run"], r["tip"]) for r in rows] == [("run", "cavity_tip"), ("run", "bubble_top")]
     assert rows[0]["base_verdict"] == "widens" and abs(float(rows[1]["alpha_r_j"])) < 1e-12
-    assert rows[1]["base_after_k"] == "2"
+    assert rows[1]["base_after_k"] == "2" and rows[1]["base_verdict"] == "stationary"
+    assert float(rows[1]["stationary_alpha"]) == event_table.STATIONARY_ALPHA
     # the legs of one run, joined by os.pathsep, are one run
     assert event_table.main([f"{run}{os.pathsep}{run}", "--out", str(out)]) == 0
     assert "2 events" in capsys.readouterr().out
+
+
+def test_a_base_that_stands_still_is_stationary_whatever_the_round_off_of_its_fit(tmp_path):
+    """A base of constant radius and flux: its fitted slopes are round-off, of either sign with the
+    radius, and within the floors (``STATIONARY_ALPHA``, ``STATIONARY_Q``) the verdict is
+    ``stationary``, not ``narrows`` or ``widens``; without floors the sign of the round-off would
+    decide. A trend within the floors is stationary too, and widens below them."""
+    seen = set()
+    for r in (4e-4, 5.1e-4, 3.7e-4, 6.3e-4, 1.234e-4):
+        rows = [dict(x, r_j_cavity_tip=r, r_neck_open=0.9 * r, Q_j_cavity_tip=1.7e-4)
+                for x in _rows()]
+        run = tmp_path / f"r{r:g}"
+        _write_run(run, [_record(1, 3e-6)], rows)
+        row = event_table.run_row(run)
+        assert row["base_verdict"] == "stationary", r
+        assert abs(row["alpha_r_j"]) < 1e-12 and abs(row["dQ_j_rel"]) < 1e-12
+        bare = event_table.run_row(run, alpha_floor=0.0, q_floor=0.0)
+        seen.add(bare["base_verdict"])
+    assert seen <= {"narrows", "widens", "mixed", "stationary"} and seen != {"stationary"}
+    slow = tmp_path / "slow"  # r_j ~ t'^5e-4, Q_j ~ t'^2e-4
+    _write_run(slow, [_record(1, 3e-6)], _rows(alpha=5e-4, q=2e-4))
+    row = event_table.run_row(slow)
+    assert row["base_verdict"] == "stationary" and row["alpha_r_j"] == pytest.approx(5e-4)
+    assert 0.0 < row["dQ_j_rel"] < event_table.STATIONARY_Q
+    finer = event_table.run_row(slow, alpha_floor=1e-4, q_floor=1e-5)
+    assert finer["base_verdict"] == "widens" and finer["stationary_alpha"] == 1e-4
 
 
 def _jsonl_leg(leg: Path, step, events_made):

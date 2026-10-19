@@ -4,7 +4,8 @@
 Usage::
 
     python postProcess/event_table.py RUN [RUN ...] --out EVENTS.csv [--runs RUNS.csv] \
-        [--tip cavity_tip [bubble_top ...]] [--after-events 1] [--near-base 3]
+        [--tip cavity_tip [bubble_top ...]] [--after-events 1] [--near-base 3] \
+        [--stationary-alpha 1e-3] [--stationary-q 1e-3]
 
 Each ``RUN`` is the directory of a run after a cut with the ``collapse.reconnect_events`` block, or
 the directories of the legs of one run continued in several, in their order, joined by
@@ -48,13 +49,18 @@ upward jet into the cavity, ``cavity_tip``, by default, the downward one ``bubbl
 rows of ``chains.txt`` after the step of the ``--after-events``-th event made at that tip (its
 number and step ``base_after_k``, ``base_after_step``; 0: from the run's start) in which that jet
 stands and ``t' = t - t_p`` is positive, the least-squares slope of ``ln r_j`` against ``ln t'``
-(``alpha_r_j``), the slope of ``Q_j`` against ``t'`` (``dQ_j_dt``) and of ``ln Q_j`` against
-``ln t'`` where every ``Q_j`` is positive (``alpha_Q_j``): ``widens`` when ``alpha_r_j`` and
-``dQ_j_dt`` are both positive, ``narrows`` when ``alpha_r_j`` is negative, ``mixed`` otherwise,
-``insufficient`` with fewer than ``MIN_ROWS`` rows and ``no-events`` before the event the window
-starts at. The base is also given against the root neck of its chain (``r_j - r_n`` in ``delta``, at
-the first and the last row of the window), with the median step in ``delta^2``. The test is a
-report: it decides nothing about the run.
+(``alpha_r_j``), the slope of ``Q_j`` against ``t'`` (``dQ_j_dt``), the change of ``Q_j`` over
+the window it gives relative to the median ``|Q_j|`` there (``dQ_j_rel``) and the slope of
+``ln Q_j`` against ``ln t'`` where every ``Q_j`` is positive (``alpha_Q_j``). Each of
+``alpha_r_j`` and ``dQ_j_rel`` counts as zero within its floor (``--stationary-alpha``,
+``--stationary-q``, ``STATIONARY_ALPHA`` and ``STATIONARY_Q`` by default, recorded with the row as
+``stationary_alpha``, ``stationary_q``), so that a base standing still is not given a sign by the
+round-off of its fit: ``widens`` when both are positive, ``narrows`` when ``alpha_r_j`` is negative,
+``stationary`` when both are zero, ``mixed`` otherwise, ``insufficient`` with fewer than
+``MIN_ROWS`` rows and ``no-events`` before the event the window starts at. The base is also given
+against the root neck of its chain (``r_j - r_n`` in ``delta``, at the first and the last row of the
+window), with the median step in ``delta^2``. The test is a report: it decides nothing about the
+run.
 """
 
 from __future__ import annotations
@@ -69,6 +75,10 @@ from pathlib import Path
 import numpy as np
 
 MIN_ROWS = 5  # rows of the base test at least
+# the floors within which the base test counts the slope of ln r_j against ln t' and the relative
+# change of Q_j over its window as zero (a base standing still)
+STATIONARY_ALPHA = 1e-3
+STATIONARY_Q = 1e-3
 TIP_NECKS = {"cavity_tip": "r_neck_open", "bubble_top": "r_neck_bubble",
              "bubble_bottom": "r_neck_bubble"}  # the root neck of each tip's chain (chains.txt)
 TIPS = ("cavity_tip", "bubble_top", "bubble_bottom")
@@ -89,8 +99,9 @@ RUN_FIELDS = ("run", "case_id", "legs", "delta", "T", "state", "stop", "stop_kin
               "volume_total_drift", "Pz_removed_share", "KE_removed_share", "rear_recontacts",
               "front_recontacts", "refused", "unclosed", "failed", "flagged", "tip",
               "base_after_k", "base_after_step", "base_rows", "base_t_prime_lo",
-              "base_t_prime_hi", "alpha_r_j", "dQ_j_dt", "alpha_Q_j", "base_verdict",
-              "r_j_start_over_delta", "r_j_end_over_delta", "base_minus_neck_start_over_delta",
+              "base_t_prime_hi", "alpha_r_j", "dQ_j_dt", "dQ_j_rel", "alpha_Q_j",
+              "base_verdict", "stationary_alpha", "stationary_q", "r_j_start_over_delta",
+              "r_j_end_over_delta", "base_minus_neck_start_over_delta",
               "base_minus_neck_end_over_delta", "dt_over_delta2_median")
 
 
@@ -300,13 +311,22 @@ def _slope(x, y) -> float:
     return float(np.polyfit(x, y, 1)[0])
 
 
-def base_test(chains: dict, tip: str, after_step: float | None, delta: float) -> dict:
+def _sign(x: float, floor: float) -> int:
+    """The sign of ``x``, zero within ``floor`` of zero."""
+    return 1 if x > floor else -1 if x < -floor else 0
+
+
+def base_test(chains: dict, tip: str, after_step: float | None, delta: float, *,
+              alpha_floor: float = STATIONARY_ALPHA, q_floor: float = STATIONARY_Q) -> dict:
     """The test of the base of the jet of ``tip`` over the rows after the step ``after_step``
     (module docstring; ``-inf`` from the run's start, None: the run has not made the event the
-    window starts at)."""
+    window starts at), with the floors of a base standing still, ``alpha_floor`` of ``alpha_r_j``
+    and ``q_floor`` of ``dQ_j_rel``."""
     out = {"tip": tip, "base_rows": 0, "base_t_prime_lo": math.nan, "base_t_prime_hi": math.nan,
-           "alpha_r_j": math.nan, "dQ_j_dt": math.nan, "alpha_Q_j": math.nan,
+           "alpha_r_j": math.nan, "dQ_j_dt": math.nan, "dQ_j_rel": math.nan,
+           "alpha_Q_j": math.nan,
            "base_verdict": "no-events" if after_step is None else "insufficient",
+           "stationary_alpha": alpha_floor, "stationary_q": q_floor,
            "r_j_start_over_delta": math.nan, "r_j_end_over_delta": math.nan,
            "base_minus_neck_start_over_delta": math.nan,
            "base_minus_neck_end_over_delta": math.nan, "dt_over_delta2_median": math.nan}
@@ -337,14 +357,21 @@ def base_test(chains: dict, tip: str, after_step: float | None, delta: float) ->
                base_minus_neck_end_over_delta=float((r_j[idx[-1]] - neck[idx[-1]]) / delta),
                dt_over_delta2_median=float(np.nanmedian(dt[idx]) / delta**2)
                if np.isfinite(dt[idx]).any() else math.nan)
-    a, q = out["alpha_r_j"], out["dQ_j_dt"]
-    out["base_verdict"] = ("widens" if a > 0.0 and q > 0.0 else "narrows" if a < 0.0
-                           else "mixed")
+    # the change of Q_j over the window, by the fit, relative to the median |Q_j| there
+    scale = float(np.median(np.abs(Q[idx])))
+    out["dQ_j_rel"] = (out["dQ_j_dt"] * (out["base_t_prime_hi"] - out["base_t_prime_lo"]) / scale
+                       if scale > 0.0 else math.nan)
+    a = _sign(out["alpha_r_j"], alpha_floor)
+    q = _sign(out["dQ_j_rel"], q_floor)
+    out["base_verdict"] = ("widens" if a > 0 and q > 0 else "narrows" if a < 0
+                           else "stationary" if a == 0 and q == 0 else "mixed")
     return out
 
 
-def run_row(run, *, tip: str = "cavity_tip", after_events: int = 1) -> dict:
-    """The row of one run (module docstring) and the test of the base of the jet of ``tip``."""
+def run_row(run, *, tip: str = "cavity_tip", after_events: int = 1,
+            alpha_floor: float = STATIONARY_ALPHA, q_floor: float = STATIONARY_Q) -> dict:
+    """The row of one run (module docstring) and the test of the base of the jet of ``tip``, with
+    the floors of a base standing still (``alpha_floor``, ``q_floor``)."""
     legs = run_legs(run)
     records = event_records(legs)
     info = run_info(legs, records)
@@ -383,7 +410,8 @@ def run_row(run, *, tip: str = "cavity_tip", after_events: int = 1) -> dict:
     row.update(base_after_k=anchor.get("k", "") if anchor else "",
                base_after_step=anchor.get("step", "") if anchor else "")
     after = -math.inf if after_events <= 0 else (_num(anchor.get("step")) if anchor else None)
-    row.update(base_test(info["chains"], tip, after, d))
+    row.update(base_test(info["chains"], tip, after, d, alpha_floor=alpha_floor,
+                         q_floor=q_floor))
     return row
 
 
@@ -410,13 +438,18 @@ def main(argv=None) -> int:
                          "run's start)")
     ap.add_argument("--near-base", type=float, default=3.0,
                     help="a neck within this many jet radii of the base is near it")
+    ap.add_argument("--stationary-alpha", type=float, default=STATIONARY_ALPHA,
+                    help="the slope of ln r_j against ln t' counts as zero within this")
+    ap.add_argument("--stationary-q", type=float, default=STATIONARY_Q,
+                    help="the relative change of Q_j over the window counts as zero within this")
     args = ap.parse_args(argv)
     runs = [legs for legs in (run_legs(run) for run in args.runs)
             if legs and all(leg.is_dir() for leg in legs)]
     events = [r for legs in runs for r in event_rows(legs, near_base=args.near_base)]
     _write(args.out, events, EVENT_FIELDS)
-    rows = [run_row(legs, tip=tip, after_events=args.after_events) for legs in runs
-            for tip in args.tip]
+    rows = [run_row(legs, tip=tip, after_events=args.after_events,
+                    alpha_floor=args.stationary_alpha, q_floor=args.stationary_q)
+            for legs in runs for tip in args.tip]
     if args.runs_out is not None:
         _write(args.runs_out, rows, RUN_FIELDS)
     for r in rows:

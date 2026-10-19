@@ -386,7 +386,10 @@ add a second top-level `cases/` tree.
   and the test of the base of that tip's jet widening after its own events, the slope of `ln r_j`
   against `ln t'` and of `Q_j` against `t'` over the rows of `chains.txt` after the step of the
   `--after-events`-th event made at that tip, `base_after_k`, not at any tip, and never the row of
-  that step, the state before its cut). A run is one directory or the directories of its legs in
+  that step, the state before its cut; `stationary` where the slope and the relative change of
+  `Q_j` over the window lie within their floors, `--stationary-alpha` and `--stationary-q`,
+  recorded in the row, so that the round-off of a fit gives a base standing still no sign). A run
+  is one directory or the directories of its legs in
   their order joined by `os.pathsep`, read as one continuous run: the records by `k`, a later leg's
   replacing an earlier's and an earlier leg's beyond the `events_made` a later leg starts with
   dropped; the rows of `chains.txt` and `budget.txt` of the legs before a leg beyond its first step

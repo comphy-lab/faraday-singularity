@@ -577,12 +577,15 @@ the cavity by default; `--tip cavity_tip bubble_top` adds the downward one) afte
 `--after-events`-th event made at that tip (`base_after_k`; the events at the other tips do not
 start it), over the rows of the steps after that event's, whose own row is the state before its
 cut: the slopes of `ln r_j` against `ln t'` and of `Q_j` against `t'`, `t' = t - t_p`, with the
-verdict `widens` when both are positive, `narrows` when the first is negative, `mixed` otherwise,
-and the base against the root neck of its chain. A run continued in several legs is given as the
-directories of its legs in their order joined by the path separator (`<leg-1>:<leg-2>`) and read as
-one continuous run: each event's record is the latest leg's, the records of an earlier leg beyond
-the events a later leg starts with are dropped, and each step has the row a continuous run writes.
-The report decides nothing about the run.
+verdict `widens` when both are positive, `narrows` when the first is negative, `stationary` when
+the first and the change of `Q_j` over the window relative to its median there both lie within
+their floors (`--stationary-alpha`, `--stationary-q`, 1e-3 each, recorded in the row; within them
+each counts as zero, so that the round-off of a fit gives a base standing still no sign), `mixed`
+otherwise, and the base against the root neck of its chain. A run continued in several legs is
+given as the directories of its legs in their order joined by the path separator
+(`<leg-1>:<leg-2>`) and read as one continuous run: each event's record is the latest leg's, the
+records of an earlier leg beyond the events a later leg starts with are dropped, and each step has
+the row a continuous run writes. The report decides nothing about the run.
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus
