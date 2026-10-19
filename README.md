@@ -387,7 +387,8 @@ the roots of the jets the cut launched; `gap`, the closing folds of either chain
 narrowing); and `post`, the limits, floors and mesh sizes of the run after the cut, each by default
 the collapse's own. A case without the block runs exactly as before the block existed: the tests run
 a cut, the run after it with rebuilds and dumps, and a restart from one of those dumps, against the
-source of commit `1b65916`, to the byte. That finite-element run meets no neck, no jet at the
+source of commit `1b65916`, to the byte, the meshes gmsh wrote included, also with fewer dumps kept
+than written. That finite-element run meets no neck, no jet at the
 bubble's bottom and no stop but its step limit; stand-in problems with prescribed chains cover those
 against the same source (`testCases/test_events_legacy.py`), and the runner of a continuation after
 the cut, with stand-ins of the problem and the driver, writes the `run_status.json` of that commit's

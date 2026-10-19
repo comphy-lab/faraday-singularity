@@ -24,6 +24,7 @@ Each run compiles its problem in seconds; the module takes about four minutes.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -137,9 +138,21 @@ def _without_wall(x):
     return x
 
 
+def _gmsh_files(run: Path) -> dict[str, str]:
+    """The files gmsh wrote for a run (``_gmsh``, which the pruning after a cut deletes from) with
+    the hash of each."""
+    gmsh = run / "_gmsh"
+    if not gmsh.is_dir():
+        return {}
+    return {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(gmsh.iterdir())
+            if f.is_file()}
+
+
 def _same_outputs(a: Path, b: Path) -> list[str]:
     """Every file of two run directories (but pyoomph's own, under ``_*``) the same: to the byte,
-    but the wall-time column of ``collapse.txt`` and the wall times of the JSON records."""
+    but the wall-time column of ``collapse.txt`` and the wall times of the JSON records; and the
+    files gmsh wrote for them (``_gmsh``) the same, by name and hash, none deleted in one only."""
+    assert _gmsh_files(a) == _gmsh_files(b)
     names = sorted(f.relative_to(a).as_posix() for f in a.rglob("*") if f.is_file()
                    and not f.relative_to(a).parts[0].startswith("_"))
     assert names == sorted(f.relative_to(b).as_posix() for f in b.rglob("*") if f.is_file()
@@ -172,12 +185,15 @@ COLLAPSE = {"max_steps": 6, "refine_ratio": 0.5, "remesh_backoff": 2, "state_dt"
 def test_runs_after_a_cut_without_the_block_are_as_at_1b65916(tmp_path):
     """Without the events block the run after a cut, its rebuilds, dumps and a restart from one of
     them in a new process, writes what the source of 1b65916 writes, to the byte (the wall times
-    aside)."""
+    aside), and leaves the same meshes in ``_gmsh``; so does a run that keeps fewer dumps than it
+    writes, whose rotation deletes dumps and runs the hook of the pruning after each, which without
+    the block deletes no mesh."""
     ref = _reference_src(tmp_path)
     spec = {"physics": fem.PHYSICS, "mesh": fem.MESH, "cut": CUT, "collapse": COLLAPSE}
     runs = {name: _run(src, tmp_path / name, spec) for name, src in
             (("ref", ref), ("head", ROOT / "src"))}
     names = _same_outputs(runs["ref"], runs["head"])
+    assert len(_gmsh_files(runs["head"])) > 1
     result = json.loads((runs["head"] / "result.json").read_text())
     assert result["steps"] == 6 and result["remesh_count"] >= 2, result
     assert "states/precut_0.021.dump" in names and "chains.txt" in names
@@ -194,6 +210,14 @@ def test_runs_after_a_cut_without_the_block_are_as_at_1b65916(tmp_path):
     _same_outputs(again["ref"], again["head"])
     assert json.loads((again["head"] / "result.json").read_text())["steps"] == 6
     assert np.isfinite(np.loadtxt(again["head"] / "chains.txt", ndmin=2)).any()
+    # two dumps kept of the six the run writes after the cut: the rotation deletes four
+    rotating = dict(spec, collapse=dict(COLLAPSE, state_keep=2))
+    rotated = {name: _run(src, tmp_path / f"{name}-rotated", rotating) for name, src in
+               (("ref", ref), ("head", ROOT / "src"))}
+    names = _same_outputs(rotated["ref"], rotated["head"])
+    assert [n for n in names if n.startswith("states/state_") and n.endswith(".dump")] == [
+        "states/state_00000005.dump", "states/state_00000006.dump"]
+    assert _gmsh_files(rotated["head"]) == _gmsh_files(runs["head"])  # rotation deletes no mesh
 
 
 def test_with_the_block_the_run_after_a_cut_lowers_oomph_libs_smallest_step(tmp_path):

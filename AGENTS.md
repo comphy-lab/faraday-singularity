@@ -199,7 +199,9 @@ add a second top-level `cases/` tree.
   `gap`, `post`), a block beside the cut's own that needs a `reconnect` block; without it a run is
   the same to the byte as at 1b65916 (`testCases/test_events_fem.py`: a cut of the synthetic necked
   cavity, the run after it with rebuilds and dumps to its step limit, and a restart from a dump,
-  which meet no neck, no jet at the bubble's bottom and no other stop;
+  which meet no neck, no jet at the bubble's bottom and no other stop, the meshes left in `_gmsh`
+  too, by name and hash, and a run keeping fewer dumps than it writes, whose rotation runs the hook
+  of the pruning;
   `testCases/test_events_legacy.py`: stand-in problems through those, the bubble's bottom with a jet
   and its kept focus, the necks of both chains, the open chain's neck stop, a groove at a jet's
   base, the dt floor and the stops after a cut; `testCases/test_events_run.py`: the runner of a
