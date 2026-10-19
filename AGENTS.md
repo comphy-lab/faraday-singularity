@@ -269,7 +269,9 @@ add a second top-level `cases/` tree.
   `events.IMPLEMENTED_HANDLERS`) with the run's last step as the history's, and goes on from the
   fresh mesh, whose stops it checks again as those of a mesh freshly built (`reset_after_event`: no
   new cycle, the births, series, holds and last step kept; the scale's growth limit, the cut tip's
-  apex history and its chain's kink region dropped; event `liquid-cut`, a `liquid-cut` profile); it
+  apex history and its chain's kink region dropped; event `liquid-cut`, a `liquid-cut` profile; the
+  jets' bases and the kink regions of the fresh mesh committed before `postcut_e<k>` is kept, so
+  that a restart from it steps as the run does); it
   adds to the record the base of the cut jet before the cut (`trigger.r_j`, `z_b`, `r_j_over_r_n`,
   `neck_to_base_over_r_j`), the event's `generation` at its tip, `step`, `leg`, `tau_over_delta2`,
   `t_prime_over_T` (`T = t_p - t_cut`), the `cascade` verdict, the `commit`, the ghost's start and

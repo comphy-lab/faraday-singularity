@@ -512,7 +512,9 @@ making it: with its last step as the history's step of the cut, it removes the h
 fresh mesh and checks its stops again as those of a mesh freshly built, then goes on from it. No new
 cycle begins: the births of the jets, the series of the singular time, the holds of the rebuilds and
 the last step are kept, while the growth limit of the local scale, the history of the cut tip's jet
-base and the kink region of its chain restart. The driver adds to the event's record what it
+base and the kink region of its chain restart; the bases of the jets and the kink regions of the
+fresh mesh are committed before the state after the event is kept, so that a restart from it steps
+as the run does. The driver adds to the event's record what it
 measured of the state before it (the cut jet's base), the event's generation at its tip, its step
 and leg, its times in units of `delta^2` and of `T = t_p - t_cut`, the verdict of the cascade test,
 the source commit, the start of the ghost and the cut jet after the cut (`after`); `events.jsonl`

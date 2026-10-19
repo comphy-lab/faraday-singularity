@@ -2156,9 +2156,9 @@ class CollapseDriver:
            do hard budgets that do not close (``event-unclosed``), whose problem holds a cut that
            is not accepted and is dumped no more; any other failure of the cut ends the run as a
            failed one, raised.
-        3. The driver's bookkeeping of the cut made (:meth:`_on_event_made`), its row of
-           ``events.txt``, and the commit of the jets' bases and the kink regions on the fresh
-           mesh (:meth:`_commit_post_cut`)."""
+        3. The driver's bookkeeping of the cut made (:meth:`_on_event_made`, which commits the
+           jets' bases and the kink regions of the fresh mesh, :meth:`_commit_post_cut`, before the
+           state after the event is kept) and its row of ``events.txt``."""
         if request.get("handler") not in IMPLEMENTED_HANDLERS:
             return m, self._unhandled_event(request)
         if len(self._made_events()) >= self.events.max_events:
@@ -2196,7 +2196,6 @@ class CollapseDriver:
             self._write_drop_row(made, "free")
         self._drop_event_dumps()
         self._prune_meshes()
-        self._commit_post_cut(m)
         return m, None
 
     def _drop_event_dumps(self) -> list[str]:
@@ -2238,7 +2237,9 @@ class CollapseDriver:
         at its tip, ``step``, ``leg``, ``tau_over_delta2``, ``t_prime_over_T`` with ``T = t_p -
         t_cut``, the ``cascade`` verdict, the source ``commit``, ``dt.before``), the start of its
         ghost (``step0``, ``tip``, ``far_tip``, ``recontacts``); then :meth:`reset_after_event`,
-        and the jet of the cut tip on the fresh mesh (``after``)."""
+        the commit of the jets' bases and the kink regions of the fresh mesh
+        (:meth:`_commit_post_cut`), which the state after the event, kept next, holds as the run
+        steps from it, and the jet of the cut tip on the fresh mesh (``after``)."""
         m, tip, verdict = self._event_before
         st, delta = self.state, self.reconnect.delta
         jet = m if tip == "cavity_tip" else (m.get("tips") or {}).get(tip, {})
@@ -2263,6 +2264,9 @@ class CollapseDriver:
             rec["ghost"].update(step0=st.step, tip=tip, far_tip=FAR_TIPS.get(tip),
                                 recontacts=[])
         m_new = self.reset_after_event(rec)
+        # the jets' bases and the kink regions of the fresh mesh, before the state after the event
+        # is kept: a restart from that dump steps from the mesh as the run does
+        self._commit_post_cut(m_new)
         after = m_new if tip == "cavity_tip" else (m_new.get("tips") or {}).get(tip, {})
         rec["after"] = {key: _finite(after.get(key, math.nan))
                         for key in ("r_j", "z_b", "Q_j", "V_j")}

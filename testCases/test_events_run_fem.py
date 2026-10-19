@@ -171,7 +171,7 @@ def test_a_refused_cut_stops_the_run_resumably_and_leaves_the_problem_unchanged(
 
 
 RESUME = """
-import json, sys
+import json, math, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])
 import test_events_run_fem as T
@@ -187,11 +187,15 @@ with pb:
     drv = CollapseDriver(pb, CollapseSettings(**dict(T.DRIVER, max_steps=steps)), out,
                          reconnect=J.RECON, events=J.EVENTS)
     drv.restore(meta)
+    # what the restored state holds of the jets' bases, and their radii on the loaded mesh
+    restored = {"apex_history": drv.state.apex_history, "kinks": drv.state.kinks,
+                "apexes": {tip: a["R_apex"] for tip, a in drv._post_cut_state()["apexes"].items()
+                           if math.isfinite(a["R_apex"])}}
     res = drv.run(1e-8)
     drv.close()
     report = {"stop": res["stop"], "steps": res["steps"], "events": [e["k"] for e in pb.events],
               "tips": [e.get("tip") for e in pb.events], "leg": drv.state.legs[-1],
-              "summary": res["events"]}
+              "summary": res["events"], "restored": restored}
 print(json.dumps(report))
 """
 
@@ -240,3 +244,50 @@ def test_a_run_resumes_from_the_dump_of_an_unhandled_event_with_the_handler(tmp_
     later = _resume(end, tmp_path / "later", DRIVER["max_steps"] + 2)
     assert later["stop"]["reason"] == "max-steps" and later["steps"] == DRIVER["max_steps"] + 2
     assert later["events"] == [1, 2] and later["summary"]["made"] == 2
+
+
+def _numbers(row: dict) -> dict:
+    return {k: float(v) for k, v in row.items()}
+
+
+def _remesh_events(run: Path) -> list[dict]:
+    """The rebuilds of a run after its start (events ``remesh`` from step 1 on): the step, the
+    regions that asked and each region's name, target and the size the rebuild set."""
+    lines = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+    return [{"step": x["step"], "asked_by": x.get("asked_by"),
+             "regions": [(g["name"], g["target"], g.get("new_size")) for g in x.get("regions", [])]}
+            for x in lines if x["event"] == "remesh" and x["step"] >= 1]
+
+
+def test_a_restart_from_the_state_after_an_event_goes_on_as_the_run_did(two_events, tmp_path):
+    """The dump of the state after an event (``postcut_e<k>``) holds the bases of the jets and the
+    kink regions of its fresh mesh, as the run commits them before it steps from it: in a new
+    process the restart from the state after the second event restores as the history of each jet's
+    base its radius on that mesh, at the dump's time, and takes the steps the run took, row for row
+    (``chains.txt``) and rebuild for rebuild (the regions of its ``remesh`` events)."""
+    out = two_events["out"]
+    state = out / "states" / "postcut_e002.dump"
+    meta = json.loads(state.with_suffix(".json").read_text())
+    again = _resume(state, tmp_path / "again", DRIVER["max_steps"])
+    restored = again["restored"]
+    assert restored["apexes"], "the jets of the synthetic state have bases"
+    assert restored["apex_history"] == {tip: [meta["time"], R]
+                                        for tip, R in restored["apexes"].items()}
+    assert again["stop"]["reason"] == "max-steps" and again["events"] == [1, 2]
+    rows = {int(r["step"]): _numbers(r) for r in _rows(out / "chains.txt")}
+    resumed = {int(r["step"]): _numbers(r) for r in _rows(tmp_path / "again" / "chains.txt")}
+    steps = range(1, DRIVER["max_steps"] + 1)
+    assert all(k in rows and k in resumed for k in steps)
+    for k in steps:
+        for name, v in rows[k].items():
+            assert resumed[k][name] == pytest.approx(v, rel=1e-9, abs=0.0, nan_ok=True), (k, name)
+    ours, theirs = _remesh_events(out), _remesh_events(tmp_path / "again")
+    assert [(x["step"], x["asked_by"]) for x in theirs] == [(x["step"], x["asked_by"])
+                                                            for x in ours]
+    for a, b in zip(ours, theirs):
+        assert [g[0] for g in a["regions"]] == [g[0] for g in b["regions"]]
+        for (name, target, size), (_, target_b, size_b) in zip(a["regions"], b["regions"]):
+            assert target_b == pytest.approx(target, rel=1e-9, abs=0.0), (a["step"], name)
+            assert (size is None) == (size_b is None), (a["step"], name)
+            if size is not None:
+                assert size_b == pytest.approx(size, rel=1e-9, abs=0.0), (a["step"], name)
