@@ -6,11 +6,15 @@ problem with a synthetic record of the gas cut and an imposed solenoidal flow ab
 
 * two events in one run: the driver meets each landed neck at the check of its stops, cuts it,
   re-measures the fresh mesh, checks its stops as those of a mesh freshly built and goes on to its
-  step limit, with its records, rows, ghosts, budget and dumps, the meshes no dump refers to pruned;
+  step limit, with its records, rows, ghosts, budget and dumps, each dump with its mesh; a restart
+  from the state after the second event, in a new process, steps as the run did;
+* the same run deleting the dumps of its events as they come (``post.keep_event_dumps``
+  ``first0-last0``) prunes the meshes they referred to, against a twin that prunes none, and the
+  state it ended on, dumped after the prunes, restarts in a new process;
 * a cut refused before anything changed stops the run resumably and leaves the problem as it was;
 * a run whose driver makes no liquid cut stops on the first event with the state before it, from
   which, in a new process, a driver that makes the cut makes both events and goes on; in another
-  process the state that run ended on, its mesh kept by the pruning, restarts and steps.
+  process the state that run ended on restarts and steps.
 
 Each problem compiles in seconds; the module takes a few minutes.
 """
@@ -153,9 +157,10 @@ def test_the_budget_of_the_run_with_two_events_holds_their_removals(two_events):
         assert float(r["volume_total"]) == pytest.approx(float(r["volume"]) + V, rel=1e-12)
 
 
-def test_the_meshes_no_dump_of_the_run_refers_to_are_pruned(two_events):
-    """Every mesh left in _gmsh is one a dump of the run refers to, or the one the problem was
-    built from at its start; the dumps of both events are kept with theirs."""
+def test_the_dumps_of_both_events_are_kept_with_their_meshes(two_events):
+    """Under the default policy (``all``) the dumps of both events are kept, and every mesh left in
+    _gmsh is one a dump of the run refers to, or the one the problem was built from at its start:
+    this run leaves no mesh that no dump refers to, so it prunes none (the next test prunes)."""
     out = two_events["out"]
     meshes, referred = _mesh_files(out)
     first = {p.resolve() for p in (out / "_gmsh").glob("JetsMesh.msh")}
@@ -163,6 +168,45 @@ def test_the_meshes_no_dump_of_the_run_refers_to_are_pruned(two_events):
     names = sorted(p.name for p in (out / "states").glob("p*cut_e*.dump"))
     assert names == ["postcut_e001.dump", "postcut_e002.dump", "precut_e001.dump",
                      "precut_e002.dump"]
+    assert two_events["result"]["events"]["meshes_pruned"] == 0
+
+
+DROPPED = {"liquid": {"enabled": True},
+           "post": {"open_neck_stop": False, "neck_floor": 1e-5, "keep_event_dumps": "first0-last0"}}
+
+
+def test_the_meshes_of_the_event_dumps_deleted_are_pruned_and_the_end_state_restarts(tmp_path):
+    """With ``post.keep_event_dumps`` ``first0-last0`` the run deletes both dumps of each event as
+    it comes, and with ``post.prune_gmsh`` the meshes they referred to that no dump left and not
+    the problem holds: its twin without the pruning deletes the same dumps and no mesh, and keeps
+    more meshes, while every dump left in the pruned run finds its own and the rows of the two are
+    the same. In a new process the state the pruned run ended on, dumped after its prunes,
+    restarts from its mesh and takes two more steps."""
+    results = {}
+    for name, prune in (("pruned", True), ("kept", False)):
+        block = {**DROPPED, "post": {**DROPPED["post"], "prune_gmsh": prune}}
+        pb, drv = _jets_driver(tmp_path / name, events=ev.EventSettings.from_dict(block))
+        try:
+            results[name] = drv.run(1e-8)
+        finally:
+            _finish(pb, drv)
+    pruned, kept = results["pruned"]["events"], results["kept"]["events"]
+    assert pruned["made"] == kept["made"] == 2
+    assert pruned["dumps_dropped"] == kept["dumps_dropped"] == 4
+    assert pruned["meshes_pruned"] > 0 and kept["meshes_pruned"] == 0
+    assert not list((tmp_path / "pruned" / "states").glob("p*cut_e*.dump"))
+    meshes, referred = _mesh_files(tmp_path / "pruned")
+    all_meshes, _ = _mesh_files(tmp_path / "kept")
+    assert referred <= meshes and len(meshes) < len(all_meshes)
+    for name in ("chains.txt", "budget.txt"):
+        a = [_numbers(r) for r in _rows(tmp_path / "pruned" / name)]
+        b = [_numbers(r) for r in _rows(tmp_path / "kept" / name)]
+        assert len(a) == len(b) and all(x == pytest.approx(y, rel=1e-9, nan_ok=True)
+                                        for x, y in zip(a, b)), name
+    end = Path(results["pruned"]["stop"]["end_state"])
+    later = _resume(end, tmp_path / "later", DRIVER["max_steps"] + 2)
+    assert later["stop"]["reason"] == "max-steps" and later["steps"] == DRIVER["max_steps"] + 2
+    assert later["events"] == [1, 2]
 
 
 def test_a_refused_cut_stops_the_run_resumably_and_leaves_the_problem_unchanged(tmp_path,
@@ -231,8 +275,8 @@ def test_a_run_resumes_from_the_dump_of_an_unhandled_event_with_the_handler(tmp_
     """A driver that makes no liquid cut (as before the handler existed) stops on the first landed
     neck at once (``event-unhandled``) with the state before it. In a new process a driver that
     makes the cut restores that state, makes both events and takes its steps (its leg from the
-    state before event 1); in another, the state that run ended on, whose mesh the pruning kept,
-    restarts and takes two more steps."""
+    state before event 1); in another, the state that run ended on restarts and takes two more
+    steps."""
     import faraday_singularity.driver as module
 
     monkeypatch.setattr(module, "IMPLEMENTED_HANDLERS", ())

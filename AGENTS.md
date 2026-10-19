@@ -313,7 +313,9 @@ add a second top-level `cases/` tree.
   `post.prune_gmsh` the meshes of `_gmsh` that no dump of the run directory or of the driver's
   `states` refers to (pyoomph's `get_state_file_mesh_files`) and that the problem's templates do not hold, after every
   rotating dump and every event (`CollapseDriver._prune_meshes`, none where a dump cannot be read;
-  `testCases/test_events_fem.py` restarts the dumps kept in new processes). Every other event is a
+  `testCases/test_events_fem.py` restarts the dumps kept in new processes, and
+  `testCases/test_events_run_fem.py` prunes the meshes of the event dumps a run deletes, against a
+  twin that prunes none, and restarts the state it ended on). Every other event is a
   resumable stop with the dump of the state before it (`states/precut_e<k>.dump`, `cut_stage`
   `precut-event`, the event under `event`, also an event of its reason) besides the end state, and
   with the record of the event, so that every event a run meets has one (`events/event_<k>.json`,
