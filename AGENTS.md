@@ -383,9 +383,14 @@ add a second top-level `cases/` tree.
   `T = t_p - t_cut`, from `events/event_<k>.json`; a row per run and tip of `--tip`, the upward jet
   by default, with the stop and the event it stopped on, `budget.txt`'s drifts and the removals'
   shares of the axial momentum and the kinetic energy, the events made with a closure flagged,
-  and the test of the base of that tip's jet widening after the events, the slope of `ln r_j`
-  against `ln t'` and of `Q_j` against `t'` over `chains.txt` from the `--after-events`-th event
-  on). It reports and decides nothing.
+  and the test of the base of that tip's jet widening after its own events, the slope of `ln r_j`
+  against `ln t'` and of `Q_j` against `t'` over the rows of `chains.txt` after the step of the
+  `--after-events`-th event made at that tip, `base_after_k`, not at any tip, and never the row of
+  that step, the state before its cut). A run is one directory or the directories of its legs in
+  their order joined by `os.pathsep`, read as one continuous run: the records by `k`, a later leg's
+  replacing an earlier's and an earlier leg's beyond the `events_made` a later leg starts with
+  dropped; the rows of `chains.txt` and `budget.txt` of the legs before a leg beyond its first step
+  dropped, and its own first row where they have one at that step. It reports and decides nothing.
 - Run outputs, run manifests and environment receipts live outside this repository.
 - Figures follow the `publication-plots` conventions.
 - README, `docs/` and figure captions are public-candidate: no private paths, hosts or

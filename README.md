@@ -148,8 +148,8 @@ python run_case.py <collapse-case>.json --outdir <new-run-directory> \
 python postProcess/collapse_table.py <run-directory> [...] --per-episode --out <table>.csv
 python postProcess/collapse_analysis.py <run-directory> --out <analysis-directory> \
     [--rj-window <lo> <hi>]
-python postProcess/event_table.py <run-directory> [...] --out <events>.csv --runs <runs>.csv \
-    [--tip cavity_tip bubble_top]
+python postProcess/event_table.py <run-directory>[:<next-leg-directory>...] [...] \
+    --out <events>.csv --runs <runs>.csv [--tip cavity_tip bubble_top]
 ```
 
 Its run directory also receives:
@@ -573,11 +573,16 @@ base, the closures, the ghost's recontacts); each run with its stop and the even
 its events per tip and the cascade's verdicts, the drift of its liquid with and without the
 removals, the removals' shares of the axial momentum and the kinetic energy, the events made with a
 closure flagged, and a report on the base of the jet of each tip of `--tip` (the upward jet into
-the cavity by default; `--tip cavity_tip bubble_top` adds the downward one) from its
-`--after-events`-th event on: the slopes of `ln r_j` against `ln t'` and of `Q_j` against `t'`,
-`t' = t - t_p`, with the verdict `widens` when both are positive, `narrows` when the first is
-negative, `mixed` otherwise, and the base against the root neck of its chain. The report decides
-nothing about the run.
+the cavity by default; `--tip cavity_tip bubble_top` adds the downward one) after the
+`--after-events`-th event made at that tip (`base_after_k`; the events at the other tips do not
+start it), over the rows of the steps after that event's, whose own row is the state before its
+cut: the slopes of `ln r_j` against `ln t'` and of `Q_j` against `t'`, `t' = t - t_p`, with the
+verdict `widens` when both are positive, `narrows` when the first is negative, `mixed` otherwise,
+and the base against the root neck of its chain. A run continued in several legs is given as the
+directories of its legs in their order joined by the path separator (`<leg-1>:<leg-2>`) and read as
+one continuous run: each event's record is the latest leg's, the records of an earlier leg beyond
+the events a later leg starts with are dropped, and each step has the row a continuous run writes.
+The report decides nothing about the run.
 
 The limits and floors of the run after the cut are the block's `post` keys where set, the collapse's
 own otherwise, so that a study in `delta` can scale them with `delta`: `h_floor` (the smallest focus

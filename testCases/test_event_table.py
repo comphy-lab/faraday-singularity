@@ -7,6 +7,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -185,16 +186,17 @@ def test_the_base_of_a_jet_that_widens_after_the_events_and_of_one_that_narrows(
 
 def test_the_command_line_writes_both_tables(tmp_path, capsys):
     run = tmp_path / "run"
-    _write_run(run, [_record(1, 3e-6)], _rows())
+    _write_run(run, [_record(1, 3e-6), _record(2, 4e-6, tip="bubble_top")], _rows())
     out, runs = tmp_path / "events.csv", tmp_path / "runs.csv"
     assert event_table.main([str(run), "--out", str(out), "--runs", str(runs)]) == 0
     with out.open() as fh:
         rows = list(csv.DictReader(fh))
-    assert [r["k"] for r in rows] == ["1"] and tuple(rows[0]) == event_table.EVENT_FIELDS
+    assert [r["k"] for r in rows] == ["1", "2"] and tuple(rows[0]) == event_table.EVENT_FIELDS
     with runs.open() as fh:
         (row,) = list(csv.DictReader(fh))
     assert row["base_verdict"] == "widens" and tuple(row) == event_table.RUN_FIELDS
-    assert "1 events" in capsys.readouterr().out
+    assert (row["base_after_k"], row["base_after_step"]) == ("1", "10")
+    assert "2 events" in capsys.readouterr().out
     # a row per run and tip: the upward jet and the downward one, whose base stands still
     assert event_table.main([str(run), "--out", str(out), "--runs", str(runs), "--tip",
                              "cavity_tip", "bubble_top"]) == 0
@@ -202,6 +204,114 @@ def test_the_command_line_writes_both_tables(tmp_path, capsys):
         rows = list(csv.DictReader(fh))
     assert [(r["run"], r["tip"]) for r in rows] == [("run", "cavity_tip"), ("run", "bubble_top")]
     assert rows[0]["base_verdict"] == "widens" and abs(float(rows[1]["alpha_r_j"])) < 1e-12
+    assert rows[1]["base_after_k"] == "2"
+    # the legs of one run, joined by os.pathsep, are one run
+    assert event_table.main([f"{run}{os.pathsep}{run}", "--out", str(out)]) == 0
+    assert "2 events" in capsys.readouterr().out
+
+
+def _jsonl_leg(leg: Path, step, events_made):
+    """The event ``leg`` of a leg's events.jsonl: where it starts and the events made before it."""
+    (leg / "events.jsonl").write_text(json.dumps({"event": "restart", "step": step}) + "\n"
+                                      + json.dumps({"event": "leg", "step": step,
+                                                    "events_made": events_made}) + "\n")
+
+
+def test_the_legs_of_a_run_are_read_as_one_continuous_run(tmp_path):
+    """A run in two legs: the first makes events 1 (the cavity's tip) and 2 (the bubble's top) and
+    stops at its max_events on event 3 at step 20, the second starts there with the two events made,
+    writes their records as its dump holds them (the first's ghost now with a recontact it flagged),
+    makes event 3 and then 4. Read together, the records of each event are the latest leg's (the
+    stop record of event 3 replaced by the event made), the rows of each step are those a continuous
+    run writes (the second leg's first row, the state it starts from, dropped), the stop is the last
+    leg's and every event and recontact counts; the second leg alone still has every event of its
+    run. A leg restarted from the state before event 2 (an arm) drops the first leg's events from
+    2 on and its rows after the step it starts at, and a leg that does not record its events at its
+    start drops those at or after that step."""
+    first, second = tmp_path / "leg1", tmp_path / "leg2"
+    head = BUDGET_HEAD
+    stopped = dict(_record(3, 6e-6), outcome="max-events", reason="max-events", step=20)
+    _write_run(first, [_record(1, 3e-6), _record(2, 5e-6, tip="bubble_top", z_b=4.698),
+                       stopped], _rows()[:21],
+               budget=[(s, 1e-6 * s, 100.0, 0.0, 100.0) for s in range(21)], budget_head=head,
+               status={"state": "completed", "window_end": None,
+                       "collapse": {"stop": {"reason": "max-events", "k": 3}}})
+    _jsonl_leg(first, 0, 0)
+    hit = {"kind": "rear", "tau": 9e-6}
+    copies = [dict(_record(1, 3e-6, recontacts=[hit]), copy={"leg": 1, "of_leg": 0}),
+              dict(_record(2, 5e-6, tip="bubble_top", z_b=4.698), copy={"leg": 1, "of_leg": 0})]
+    made = [dict(_record(3, 6e-6, interval=3e-6), step=20), dict(_record(4, 1e-5), step=30)]
+    _write_run(second, copies + made, _rows()[20:],
+               budget=[(s, 1e-6 * s, 100.0 - (1e-9 if s > 20 else 0.0), 0.0, 100.0)
+                       for s in range(20, 40)], budget_head=head)
+    _jsonl_leg(second, 20, 2)
+    run = f"{first}{os.pathsep}{second}"
+    assert event_table.run_legs(run) == [first, second]
+    records = event_table.event_records(run)
+    assert [(r["k"], r["outcome"]) for r in records] == [(1, "made"), (2, "made"), (3, "made"),
+                                                         (4, "made")]
+    assert records[0]["ghost"]["recontacts"] == [hit]
+    chains = event_table.join_rows(run, "chains.txt")
+    assert chains["step"] == [float(s) for s in range(40)]
+    assert chains["time"][20] == pytest.approx(_rows()[20]["time"])
+    budget = event_table.join_rows(run, "budget.txt")
+    assert budget["step"] == [float(s) for s in range(40)] and budget["volume"][20] == 100.0
+    row = event_table.run_row(run)
+    assert (row["legs"], row["events"], row["events_cavity_tip"], row["events_bubble_top"]) == (
+        2, 4, 3, 1)
+    assert row["rear_recontacts"] == 1 and row["stop"] == "max-steps"
+    assert row["volume_drift"] == pytest.approx(-1e-11)
+    assert row["base_verdict"] == "widens" and row["base_after_k"] == 1
+    rows = event_table.event_rows(run)
+    assert [r["k"] for r in rows] == [1, 2, 3, 4]
+    assert rows[0]["rear_recontact_tau_over_delta2"] == pytest.approx(9.0)
+    alone = event_table.run_row(second)
+    assert (alone["legs"], alone["events"], alone["rear_recontacts"]) == (1, 4, 1)
+    assert alone["base_verdict"] == "widens" and alone["base_after_k"] == 1
+    # an arm from the state before event 2, at step 12: event 2 made again there, later
+    arm = tmp_path / "arm"
+    _write_run(arm, [dict(_record(1, 3e-6), copy={"leg": 1, "of_leg": 0}),
+                     dict(_record(2, 5.5e-6, tip="bubble_top"), step=12)], _rows()[12:30])
+    _jsonl_leg(arm, 12, 1)
+    both = f"{first}{os.pathsep}{arm}"
+    assert [(r["k"], r["t"]) for r in event_table.event_records(both)] == [(1, 3e-6), (2, 5.5e-6)]
+    assert event_table.join_rows(both, "chains.txt")["step"] == [float(s) for s in range(30)]
+    # a leg without the record of its start: the events of the legs before it at or after the step
+    # it starts at are dropped
+    (second / "events.jsonl").unlink()
+    (second / "events" / "event_003.json").unlink()
+    records = event_table.event_records(run)
+    assert [(r["k"], r["outcome"]) for r in records] == [(1, "made"), (2, "made"), (4, "made")]
+
+
+def test_the_base_of_a_tip_is_tested_after_its_own_event_from_the_step_after_it(tmp_path):
+    """The upward jet's base narrows until its own cut (event 2, at the cavity's tip, step 20) and
+    widens after it, the bubble's top having been cut first (event 1, step 10): the test of the
+    cavity's tip starts after its own event, and widens, where a window from the run's first event
+    would hold the narrowing and say it narrows. The window starts at the rows after the event's
+    step, whatever the twelve digits of the time of its own row: the row of the event's step, which
+    the run writes before the cut, is never in it."""
+    t_cut = 4.5603994017228565e-06  # its row prints as 4.560399401723e-06, above it
+    rows = []
+    for i, t in enumerate(np.linspace(3e-6, 2e-5, 40)):
+        t = t_cut if i == 20 else float(t)
+        tp = t - T
+        r = 6e-4 * (tp / 1e-5) ** (-1.0 if i <= 20 else 0.1)
+        rows.append({"step": i, "time": t, "tau": t, "tau_p": tp, "dt": 2.2e-9,
+                     "r_neck_open": 0.9 * r, "r_neck_bubble": 3e-4, "r_j_cavity_tip": r,
+                     "Q_j_cavity_tip": 1e-3 * (tp / 1e-5) ** (-2.0 if i <= 20 else 1.0),
+                     "jet_born_cavity_tip": 1.0, "r_j_bubble_top": 4e-4, "Q_j_bubble_top": 1e-4,
+                     "jet_born_bubble_top": 1.0})
+    run = tmp_path / "run"
+    _write_run(run, [dict(_record(1, rows[10]["time"], tip="bubble_top"), step=10),
+                     dict(_record(2, t_cut), step=20)], rows)
+    assert f"{t_cut:.12e}" == "4.560399401723e-06" and float(f"{t_cut:.12e}") > t_cut
+    row = event_table.run_row(run)
+    assert (row["base_after_k"], row["base_after_step"]) == (2, 20)
+    assert row["base_verdict"] == "widens" and row["alpha_r_j"] == pytest.approx(0.1)
+    assert row["base_rows"] == 19  # steps 21 to 39
+    chains = event_table.join_rows(run, "chains.txt")
+    assert event_table.base_test(chains, "cavity_tip", 10, DELTA)["base_verdict"] == "narrows"
 
 
 def test_the_table_reads_the_outputs_of_a_run_of_the_driver(tmp_path, monkeypatch):
@@ -227,6 +337,34 @@ def test_the_table_reads_the_outputs_of_a_run_of_the_driver(tmp_path, monkeypatc
     assert row["events"] == out["events"]["made"] == len(made)
     assert row["events_bubble_top"] == len(made) and row["stop"] == "max-steps"
     assert row["T"] == pytest.approx(-1e-6)  # the stand-in's pinch time precedes its cut
+
+
+def test_the_table_reads_the_legs_of_a_run_of_the_driver_together(tmp_path, monkeypatch):
+    """On the two legs of a run of the driver (``test_events_run.two_legs``: event 1 made in leg 1,
+    its ghost's rear recontact flagged in leg 2): read together, the event has the recontact and
+    the run counts it, with the event made and its rows joined; leg 2 alone, which holds the
+    record of the event made before it, has the event, the recontact and a base test after it."""
+    from test_events_run import two_legs
+
+    legs = two_legs(tmp_path, monkeypatch)
+    for leg in ("leg1", "leg2"):
+        (legs[leg] / "parameters.json").write_text(json.dumps({"reconnect": {"delta": 1e-3}}))
+    (legs["leg2"] / "run_status.json").write_text(json.dumps({"state": "completed",
+                                                              "collapse": legs["res"]}))
+    run = f"{legs['leg1']}{os.pathsep}{legs['leg2']}"
+    (row,) = event_table.event_rows(run)
+    (hit,) = json.loads((legs["leg2"] / "events" / "event_001.json").read_text())["ghost"][
+        "recontacts"]
+    assert row["k"] == 1 and row["leg"] == 0 and hit["kind"] == "rear"
+    assert row["rear_recontact_tau_over_delta2"] == pytest.approx(hit["tau"] / 1e-6)
+    runs = event_table.run_row(run, tip="bubble_top")
+    assert (runs["legs"], runs["events"], runs["rear_recontacts"]) == (2, 1, 1)
+    steps = event_table.join_rows(run, "chains.txt")["step"]
+    assert steps == sorted(set(steps)) and len(steps) == legs["res"]["steps"] - steps[0] + 1
+    alone = event_table.run_row(legs["leg2"], tip="bubble_top")
+    assert (alone["events"], alone["rear_recontacts"]) == (1, 1)
+    assert alone["base_verdict"] != "no-events" and alone["base_after_k"] == 1
+    assert event_table.run_row(legs["leg1"], tip="bubble_top")["rear_recontacts"] == 0
 
 
 def _table(path: Path) -> list[dict]:
