@@ -736,6 +736,75 @@ def test_the_budget_of_the_run_holds_the_liquid_of_the_mesh_and_every_removal(tm
         {x: sum(e["removed"][x] for e in made) for x in ("V", "Pz", "KE")})
 
 
+def test_the_noise_of_a_cuts_box_is_logged_at_every_ordinary_rebuild(tmp_path, monkeypatch):
+    """With ``post.log_box_noise`` the budgets of a liquid cut's box about each tracked neck with a
+    head (``neck_<tip>``, at the radius its cut would take) and about each tip on the axis
+    (``tip_<tip>``, at ``box_radius delta``) are read before and after every ordinary rebuild after
+    the cut, the rule's and one for distortion (here a stand-in of the reading, whose budgets move
+    with the rebuild count), and the change each makes written to ``box_noise.txt``, a row per box
+    and rebuild, with the largest and rms change in the run's result; the run is otherwise the same
+    as without the log, which writes no file and reads nothing."""
+    from faraday_singularity.driver import BOX_NOISE_COLUMNS, CollapseDriver
+
+    reads = []
+
+    def budgets(self, boxes):
+        reads.append([b["box"] for b in boxes])
+        rc = self.pb.remesh_count
+        return [{"V": 1.0 + 1e-9 * rc, "A": 2.0 - 1e-6 * rc, "Pz": 0.1 * rc, "KE": 0.5,
+                 "points": 100 + rc} for _ in boxes]
+
+    monkeypatch.setattr(CollapseDriver, "_box_budgets", budgets)
+
+    def problem():
+        pb = RegrowingHead(period=1e3)  # its neck tracked, never landed: no event
+        pb.do_call_remeshing_when_necessary = True
+        solves = {"n": 0}
+
+        def take():  # element distortion flags the fourth step for a rebuild
+            solves["n"] += 1
+            return [{"trigger": "quality", "ratio": 0.13}] if solves["n"] == 4 else []
+
+        pb.take_distortion_flags = take
+        return pb
+
+    block = {"liquid": LIQUID["liquid"], "post": {**LIQUID["post"], "log_box_noise": True}}
+    drv, out, _ = _run(tmp_path / "log", monkeypatch, problem(), block=block, max_steps=8)
+    assert drv.pb.events == [] and out["stop"]["reason"] == "max-steps"
+    rebuilds = [x for x in _jsonl(tmp_path / "log" / "events.jsonl") if x["event"] == "remesh"]
+    reasons = [x.get("reason", "rule") for x in rebuilds]
+    assert "distortion" in reasons and "rule" in reasons
+    rows = _rows(tmp_path / "log" / "box_noise.txt")
+    assert list(rows[0]) == list(BOX_NOISE_COLUMNS)
+    per = {}
+    for r in rows:
+        per.setdefault((int(r["step"]), r["reason"]), []).append(r["box"])
+    assert sorted(per) == sorted((x["step"], why) for x, why in zip(rebuilds, reasons))
+    assert len(reads) == 2 * len(rebuilds)  # before and after each, on the same boxes
+    for boxes in per.values():
+        assert {"tip_cavity_tip", "tip_bubble_top", "tip_bubble_bottom"} <= set(boxes)
+        assert "neck_bubble_top" in boxes
+    neck = next(r for r in rows if r["box"] == "neck_bubble_top")
+    assert float(neck["R"]) >= 4.0 * DELTA and neck["chain"] == "bubble"
+    tip = next(r for r in rows if r["box"] == "tip_cavity_tip")
+    assert float(tip["R"]) == pytest.approx(4.0 * DELTA)
+    for r in rows:
+        assert float(r["dV"]) == pytest.approx(1e-9) and float(r["dPz"]) == pytest.approx(0.1)
+        assert float(r["dA"]) == pytest.approx(-1e-6) and float(r["dKE"]) == 0.0
+        assert int(r["points_after"]) == int(r["points_before"]) + 1
+    noise = out["events"]["box_noise"]
+    assert noise["rebuilds"] == len(rebuilds) and noise["rows"] == len(rows)
+    assert noise["max_abs"]["V"] == pytest.approx(1e-9) and noise["rms"]["Pz"] == pytest.approx(0.1)
+    assert noise["rms"]["KE"] == 0.0
+    # without the log: no file, no reading, the same rows
+    reads.clear()
+    drv, plain, _ = _run(tmp_path / "plain", monkeypatch, problem(), max_steps=8)
+    assert not (tmp_path / "plain" / "box_noise.txt").exists() and reads == []
+    assert plain["events"]["box_noise"] is None
+    for name in ("chains.txt", "budget.txt"):
+        assert (tmp_path / "plain" / name).read_text() == (tmp_path / "log" / name).read_text()
+
+
 def test_the_dumps_of_the_events_are_kept_as_the_policy_says(tmp_path, monkeypatch):
     """``post.keep_event_dumps`` ``first1-last1``: of the events made the state before the first
     and both states of the last are kept, the others deleted as the events come and noted in their

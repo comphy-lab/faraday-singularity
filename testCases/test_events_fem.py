@@ -11,6 +11,9 @@
   its postcut dump checks the loaded mesh as a fresh one and takes its steps;
 * with the block the meshes no dump refers to are pruned (``post.prune_gmsh``), the rows of the
   run unchanged, and the dumps kept restart with their meshes in new processes;
+* with the block's ``post.log_box_noise`` the budgets of a liquid cut's box about each tip on the
+  axis are read before and after each rebuild of the rule (``box_noise.txt``), the rows of the run
+  unchanged;
 * oomph-lib's smallest step (``DTSF_minimum_dt``) on a one-unknown problem: at its default of
   1e-12 an accepted step of 1e-13 ends the solve (its next candidate, four times the step, lies
   below it), and so does a step of 1e-12 that fails, which is not halved; lowered, the first is
@@ -274,6 +277,48 @@ def test_with_the_block_the_meshes_no_dump_refers_to_are_pruned_and_every_dump_r
                      dict(spec, collapse=more, restart=str(state.resolve())))
         result = json.loads((again / "result.json").read_text())
         assert result["stop"]["reason"] == "max-steps" and result["steps"] == more["max_steps"]
+
+
+def _table(path: Path) -> list[dict]:
+    lines = path.read_text().splitlines()
+    head = lines[0][2:].split("\t")
+    return [dict(zip(head, line.split("\t"))) for line in lines[1:]]
+
+
+def test_the_noise_of_a_cuts_box_is_logged_in_the_rebuilds_and_changes_no_value(tmp_path):
+    """With ``post.log_box_noise`` the run after the cut of the synthetic cavity, rebuilt by its
+    rule at every step it may, reads the budgets of a liquid cut's box about each tip on the axis
+    before and after every rebuild (``box_noise.txt``: the liquid volume and the area from the
+    polylines, the axial momentum and the kinetic energy on the grid), each finite, the volume's
+    change a small part of the box's liquid; the rows of the run are those of the same run without
+    the log, to the byte, which writes no such file."""
+    collapse = dict(COLLAPSE, max_steps=3)
+    spec = {"physics": fem.PHYSICS, "mesh": fem.MESH, "cut": CUT, "collapse": collapse}
+    runs = {name: _run(ROOT / "src", tmp_path / name, dict(spec, events=block))
+            for name, block in (("log", {"post": {"log_box_noise": True}}), ("plain", {}))}
+    results = {name: json.loads((run / "result.json").read_text()) for name, run in runs.items()}
+    rebuilds = [e for e in (json.loads(x) for x in (runs["log"] / "events.jsonl").read_text()
+                            .splitlines()) if e["event"] == "remesh"]
+    assert rebuilds and results["log"]["steps"] == 3
+    rows = _table(runs["log"] / "box_noise.txt")
+    assert {(int(r["step"]), r["reason"]) for r in rows} == {(e["step"], "rule") for e in rebuilds}
+    assert {r["box"] for r in rows} >= {"tip_cavity_tip", "tip_bubble_top", "tip_bubble_bottom"}
+    for r in rows:
+        values = [float(r[c]) for c in ("V_before", "V_after", "A_before", "A_after", "Pz_before",
+                                        "Pz_after", "KE_before", "KE_after")]
+        assert np.isfinite(values).all() and float(r["V_before"]) > 0.0, r
+        assert abs(float(r["dV"])) < 1e-2 * float(r["V_before"]), r
+        assert int(r["points_before"]) > 0 and int(r["points_after"]) > 0
+    noise = results["log"]["events"]["box_noise"]
+    assert noise["rebuilds"] == len(rebuilds) and noise["rows"] == len(rows)
+    assert results["plain"]["events"]["box_noise"] is None
+    assert not (runs["plain"] / "box_noise.txt").exists()
+    for name in ("chains.txt", "budget.txt"):
+        assert (runs["log"] / name).read_text() == (runs["plain"] / name).read_text(), name
+    a, b = ((runs[x] / "collapse.txt").read_text().splitlines() for x in ("log", "plain"))
+    wall = a[0][2:].split("\t").index("wall")
+    assert [r.split("\t")[:wall] + r.split("\t")[wall + 1:] for r in a] == [
+        r.split("\t")[:wall] + r.split("\t")[wall + 1:] for r in b]
 
 
 ODE_RUN = """

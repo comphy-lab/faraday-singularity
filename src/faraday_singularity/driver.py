@@ -306,7 +306,7 @@ from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, E
                      LIQUID_CUT_REFUSED, PRECUT_EVENT, SIZING_KEYS, STOP_OUTCOMES, CascadeMonitor,
                      EventSettings, event_dump_policy, event_dumps_kept, event_neck, event_tip,
                      events_done, fold_stop_after_cut, ghost_place, ghost_recontacts,
-                     minimum_dt_after_cut)
+                     liquid_necks, minimum_dt_after_cut)
 from .mesh import Focus, FocusRegion
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -562,6 +562,16 @@ DROP_COLUMNS = ("k", "status", "step", "time", "tau", "tau_p", "tip", "far_tip",
 BUDGET_COLUMNS = ("step", "time", "tau", "tau_p", "events", "volume", "momentum_z",
                   "kinetic_energy", "V_removed", "Pz_removed", "KE_removed", "volume_total",
                   "momentum_z_total", "kinetic_energy_total")
+# box_noise.txt, with the block's post.log_box_noise, a row per box and ordinary rebuild after the
+# cut (reason rule or distortion): the box (about a tracked neck with a head, neck_<tip>, or a tip
+# on the axis, tip_<tip>), its centre on the axis and radius, and its budgets before and after the
+# rebuild as a liquid cut takes them (the liquid volume and the area of the interface from the
+# polylines, the axial momentum and the kinetic energy on the grid, with the points found there)
+BOX_NOISE_COLUMNS = ("step", "time", "tau", "tau_p", "reason", "remesh_count", "box", "chain", "z",
+                     "R", "V_before", "V_after", "dV", "A_before", "A_after", "dA", "Pz_before",
+                     "Pz_after", "dPz", "KE_before", "KE_after", "dKE", "points_before",
+                     "points_after")
+BOX_NOISE_KEYS = ("V", "A", "Pz", "KE")  # the budgets of box_noise.txt, as dV, dA, dPz, dKE
 
 
 def _table_cell(v) -> str:
@@ -712,6 +722,9 @@ class CollapseDriver:
         self._meshes_pruned = 0  # the files of meshes no dump refers to deleted (post.prune_gmsh)
         self._event_before: tuple | None = None
         self._event_after: dict | None = None
+        # with the block's post.log_box_noise: what each ordinary rebuild after the cut changes in
+        # the budgets of a liquid cut's box (box_noise.txt; _box_noise_before, _box_noise_after)
+        self._noise = self._noise_stats = None
         if events is not None:
             self._event_rows = open(self.outdir / "events.txt", "w", buffering=1)
             self._event_rows.write("# " + "\t".join(EVENT_COLUMNS) + "\n")
@@ -719,6 +732,13 @@ class CollapseDriver:
             self._drops.write("# " + "\t".join(DROP_COLUMNS) + "\n")
             self._budget = open(self.outdir / "budget.txt", "w", buffering=1)
             self._budget.write("# " + "\t".join(BUDGET_COLUMNS) + "\n")
+            if events.post.log_box_noise:
+                self._noise = open(self.outdir / "box_noise.txt", "w", buffering=1)
+                self._noise.write("# " + "\t".join(BOX_NOISE_COLUMNS) + "\n")
+                self._noise_stats = {"rebuilds": 0, "rows": 0,
+                                     "max_abs": dict.fromkeys(BOX_NOISE_KEYS, 0.0),
+                                     "sum_sq": dict.fromkeys(BOX_NOISE_KEYS, 0.0),
+                                     "count": dict.fromkeys(BOX_NOISE_KEYS, 0)}
         (self.outdir / "collapse_settings.json").write_text(
             json.dumps(asdict(settings), indent=2) + "\n")
 
@@ -727,7 +747,7 @@ class CollapseDriver:
         self._events.close()
         if self._chains is not None:
             self._chains.close()
-        for f in (self._event_rows, self._drops, self._budget):
+        for f in (self._event_rows, self._drops, self._budget, self._noise):
             if f is not None:
                 f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
@@ -1302,6 +1322,118 @@ class CollapseDriver:
             row[f"{key}_total"] = float(values.get(key, math.nan)) + removed[extra]
         self._budget.write("\t".join(_table_cell(row.get(c)) for c in BUDGET_COLUMNS) + "\n")
 
+    # --- after a cut with post.log_box_noise: the noise of a cut's box in an ordinary rebuild ---
+
+    def _named_post_cut_chains(self) -> list:
+        """The chains of the current state by name (``open``, ``bubble``), as the stops after a cut
+        read them (the ends on the axis put on ``r = 0``); empty in a state whose topology has
+        changed."""
+        segs = self._post_cut_state()["segs"]
+        if len(segs) != 2:
+            return []
+        out = []
+        for c in segs:
+            P = np.column_stack([c["r"], c["z"]]).astype(float)
+            for k, end in ((0, 0), (-1, 1)):
+                if c["end_types"][end] == AXIS:
+                    P[k, 0] = 0.0
+            out.append(("open" if c["open"] else "bubble", Chain(P, tuple(c["end_types"]))))
+        return out
+
+    def _noise_boxes(self) -> list[dict]:
+        """The boxes of the log of the noise of a rebuild (``post.log_box_noise``) about the current
+        state: one about each tracked neck with a head (``events.liquid_necks``, status ``head``;
+        ``neck_<tip>``) at the neck, of the radius its cut would take, ``max(liquid.box_radius
+        delta, 2 |z_tip - z_n|)``, the reach of the head along the axis from the neck standing for
+        the cut's ``L_rem``; and one about each tip on the axis (``tip_<tip>``) of radius
+        ``liquid.box_radius delta``."""
+        named = self._named_post_cut_chains()
+        rec = self._post_cut_state()["record"]
+        if not named or not rec:
+            return []
+        R0 = self.events.liquid.box_radius * self.reconnect.delta
+        out, names = [], set()
+        for nk in liquid_necks(named, self.events.liquid):
+            if nk["status"] != "head":
+                continue
+            name = base = f"neck_{event_tip(nk)}"
+            n = 2
+            while name in names:  # two necks with heads at one tip
+                name, n = f"{base}_{n}", n + 1
+            names.add(name)
+            z_n = float(nk["z_n"])
+            out.append({"box": name, "chain": nk["chain"], "z": z_n,
+                        "R": max(R0, 2.0 * abs(float(nk["z_tip"]) - z_n))})
+        for tip in JET_TIPS:
+            z = float(rec.get(f"z_{tip}", math.nan))
+            if math.isfinite(z):
+                out.append({"box": f"tip_{tip}", "chain": "open" if tip == "cavity_tip"
+                            else "bubble", "z": z, "R": R0})
+        return out
+
+    def _box_budgets(self, boxes: list[dict]) -> list[dict]:
+        """The budgets of each box of ``boxes`` in the current state, as a liquid cut takes them:
+        the liquid volume and the area of the interface from the polylines clipped to it
+        (``surgery.box_polyline_budgets``) and the axial momentum and the kinetic energy on its
+        grid (``surgery.box_grid``, ``surgery.box_integrals``), with the grid's points found in the
+        liquid."""
+        from .surgery import box_grid, box_integrals, box_polyline_budgets
+
+        chains = [c for _, c in self._named_post_cut_chains()]
+        out = []
+        for b in boxes:
+            poly = box_polyline_budgets(chains, b["z"], b["R"], self.reconnect.reservoir_depth)
+            grid = box_integrals(self.pb, box_grid(b["z"], b["R"]))
+            out.append({"V": poly["V_liquid"], "A": poly["A"], "Pz": grid["Pz"],
+                        "KE": grid["KE"], "points": grid["points"]})
+        return out
+
+    def _box_noise_before(self) -> dict | None:
+        """Before an ordinary rebuild after the cut, with ``post.log_box_noise``: the boxes of the
+        log about the state before it (:meth:`_noise_boxes`) and their budgets then; None
+        otherwise, reading nothing."""
+        if self._noise is None or self._post() is None:
+            return None
+        boxes = self._noise_boxes()
+        return {"boxes": boxes, "before": self._box_budgets(boxes)}
+
+    def _box_noise_after(self, noise: dict | None, reason: str):
+        """After the rebuild before which ``noise`` was read (:meth:`_box_noise_before`; ``reason``
+        ``rule`` or ``distortion``): the budgets of the same boxes on the new mesh, and a row of
+        ``box_noise.txt`` per box with the change the rebuild made, the noise of the box from which
+        ``liquid.sigma_V``, ``sigma_Pz`` and ``sigma_KE`` are set (the volume, the momentum and the
+        energy; the area besides), kept for the run's result (:meth:`_box_noise_summary`)."""
+        if noise is None:
+            return
+        after = self._box_budgets(noise["boxes"])
+        stats, t = self._noise_stats, self._t()
+        stats["rebuilds"] += 1
+        for b, x, y in zip(noise["boxes"], noise["before"], after):
+            row = {"step": self.state.step, "time": t, **self._taus(t), "reason": reason,
+                   "remesh_count": self.pb.remesh_count, **b, "points_before": x["points"],
+                   "points_after": y["points"]}
+            for key in BOX_NOISE_KEYS:
+                d = float(y[key]) - float(x[key])
+                row.update({f"{key}_before": x[key], f"{key}_after": y[key], f"d{key}": d})
+                if math.isfinite(d):
+                    stats["max_abs"][key] = max(stats["max_abs"][key], abs(d))
+                    stats["sum_sq"][key] += d * d
+                    stats["count"][key] += 1
+            stats["rows"] += 1
+            self._noise.write("\t".join(_table_cell(row.get(c)) for c in BOX_NOISE_COLUMNS)
+                              + "\n")
+
+    def _box_noise_summary(self) -> dict | None:
+        """The log of the noise of the box (``post.log_box_noise``) in the run's result: the
+        rebuilds and the rows logged, and the largest and the rms change of each budget over the
+        rows (``max_abs``, ``rms``, in the solver's units); None without the log."""
+        s = self._noise_stats
+        if s is None:
+            return None
+        return {"rebuilds": s["rebuilds"], "rows": s["rows"], "max_abs": dict(s["max_abs"]),
+                "rms": {k: math.sqrt(s["sum_sq"][k] / s["count"][k]) if s["count"][k] else None
+                        for k in BOX_NOISE_KEYS}}
+
     def _bubble_features(self) -> tuple[dict | None, dict, float]:
         """After a cut: the bubble chain, the jet bases of its two tips (``reconnect.tip_jet``, by
         name, without the flux) and the smallest of its scales, ``ell_bubble`` (``inf`` without a
@@ -1656,7 +1788,9 @@ class CollapseDriver:
         template = self.pb.active_mesh_template()
         focus = self._regions_focus(regions, keep=False)
         template.focus = focus
+        noise = self._box_noise_before()  # post.log_box_noise only
         self.pb.force_remesh()
+        self._box_noise_after(noise, "rule")
         st.last_remesh_step = st.step
         hold = {}
         if refining:
@@ -1739,7 +1873,9 @@ class CollapseDriver:
             new = Focus(size=min(old.size, m["h_near"]), radius=m["focus_radius"],
                         grading=old.grading)
         template.focus = new
+        noise = self._box_noise_before()  # after a cut with post.log_box_noise only
         self.pb.force_remesh()
+        self._box_noise_after(noise, "distortion")
         self._distortion_remeshes += 1
         after = self.measure()
         self._event("remesh", m, reason="distortion", **flags[0], flagged_substeps=len(flags),
@@ -2440,8 +2576,10 @@ class CollapseDriver:
     def _events_summary(self, stop: dict) -> dict:
         """After a cut with the block: the events of the run's result (``run_status.json``): how
         many were made, by kind and by tip, the last, the totals of the removals since the gas
-        cut, the cascade's verdict at each tip, and the event the run stopped on, if any, with its
-        record (:meth:`_write_stop_record`)."""
+        cut, the cascade's verdict at each tip, the log of the noise of a cut's box in the
+        ordinary rebuilds (``box_noise``, :meth:`_box_noise_summary`, None without
+        ``post.log_box_noise``), and the event the run stopped on, if any, with its record
+        (:meth:`_write_stop_record`)."""
         made = self._made_events()
 
         def count(key):
@@ -2462,6 +2600,7 @@ class CollapseDriver:
                     1 for e in made for x in (e.get("ghost") or {}).get("recontacts") or ()
                     if x.get("kind") == kind) for kind in ("rear", "front")},
                 "dumps_dropped": self._dumps_dropped, "meshes_pruned": self._meshes_pruned,
+                "box_noise": self._box_noise_summary(),
                 "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
                                                          "handler", "record")}
                          if stop.get("reason") in EVENT_STOPS else None)}

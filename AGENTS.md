@@ -221,9 +221,10 @@ add a second top-level `cases/` tree.
   once an event of their class was made, except in a restart from the state before an event
   (`precut_e<k>`, `cut_stage` `precut-event`), from which they apply anew (`event_keys_changed_at`
   in its leg); the keys of `post` change at any restart (a key a recorded block lacks counts at its
-  default), `post.keep_event_dumps` (`all` or `first<N>-last<M>`, `events.event_dumps_kept`) and
-  `post.prune_gmsh` among them, and so do the block's own (`events.EventSettings.KEYS`:
-  `max_events`, the most events a run makes over its legs, and the cascade test
+  default), `post.keep_event_dumps` (`all` or `first<N>-last<M>`, `events.event_dumps_kept`),
+  `post.prune_gmsh` and `post.log_box_noise` among them, and so do the block's own
+  (`events.EventSettings.KEYS`: `max_events`, the most events a run makes over its legs, and the
+  cascade test
   `cascade_min_interval`, `cascade_ratio`, `cascade_count`). `post.bubble_bottom_sizing` `frozen`
   meshes the bubble's bottom never coarser than `post.bubble_bottom_size` instead of the landing
   focus (`reconnect.feature_regions`), except
@@ -252,7 +253,14 @@ add a second top-level `cases/` tree.
   (`surgery.liquid_cut`, which refuses a request made under others), which the driver makes within
   the run (below) (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`, `restart`, and the noise of the
   box in an ordinary rebuild that floors the limits of its budgets, `sigma_V`, `sigma_Pz`,
-  `sigma_KE`, `surgery.NOISE_FLOORS`, none until calibrated; class keys like the rest of `liquid`):
+  `sigma_KE`, `surgery.NOISE_FLOORS`, none until calibrated; class keys like the rest of `liquid`;
+  `post.log_box_noise` logs that noise: before and after every ordinary rebuild after the cut, the
+  rule's and one for distortion, the budgets of a cut's box about each tracked neck with a head,
+  `neck_<tip>` at the radius its cut would take, and each tip on the axis, `tip_<tip>` at
+  `box_radius delta`, are read and their changes written to `box_noise.txt`, a row per box and
+  rebuild, with the largest and rms change in the result's `events.box_noise`
+  (`CollapseDriver._box_noise_before`, `_box_noise_after`), the reading changing no value,
+  `testCases/test_events_fem.py`):
   the head removed and the stump capped at the neck (`events.truncate_chain`, refused unless its
   hard checks hold), the mesh rebuilt from a plan built in the project (`events.build_liquid_plan`,
   parked as pyoomph parks its own, `surgery.park_plan`) under the driver's focus with the cap's

@@ -413,8 +413,9 @@ change at any restart, and so may the block's own: `max_events` (1000), the most
 over all its legs, and the test of a cascade of events at one tip (`cascade_min_interval`, 0.25,
 in `delta^2`; `cascade_ratio`, 0.7; `cascade_count`, 3). Of `post`, `keep_event_dumps` says which
 dumps of the events a run keeps (`all`, or `first<N>-last<M>`: the state before each of the first
-`N` events and both states of each of the last `M`) and `prune_gmsh` (true) deletes the meshes
-gmsh wrote for the run that no dump refers to. With `post.bubble_bottom_sizing` `frozen` the
+`N` events and both states of each of the last `M`), `prune_gmsh` (true) deletes the meshes
+gmsh wrote for the run that no dump refers to and `log_box_noise` (false) logs the noise of a liquid
+cut's box in the ordinary rebuilds (below). With `post.bubble_bottom_sizing` `frozen` the
 bubble's bottom, far from the cut, is meshed never coarser than `post.bubble_bottom_size` rather
 than never coarser than at the landing (`kept`, the default), so that the bubbles of a study in
 `delta` are meshed alike there; within a few of the cut's tip sizes (`tip_size delta`) of the
@@ -462,7 +463,12 @@ velocity of the cap's nodes (`liquid.cap_fill`: `sample`, the old bulk velocity 
 delta, 2 L_rem)` of the neck, `L_rem` the reach of the removed head along the axis) with the floors
 of their limits (`liquid.sigma_V`, `sigma_Pz`, `sigma_KE`, 0: the noise of the box in an ordinary
 rebuild, of its liquid volume, axial momentum and kinetic energy, in the solver's units, none until
-calibrated).
+calibrated). `post.log_box_noise` calibrates them: before and after every ordinary rebuild after the
+cut (the rule's and one for distortion) it reads the budgets of such a box about each tracked neck
+with a head, at the radius its cut would take, and about each tip on the axis, at `box_radius
+delta`, and writes their changes to `box_noise.txt` (a row per box and rebuild), with the largest
+and the rms change of each in `events.box_noise` of the run's result; the reading changes no value
+of the run.
 
 **The cut of a liquid neck** (`surgery.liquid_cut`) removes the head of a neck that lands under its
 own `liquid` keys (a request made under others is refused) and closes the stump at the neck by a

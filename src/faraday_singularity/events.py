@@ -19,8 +19,8 @@ The block has three parts and a few keys of its own:
 * ``post`` (:class:`PostCutSettings`): the limits and floors of the run after the cut, each by
   default the collapse's own (``h_floor``, ``rise_tol``, ``dt_min``), the floor and resolution of
   the mesh at the necks, oomph-lib's smallest step after the cut, the open chain's neck stop, the
-  sizing of the bubble's bottom, which dumps of the events the run keeps and the pruning of the
-  meshes no dump refers to;
+  sizing of the bubble's bottom, which dumps of the events the run keeps, the pruning of the
+  meshes no dump refers to and the log of the noise of a cut's box in an ordinary rebuild;
 * of its own: the most events a run makes (``max_events``) and the test of a cascade of events at
   one tip (``cascade_min_interval``, ``cascade_ratio``, ``cascade_count``).
 
@@ -220,7 +220,15 @@ class PostCutSettings:
     ``first<N>-last<M>``, the state before each of the first ``N`` events and both states of
     each of the last ``M`` (:func:`event_dumps_kept`; the state before an event the run stops on
     is always kept). With ``prune_gmsh`` the meshes gmsh wrote for the run that no dump it keeps
-    refers to, and that the problem no longer holds, are deleted after every dump."""
+    refers to, and that the problem no longer holds, are deleted after every dump.
+    ``log_box_noise`` logs what each ordinary rebuild after the cut (the rule's and one for
+    distortion) changes in the budgets of a liquid cut's box (``surgery.box_polyline_budgets``, the
+    liquid volume and the area of the interface; ``surgery.box_integrals``, the axial momentum and
+    the kinetic energy) about each tracked neck with a head, at the radius its cut would take, and
+    about each tip on the axis, at ``liquid.box_radius delta`` (``box_noise.txt``,
+    ``driver.CollapseDriver._box_noise_after``), the noise of the box from which the floors
+    ``liquid.sigma_V``, ``sigma_Pz`` and ``sigma_KE`` are set; it reads the fields and changes
+    none, at a few samplings of the box's grid per box and rebuild."""
     open_neck_stop: bool = True
     h_floor: float | None = None
     neck_floor: float | None = None
@@ -232,6 +240,7 @@ class PostCutSettings:
     bubble_bottom_size: float | None = None
     keep_event_dumps: str = "all"
     prune_gmsh: bool = True
+    log_box_noise: bool = False
 
     def __post_init__(self):
         _flag("post", "open_neck_stop", self.open_neck_stop)
@@ -251,6 +260,7 @@ class PostCutSettings:
             minimum_dt_after_cut(self, self.dt_min)
         event_dump_policy(self.keep_event_dumps)
         _flag("post", "prune_gmsh", self.prune_gmsh)
+        _flag("post", "log_box_noise", self.log_box_noise)
 
 
 def event_dump_policy(value) -> tuple[int, int] | None:

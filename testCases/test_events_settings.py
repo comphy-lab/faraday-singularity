@@ -59,6 +59,7 @@ def test_the_keys_of_the_runs_events_parse_with_their_defaults_and_round_trip():
     assert (s.max_events, s.cascade_min_interval, s.cascade_ratio, s.cascade_count) == (
         1000, 0.25, 0.7, 3)
     assert s.post.keep_event_dumps == "all" and s.post.prune_gmsh is True
+    assert s.post.log_box_noise is False
     d = s.to_dict()
     assert {k: d[k] for k in ev.EventSettings.KEYS} == {
         "max_events": 1000, "cascade_min_interval": 0.25, "cascade_ratio": 0.7,
@@ -66,18 +67,21 @@ def test_the_keys_of_the_runs_events_parse_with_their_defaults_and_round_trip():
     full = ev.EventSettings.from_dict({"max_events": 40, "cascade_min_interval": 0.0,
                                        "cascade_ratio": 0.5, "cascade_count": 2,
                                        "post": {"keep_event_dumps": "first20-last8",
-                                                "prune_gmsh": False}})
+                                                "prune_gmsh": False, "log_box_noise": True}})
     assert ev.EventSettings.from_dict(json.loads(json.dumps(full.to_dict()))) == full
     assert full.max_events == 40 and full.post.keep_event_dumps == "first20-last8"
     assert not full.post.prune_gmsh and full.sha256() != s.sha256()
+    assert full.post.log_box_noise is True
     # they are keys of the leg, which any restart may change, also after events of every class
     assert full.changed_keys(s.to_dict()) == ["cascade_count", "cascade_min_interval",
                                               "cascade_ratio", "max_events",
-                                              "post.keep_event_dumps", "post.prune_gmsh"]
+                                              "post.keep_event_dumps", "post.log_box_noise",
+                                              "post.prune_gmsh"]
     assert full.refused_changes(s.to_dict(), {"liquid": 3, "gap": 1}, None) == []
+    assert "post.log_box_noise" not in ev.SIZING_KEYS  # it sizes nothing: a fresh mesh stays so
     # a block recorded before they existed ran with their defaults
     old = {k: v for k, v in s.to_dict().items() if k not in ev.EventSettings.KEYS}
-    del old["post"]["keep_event_dumps"], old["post"]["prune_gmsh"]
+    del old["post"]["keep_event_dumps"], old["post"]["prune_gmsh"], old["post"]["log_box_noise"]
     assert s.changed_keys(old) == [] and full.changed_keys(old) == full.changed_keys(s.to_dict())
 
 
@@ -137,6 +141,7 @@ def test_the_policy_of_the_dumps_of_events_keeps_the_first_before_and_the_last_b
     ({"post": {"keep_event_dumps": "last8"}}, "keep_event_dumps must be 'all' or"),
     ({"post": {"keep_event_dumps": 20}}, "keep_event_dumps must be 'all' or"),
     ({"post": {"prune_gmsh": "yes"}}, "prune_gmsh must be true or false"),
+    ({"post": {"log_box_noise": 1}}, "log_box_noise must be true or false"),
     ({"max_events": 0}, "max_events must be a positive integer"),
     ({"max_events": 10.0}, "max_events must be a positive integer"),
     ({"cascade_count": True}, "cascade_count must be a positive integer"),
