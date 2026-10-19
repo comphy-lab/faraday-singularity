@@ -176,9 +176,9 @@ def test_the_mesh_of_an_event_renames_the_regions_of_the_features_its_cut_ends()
     """The focus of an event's mesh: the driver's regions and the cap's, named after the cut tip;
     the region the cut tip had and the neck region of its chain that holds the cut neck keep their
     sizes, places and radii under the event's names, a neck region elsewhere on the chain and the
-    other chain's keep theirs, and no two regions share a name. On that mesh a rebuild for distortion
-    keeps the cap's size at the new tip, and the rule's rebuild sizes a new neck of the chain from
-    the spacing it measures there, not from the cut neck's size."""
+    other chain's keep theirs, and no two regions share a name. On that mesh a rebuild for
+    distortion keeps the cap's size at the new tip, and the rule's rebuild sizes a new neck of the
+    chain from the spacing it measures there, not from the cut neck's size."""
     from test_bookkeeping import _settings
 
     from faraday_singularity.driver import CollapseDriver

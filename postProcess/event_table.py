@@ -10,17 +10,17 @@ Usage::
 Each ``RUN`` is the directory of a run after a cut with the ``collapse.reconnect_events`` block, or
 the directories of the legs of one run continued in several, in their order, joined by
 ``os.pathsep`` (``leg1:leg2:leg3``). A leg directory holds the record of each of its events
-(``events/event_<k>.json``: made, refused, unclosed or failed, or the event the run stopped on before
-a handler was made for it, ``unhandled``, ``cascade`` or ``max-events``, with the handler its class
-is to have), the rows of both chains per step (``chains.txt``), the budget of its liquid with the
-removals (``budget.txt``), the start of the leg (the event ``leg`` of ``events.jsonl``: its step and
-the events made before it), ``run_status.json`` and ``parameters.json``. The legs of a run are read
-as one continuous run: the records by the event's number ``k``, a later leg's replacing an earlier
-leg's (a leg writes the records of the events made before it, as its dump holds them, into its own
-directory too, and rewrites them as it changes them), the records of an earlier leg beyond the
-events a later one starts with dropped (that leg made them, or stopped on them, after the state the
-later leg restarted from); the rows of ``chains.txt`` and ``budget.txt`` of the legs before a leg
-beyond the step it starts at dropped, and its own first row where they have one at that step, so
+(``events/event_<k>.json``: made, refused, unclosed or failed, or the event the run stopped on
+before a handler was made for it, ``unhandled``, ``cascade`` or ``max-events``, with the handler its
+class is to have), the rows of both chains per step (``chains.txt``), the budget of its liquid with
+the removals (``budget.txt``), the start of the leg (the event ``leg`` of ``events.jsonl``: its step
+and the events made before it), ``run_status.json`` and ``parameters.json``. The legs of a run are
+read as one continuous run: the records by the event's number ``k``, a later leg's replacing an
+earlier leg's (a leg writes the records of the events made before it, as its dump holds them, into
+its own directory too, and rewrites them as it changes them), the records of an earlier leg beyond
+the events a later one starts with dropped (that leg made them, or stopped on them, after the state
+the later leg restarted from); the rows of ``chains.txt`` and ``budget.txt`` of the legs before a
+leg beyond the step it starts at dropped, and its own first row where they have one at that step, so
 that every step has the row a continuous run writes; the stop, the state and the end of the window
 are the last leg's.
 
@@ -177,9 +177,9 @@ def run_name(run) -> str:
 
 
 def leg_start(leg: Path) -> dict:
-    """Where a leg starts: the step of its event ``leg`` (``events.jsonl``) and the events made before
-    it (``events_made``, None where the leg does not record it); the first row of its ``chains.txt``
-    without the event."""
+    """Where a leg starts: the step of its event ``leg`` (``events.jsonl``) and the events made
+    before it (``events_made``, None where the leg does not record it); the first row of its
+    ``chains.txt`` without the event."""
     path = leg / "events.jsonl"
     if path.is_file():
         for line in path.read_text().splitlines():
@@ -243,8 +243,8 @@ def join_rows(run, name: str) -> dict[str, list]:
 
 
 def run_info(run, records: list[dict]) -> dict:
-    """The case (its last leg's), the cut radius ``delta`` (the case's ``collapse.reconnect``, else a
-    record's), ``T = t_p - t_cut`` (``tau - tau_p`` of ``chains.txt``, else of a record) and the
+    """The case (its last leg's), the cut radius ``delta`` (the case's ``collapse.reconnect``, else
+    a record's), ``T = t_p - t_cut`` (``tau - tau_p`` of ``chains.txt``, else of a record) and the
     joined rows of ``chains.txt`` of a run."""
     legs = run_legs(run)
     params = [_json(leg / "parameters.json") for leg in legs]
@@ -329,8 +329,8 @@ def _slope(x, y) -> float:
 
 
 def jet_delivery(chains: dict, tip: str) -> tuple[float, float]:
-    """What the base of the jet of ``tip`` carried into the jet over the rows of ``chains``: the axial
-    momentum, the integral of ``Q_j V_j`` over time, and the kinetic energy, that of
+    """What the base of the jet of ``tip`` carried into the jet over the rows of ``chains``: the
+    axial momentum, the integral of ``Q_j V_j`` over time, and the kinetic energy, that of
     ``Q_j V_j^2/2``, both along the jet (as ``Q_j`` and ``V_j`` are), a plug flow through the base,
     by the trapezoid rule over the pairs of successive rows in which the jet stands; NaN without
     such a pair."""

@@ -172,7 +172,8 @@ def test_the_dumps_of_both_events_are_kept_with_their_meshes(two_events):
 
 
 DROPPED = {"liquid": {"enabled": True},
-           "post": {"open_neck_stop": False, "neck_floor": 1e-5, "keep_event_dumps": "first0-last0"}}
+           "post": {"open_neck_stop": False, "neck_floor": 1e-5,
+                    "keep_event_dumps": "first0-last0"}}
 
 
 def test_the_meshes_of_the_event_dumps_deleted_are_pruned_and_the_end_state_restarts(tmp_path):
