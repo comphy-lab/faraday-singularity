@@ -408,11 +408,11 @@ add a second top-level `cases/` tree.
   that step, the state before its cut; `stationary` where the slope and the relative change of
   `Q_j` over the window lie within their floors, `--stationary-alpha` and `--stationary-q`,
   recorded in the row, so that the round-off of a fit gives a base standing still no sign). A run
-  is one directory or the directories of its legs in
-  their order joined by `os.pathsep`, read as one continuous run: the records by `k`, a later leg's
-  replacing an earlier's and an earlier leg's beyond the `events_made` a later leg starts with
-  dropped; the rows of `chains.txt` and `budget.txt` of the legs before a leg beyond its first step
-  dropped, and its own first row where they have one at that step. It reports and decides nothing.
+  is one directory or the directories of its legs in their order joined by `os.pathsep`, read as
+  one continuous run: the records by `k`, a later leg's replacing an earlier's and an earlier leg's
+  beyond the `events_made` a later leg starts with dropped; the rows of `chains.txt` and
+  `budget.txt` of the legs before a leg beyond its first step dropped, and its own first row where
+  they have one at that step. It reports and decides nothing.
 - Run outputs, run manifests and environment receipts live outside this repository.
 - Figures follow the `publication-plots` conventions.
 - README, `docs/` and figure captions are public-candidate: no private paths, hosts or
