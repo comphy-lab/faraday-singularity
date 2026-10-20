@@ -430,8 +430,18 @@ def adjacent_shoulders(r, i: int) -> tuple[float, float]:
     ``r[i]``, has the shoulder ``r[i]``: no minimum on that side, depth 0. An end on the axis is
     never reached (``r = 0`` there), whatever nodes :func:`chain_necks` skips as candidates; the
     wall end of the open chain is, and is included, as the global ``r[i + 1:].max()`` includes it.
-    Each walked set is a subset of its side, so for finite radii each shoulder is at most the
-    largest ``r`` of its side and the lower of the two at most :func:`chain_necks`' ``shoulder``.
+    At an interior minimum, the nodes :func:`chain_necks` reports, both walks take a node, each
+    walked set is a subset of its side, and for finite radii each shoulder is at most the largest
+    ``r`` of its side and the lower of the two at most :func:`chain_necks`' ``shoulder``; at any
+    other node a side whose walk takes no node has the shoulder ``r[i]``, which may exceed that
+    side's largest ``r`` (``r = [0.1, 0.2, 1.0, 3.0]``, ``i = 2``: left shoulder 1.0).
+
+    A genuine neck is as shallow as its lower side, too: a waist above which the surface widens by
+    less than ``1/(1 - neck_depth)`` before it narrows again below the waist's radius (a low pocket
+    under a thinner jet) is no deeper than that pocket, however wide the liquid beyond it, so the
+    gas-neck test of the events block takes it only once it is narrower than ``neck_elements
+    h_min``, the clause no depth gates, where the global shoulders alone would take it from
+    ``neck_depth`` below them.
 
     NaN on both sides where ``r[i]`` is not finite, and on a side whose walk stops at a NaN (a NaN
     beyond the node a walk stops at is never read); :class:`IndexError` for ``i`` outside the chain

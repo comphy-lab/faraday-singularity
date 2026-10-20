@@ -175,13 +175,14 @@ add a second top-level `cases/` tree.
   iteration); a new neck stops the run (`secondary-pinch-approach`) only `neck_depth` (0.25)
   below the lower of the widest points on either side of it along its chain, or below
   `neck_elements h_min` (`reconnect.chain_necks`; `neck_side` gas or liquid); with the events
-  block a gas neck must also be `neck_depth` below its adjacent shoulders, the largest `r` on
-  each side before `r` falls below the neck's (`reconnect.adjacent_shoulders`), so a stationary
-  pair on a nearly vertical wall is no `gas-neck`, and the request records both depths; no Newton
-  failure ends the run cleanly, and the profiles of the state the failing step started from are
-  written first (`profile_<step>_lastgood{,_bubble}.txt`), as is a profile at every step while an
-  element turns beyond `edge_turn_refine`; rotating dumps follow at least each time `tau` doubles and the end
-  state is dumped; and every output carries `tau = t - t_cut` and `tau_p = t - t_p` (`collapse.txt`,
+  block a gas neck above `neck_elements h_min` must also be `neck_depth` below its adjacent
+  shoulders, the largest `r` on each side before `r` falls below the neck's
+  (`reconnect.adjacent_shoulders`), so a stationary pair on a nearly vertical wall is no
+  `gas-neck`, while one below `neck_elements h_min` is a `gas-neck` whatever either depth, and the
+  request records both depths; no Newton failure ends the run cleanly, and the profiles of the
+  state the failing step started from are written first (`profile_<step>_lastgood{,_bubble}.txt`),
+  as is a profile at every step while an element turns beyond `edge_turn_refine`; rotating dumps
+  follow at least each time `tau` doubles and the end state is dumped; and every output carries `tau = t - t_cut` and `tau_p = t - t_p` (`collapse.txt`,
   `chains.txt` with `R_apex_<tip>`, `groove_gap_<tip>`, `groove_angle_<tip>`, `edge_turn_<chain>`
   and `edge_midside_<chain>`, profiles of both chains, events, dumps). `rebuild_spline` `vertices`
   (off by default) splines the rebuilds through the vertices only, for sensitivity tests; smoothing
@@ -255,9 +256,10 @@ add a second top-level `cases/` tree.
   `L-unhandled` for a head too large; the narrowest `r_n/s` first), then one at the scale of the
   mesh (`contact` `kink`), no event but the cut's own `self-contact-approach` or
   `annular-contact-approach`, then the groove closest to its limit (`groove`), then `gas-neck`
-  (deep also against its adjacent shoulders), `bridge-closing`, `chain-contact`. Heads and
-  tracked necks: `events.head_sides`, `liquid_necks`, `head_of_fold`. The keys of `liquid` also set the cut of a neck that lands under them
-  (`surgery.liquid_cut`, which refuses a request made under others), which the driver makes within
+  (deep also against its adjacent shoulders unless below `neck_elements h_min`),
+  `bridge-closing`, `chain-contact`. Heads and tracked necks: `events.head_sides`,
+  `liquid_necks`, `head_of_fold`. The keys of `liquid` also set the cut of a neck that lands under
+  them (`surgery.liquid_cut`, which refuses a request made under others), which the driver makes within
   the run (below) (`cap`, `cap_height`, `cap_fill`, `box_radius`, `projection`, `restart`, and the noise of the
   box in an ordinary rebuild that floors the limits of its budgets, `sigma_V`, `sigma_Pz`,
   `sigma_KE`, `surgery.NOISE_FLOORS`, none until calibrated; class keys like the rest of `liquid`;
