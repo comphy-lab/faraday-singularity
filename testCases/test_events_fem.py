@@ -117,13 +117,16 @@ def _run(src: Path, cwd: Path, spec: dict, out: str = "run") -> Path:
     return cwd / out
 
 
-def _reference_src(tmp_path: Path) -> Path:
-    ref = tmp_path / "ref"
+def _reference_src(tmp_path: Path, commit: str = REFERENCE) -> Path:
+    """The ``src`` of ``commit`` (by default :data:`REFERENCE`), extracted by ``git archive`` under
+    ``tmp_path`` (``ref`` for the reference, ``ref-<commit>`` for another); the test is skipped
+    where the commit is not available."""
+    ref = tmp_path / ("ref" if commit == REFERENCE else f"ref-{commit}")
     try:
-        archive = subprocess.run(["git", "-C", str(ROOT), "archive", REFERENCE, "src"],
+        archive = subprocess.run(["git", "-C", str(ROOT), "archive", commit, "src"],
                                  capture_output=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError):
-        pytest.skip(f"commit {REFERENCE} is not available")
+        pytest.skip(f"commit {commit} is not available")
     ref.mkdir()
     subprocess.run(["tar", "-x", "-C", str(ref)], input=archive, check=True)
     return ref / "src"

@@ -553,6 +553,145 @@ def test_post_cut_stops_on_a_second_neck_of_either_chain():
     assert stop["r_neck"] == pytest.approx(8e-4)
 
 
+def _wall_pair(n_wall=41, amp=3e-9, e=3):
+    """Radii along a chain from the axis to the axis: up to a bulb (5e-3), down to a valley
+    (3e-4), up to a wall at 4.616e-4 that carries a stationary pair of a maximum and a minimum
+    (``r_w + a (x^3/3 - e^2 x)`` over the wall's nodes ``x``, the pair ``amp`` apart in ``r`` and
+    ``2 e`` nodes apart), then up to 7.9e-4 and back to the axis. Returns ``r`` and the index of
+    the pair's minimum."""
+    up = np.linspace(0.0, 5e-3, 40)[:-1]
+    down = np.linspace(5e-3, 3e-4, 40)[:-1]
+    rise = np.linspace(3e-4, 4.616e-4, 20)[:-1]
+    x = np.arange(n_wall) - n_wall // 2
+    a = amp / (4.0 / 3.0 * e**3)
+    wall = 4.616e-4 + a * (x**3 / 3.0 - e**2 * x)
+    out = np.linspace(4.616e-4, 7.9e-4, 30)[1:]
+    back = np.linspace(7.9e-4, 0.0, 30)[1:]
+    r = np.concatenate([up, down, rise, wall, out, back])
+    return r, len(up) + len(down) + len(rise) + n_wall // 2 + e
+
+
+def _points(r):
+    """The chain of radii ``r`` rising along the axis (``z`` the node's index times 1e-4): every
+    neck on the gas side."""
+    return np.column_stack([r, 1e-4 * np.arange(len(r))])
+
+
+def test_the_adjacent_shoulders_of_a_neck_are_the_widest_points_before_the_surface_narrows_again():
+    """``adjacent_shoulders`` walks from a node each way while ``r`` stays at least its own and
+    takes the largest ``r`` met: a stationary pair on a wall of nearly constant ``r`` is as deep as
+    the pair (``chain_necks``' global shoulder, beyond the wall, makes it 42% deep); a flat bottom
+    and a twin neck of the same radius are walked across (the non-strict comparison), a shelf on a
+    descending wall is no neck; an empty side has the node's own radius, an axis end is never
+    reached and a wall end is; NaN where the node or the node a walk stops at is NaN; the lower of
+    the two never exceeds the global shoulder, and equals it where each side stays above the
+    node; a genuine gas waist between two lobes is as deep under both, on a bubble and on an open
+    chain."""
+    # (a) the wall pair
+    r, i = _wall_pair()
+    assert r[i] < r[i - 1] and r[i] <= r[i + 1]
+    left, right = rc.adjacent_shoulders(r, i)
+    pair_max = float(r[i - 2 * 3])  # the pair's maximum, 2 e nodes before its minimum
+    assert min(left, right) == pytest.approx(pair_max, rel=1e-12) and left == pair_max
+    assert right == pytest.approx(7.9e-4, rel=1e-12)
+    nk = next(x for x in rc.chain_necks(_points(r), ("axis", "axis")) if x["index"] == i)
+    assert nk["side"] == "gas" and nk["shoulder"] == pytest.approx(7.9e-4, rel=1e-12)
+    assert nk["depth"] > 0.25 and 1.0 - r[i] / min(left, right) < 1e-5
+    # (b) a flat bottom, a shelf and twin minima
+    flat = np.array([0, 2e-3, 1.5e-3, 1e-3] + [4e-4] * 5 + [1e-3, 2e-3, 1e-3, 0])
+    (nk,) = [x for x in rc.chain_necks(_points(flat), ("axis", "axis")) if x["r"] == 4e-4]
+    assert nk["index"] == 4 and rc.adjacent_shoulders(flat, 4) == (2e-3, 2e-3)
+    assert 1.0 - 4e-4 / min(rc.adjacent_shoulders(flat, 4)) == pytest.approx(0.8)
+    assert nk["depth"] == pytest.approx(0.8)
+    shelf = np.array([0, 2e-3, 3e-3, 2e-3, 8e-4, 8e-4, 5e-4, 3e-4, 1e-4, 0])
+    assert 4 in [x["index"] for x in rc.chain_necks(_points(shelf), ("axis", "axis"))]
+    assert rc.adjacent_shoulders(shelf, 4) == (3e-3, 8e-4)  # the right shoulder r_n: depth 0
+    twin = np.array([0, 2e-3, 1e-3, 3e-4, 3.1e-4, 3e-4, 1e-3, 2e-3, 0])
+    assert [x["index"] for x in rc.chain_necks(_points(twin), ("axis", "axis"))] == [3, 5]
+    assert rc.adjacent_shoulders(twin, 3) == rc.adjacent_shoulders(twin, 5) == (2e-3, 2e-3)
+    after = twin[4:]  # a strict walk from node 3 stops at its twin, behind the hump
+    assert float(after[:int(np.argmax(~(after > twin[3])))].max()) == 3.1e-4
+    # (c) the ends
+    r = np.array([5e-3, 1e-3, 3e-3, 2e-3, 4e-3, 5e-4, 6e-3])
+    assert rc.adjacent_shoulders(r, 1) == (5e-3, 4e-3)
+    assert rc.adjacent_shoulders(r, len(r) - 2) == (5e-3, 6e-3)  # the first node included
+    assert rc.adjacent_shoulders(r, 0) == (5e-3, 5e-3)  # the empty side: the node's own radius
+    assert rc.adjacent_shoulders(r, len(r) - 1) == (6e-3, 6e-3)
+    for bad in (len(r), -1):
+        with pytest.raises(IndexError):
+            rc.adjacent_shoulders(r, bad)
+    # closed: each walk stops before the axis
+    r = np.array([0.0, 3e-3, 1e-3, 2e-3, 4e-3, 5e-4, 0.0])
+    assert rc.adjacent_shoulders(r, 2) == (3e-3, 4e-3)
+    assert rc.adjacent_shoulders(r, 0) == (0.0, 4e-3)  # r = 0 on the axis: no node below it
+    wall = np.array([0.0, 3e-3, 1e-3, 2e-3, 0.5, R_C])  # open: the wall node is reached
+    assert rc.adjacent_shoulders(wall, 2) == (3e-3, R_C)
+    # (d) NaN
+    r = np.array([0.0, 3e-3, 1e-3, 2e-3, 5e-4, 4e-3, 0.0])
+    assert all(math.isnan(x) for x in rc.adjacent_shoulders(np.where(np.arange(7) == 2, np.nan, r),
+                                                            2))
+    left, right = rc.adjacent_shoulders(np.where(np.arange(7) == 4, np.nan, r), 2)
+    assert left == 3e-3 and math.isnan(right)
+    assert rc.adjacent_shoulders(np.where(np.arange(7) == 5, np.nan, r), 2) == (3e-3, 2e-3)
+    assert rc.adjacent_shoulders(r, 2) == (3e-3, 2e-3)
+    # (e) the bound against chain_necks' shoulder, and equality where each side stays above
+    rng = np.random.default_rng(0)
+    count = 0
+    for _ in range(200):
+        r = rng.uniform(1e-4, 1e-2, int(rng.integers(5, 60)))
+        for nk in rc.chain_necks(_points(r), ("axis", "axis")):
+            assert min(rc.adjacent_shoulders(r, nk["index"])) <= nk["shoulder"]
+            count += 1
+    assert count > 1000
+    r = np.array([2e-3, 5e-3, 3e-3, 1e-3, 4e-3, 6e-3, 2e-3])
+    (nk,) = rc.chain_necks(_points(r), ("fixed", "fixed"), skip=1)
+    assert nk["index"] == 3 and min(rc.adjacent_shoulders(r, 3)) == nk["shoulder"] == 5e-3
+    # (f) a genuine gas waist between two lobes, on a bubble and on an open chain
+    for open_chain in (False, True):
+        P, end_types = _lobed_waist(open_chain)
+        gas = [x for x in rc.chain_necks(P, end_types) if x["side"] == "gas"]
+        assert len(gas) == 1, gas
+        (nk,) = gas
+        left, right = rc.adjacent_shoulders(P[:, 0], nk["index"])
+        adj = min(left, right)
+        assert adj == nk["shoulder"] and adj == pytest.approx(1.5e-3, rel=1e-3)
+        assert nk["r"] == pytest.approx(5e-4, rel=1e-3)
+        assert nk["depth"] == pytest.approx(1.0 - 5e-4 / 1.5e-3, rel=1e-3)
+        if open_chain:
+            assert right == R_C and left == adj
+        else:
+            assert left == pytest.approx(2e-3, rel=1e-3) and right == adj
+
+
+def _lobed_waist(open_chain=False, r_n=5e-4, beta=30.0, p=32.0, n=4001):
+    """A gas waist ``r = sqrt(r_n^2 + (z tan beta)^2)`` at ``z = 0`` between spherical lobes,
+    blended into them by the smooth minimum ``(L^-p + H^-p)^(-1/p)``: a bubble from the axis to the
+    axis, lobes of radii 2e-3 (below) and 1.5e-3 (above), each a cylinder of its radius from its
+    equator towards the waist; or an open chain from the axis up a lobe of 1.5e-3, the waist, and
+    the widening hyperboloid out to the wall."""
+    tb = math.tan(math.radians(beta))
+    lobes = ((-4e-3, 2e-3), (3e-3, 1.5e-3)) if not open_chain else ((-3e-3, 1.5e-3),)
+    z_lo = lobes[0][0] - lobes[0][1]
+    z_hi = lobes[-1][0] + lobes[-1][1] if not open_chain else 6e-3
+    z = np.linspace(z_lo, z_hi, n)
+    H = np.sqrt(r_n**2 + (z * tb) ** 2)
+    inv = H ** -p
+    for zc, R in lobes:  # the outer half a sphere, the inner half a cylinder up to the waist
+        outer = (z - zc) * np.sign(zc) > 0.0
+        L = np.where(outer, np.sqrt(np.clip(R**2 - (z - zc) ** 2, 0.0, None)), R)
+        side = z * np.sign(zc) > 0.0
+        with np.errstate(divide="ignore"):
+            inv = inv + np.where(side, L ** -p, 0.0)
+    r = np.where(np.isinf(inv), 0.0, inv ** (-1.0 / p))
+    r[0] = 0.0
+    P = np.column_stack([r, z])
+    if not open_chain:
+        P[-1, 0] = 0.0
+        return P, ("axis", "axis")
+    far = np.column_stack([np.linspace(P[-1, 0], R_C, 50)[1:], np.linspace(z_hi, 1.0, 50)[1:]])
+    return np.vstack([P, far]), ("axis", "fixed")
+
+
 def test_post_cut_stops_on_a_fold_of_the_bubble():
     """A slot of gap 5e-4 in the bubble's surface (the groove beside a jet), with nodes 2.5e-4
     apart: below 3 element lengths, it is a fold to stop at; a bubble that crosses itself raises."""
@@ -1384,3 +1523,14 @@ def test_a_ripple_on_a_jet_thinner_than_delta_is_no_second_pinch():
     stop = rc.post_cut_stops([_bubble(waist=0.95), _cavity()],
                              rc.cut_geometry([_bubble(), _cavity()], 3.0, gas_before=1.0), s, 1e-5)
     assert stop["neck_side"] == "gas" and stop["neck_depth"] > 0.9
+    # as deep against its adjacent shoulders (the gas-neck test of the events block), and the cut's
+    # own stop, without the block, unchanged: no adjacent field
+    waist = _bubble(waist=0.95)
+    nk = next(x for x in rc.chain_necks(waist.points, waist.end_types) if x["side"] == "gas")
+    assert min(rc.adjacent_shoulders(waist.points[:, 0], nk["index"])) == nk["shoulder"]
+    assert nk["shoulder"] == pytest.approx(9.352071e-3, rel=1e-6)
+    assert nk["depth"] == pytest.approx(0.9465359, rel=1e-6)
+    assert stop == {"reason": "secondary-pinch-approach", "trigger": "neck-radius",
+                    "chain": "bubble", "r_neck": nk["r"], "z_neck": nk["z"],
+                    "neck_limit": s.delta, "neck_shoulder": nk["shoulder"],
+                    "neck_depth": nk["depth"], "neck_side": "gas"}

@@ -436,7 +436,10 @@ then an event, in this order: the bubble's two tips within `delta` of each other
 piercing the bubble (`piercing`); a landed liquid neck (`liquid-neck`); a closing fold, one that
 lands the neck of a head it reaches (`a-head`) on either chain before any closing groove (`groove`,
 the one closest to its limit), each head's own fold searched apart from the fold of its chain so
-that a closer fold elsewhere hides none; a gas neck (`gas-neck`); the bridge closing
+that a closer fold elsewhere hides none; a gas neck (`gas-neck`: narrower than `delta` and at
+least `neck_depth` narrower both than the widest points on either side of it along its chain and
+than its adjacent shoulders, the widest points before the surface narrows below it again, or
+narrower than three of the smallest elements whatever its depth); the bridge closing
 (`bridge-closing`) and the chains approaching (`chain-contact`). A fold at the scale of the mesh
 (`contact` `kink`) is no event: it stops the run as the cut's own stops do. A neck on the liquid
 side is followed from `liquid.track_depth` (0.05) below its shoulder. Its head is the side of it

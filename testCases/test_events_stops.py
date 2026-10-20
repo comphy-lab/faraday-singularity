@@ -11,7 +11,9 @@ so that the same state at another ``delta`` must give the same stops in units of
 
 The tests on the stop states of runs after a cut run when ``FARADAY_POSTCUT_RUNS`` names their run
 directories (``os.pathsep``-separated; each with ``parameters.json``, ``run_status.json`` and the
-profiles of the state its run stopped on).
+profiles of the state its run stopped on), and those on the ``gas-neck`` stops of runs with the
+block when ``FARADAY_GASNECK_RUNS`` names theirs (each also with the ``precut_e<k>`` record of the
+state before the event it stopped on).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ Z_APEX = 4.68  # the height of the groove's apex, the base of the hanging jet
 LIQUID = ev.EventSettings.from_dict({"liquid": {"enabled": True},
                                      "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
 RUNS = [Path(p) for p in os.environ.get("FARADAY_POSTCUT_RUNS", "").split(os.pathsep) if p]
+GASNECK_RUNS = [Path(p) for p in os.environ.get("FARADAY_GASNECK_RUNS", "").split(os.pathsep) if p]
 
 
 # --- the synthetic state --------------------------------------------------------------------------
@@ -142,6 +145,62 @@ def cavity_with_head(delta, *, r_n=0.3, s=0.5, r_w=1.0, r_root=0.45, h=1 / 256, 
     P = P[::-1].copy()
     P[0, 0], P[-1] = 0.0, [R_C, 5.2]
     return rc.Chain(P, ("axis", "fixed"))
+
+
+def rim_head(*, r_n=0.27, r_stem=0.31, stem=0.5, r_wall=0.4616, wall=0.2, A=3e-6, e=3.0 / 256,
+             lip=0.6, s=0.79, m=4000):
+    """The head of a hanging jet whose bottom has turned up into a rim, in units of delta, from
+    the neck ``(r_n, 0)`` down: a stem widening to ``r_stem`` over ``stem``, a U-turn outwards
+    (the bottom of the groove inside the rim), the rim's inner wall rising ``wall`` through
+    ``r_wall`` with a stationary pair of a maximum and a minimum of ``r`` on it (the cubic
+    ``r_wall + a (x^3/3 - e^2 x)`` about the wall's middle, the pair ``A`` apart in ``r`` and
+    ``2 e`` apart in height: a wall just past vertical), the lip turning outwards over the top
+    as a half circle out to ``lip``, the outer face down to its widest ``s``, and a quarter
+    ellipse closing onto the axis. The state the first pilot after the cut at delta 1e-3 stopped
+    on had such a wall, its pair 3e-9 apart in ``r`` on 4.616e-4."""
+    zs = -stem
+    st = _hermite(0.0, r_n, zs, r_stem, m)
+    zw = np.linspace(zs, zs + wall, m)
+    x = zw - (zs + 0.5 * wall)
+    rw = r_wall + A / (4.0 / 3.0 * e**3) * (x**3 / 3.0 - e**2 * x)
+    # the U-turn ends where the wall begins, its tangent vertical there as the wall's nearly is
+    rc_u, a_u = 0.5 * (r_stem + rw[0]), 0.5 * (rw[0] - r_stem)
+    th = np.linspace(math.pi, 2.0 * math.pi, m)
+    u = np.column_stack([rc_u - a_u * np.cos(th - math.pi), zs + a_u * np.sin(th)])
+    r0, z0 = rw[-1], zw[-1]
+    rad = 0.5 * (lip - r0)
+    ph = np.linspace(math.pi, 0.0, m)
+    lp = np.column_stack([r0 + rad + rad * np.cos(ph), z0 + rad * np.sin(ph)])
+    face = _hermite(z0, lip, z0 - 0.35, s, m)
+    tt = np.linspace(0.0, 0.5 * math.pi, m)
+    cap = np.column_stack([s * np.cos(tt), z0 - 0.35 - 0.3 * np.sin(tt)])
+    pieces = [st, u, np.column_stack([rw, zw]), lp, face, cap]
+    return np.vstack([pieces[0]] + [p[1:] for p in pieces[1:]])
+
+
+def bubble_with_rim(delta, *, A=3e-6, h=1 / 256, h_far=1e-3, R_b=0.05, r_w=1.0, r_root=0.45,
+                    **kw):
+    """:func:`bubble_with_head` with the head below the jet's neck (0.27 delta) replaced by
+    :func:`rim_head` (``A`` and ``kw`` its own, in units of delta): the roof, the groove and the
+    jet's root down to the neck kept, the rest the rim, spacing ``h delta`` there."""
+    local, apex = head_feature(r_n=0.27, s=0.79, r_w=r_w, r_root=r_root)
+    zeta_n = 0.5 * (r_w - r_root) + 0.4
+    k_neck = int(np.argmin(np.abs(local[:, 1] + zeta_n) + 10.0 * (local[:, 0] > 0.5)
+                           + 10.0 * (np.arange(len(local)) < apex)))
+    head = rim_head(r_n=float(local[k_neck, 0]), A=A, **kw)
+    head[:, 1] += float(local[k_neck, 1])
+    local = np.vstack([local[:k_neck + 1], head[1:]])
+    feat = np.column_stack([delta * local[:, 0], Z_APEX + delta * local[:, 1]])
+    r1, zroof = feat[0]
+    zs = zroof - math.sqrt(R_b**2 - r1**2)
+    th = np.linspace(0.0, math.pi - math.asin(r1 / R_b), 80000)
+    sphere = np.column_stack([R_b * np.sin(th), zs - R_b * np.cos(th)])
+    dense = np.vstack([sphere, feat[1:]])
+    sarc, nodes = _nodes(dense, float(np.sum(np.hypot(*np.diff(sphere, axis=0).T))), delta,
+                         h * delta, h_far)
+    P = np.column_stack([np.interp(nodes, sarc, dense[:, 0]), np.interp(nodes, sarc, dense[:, 1])])
+    P[0, 0] = P[-1, 0] = 0.0
+    return rc.Chain(P, ("axis", "axis"))
 
 
 def _stops(chains, delta=1e-3, events=LIQUID, cut=None, settings=None, **kw):
@@ -255,6 +314,9 @@ def test_a_landed_liquid_neck_is_an_event_with_its_head():
     assert req["neck_depth"] == pytest.approx(0.4, rel=1e-3)
     assert req["class"] == "L-unhandled" and req["handler"] is None
     assert not {"head", "s", "direction"} & set(req)
+    # the liquid side of the cut's test keeps its fields: no adjacent shoulder or depth
+    assert not {"neck_shoulder_left", "neck_shoulder_right", "neck_shoulder_adjacent",
+                "neck_depth_adjacent"} & set(req)
 
 
 def test_the_handler_of_an_event_is_its_classs_and_an_unhandled_class_has_none():
@@ -501,6 +563,10 @@ def test_every_change_of_topology_the_cut_stopped_on_is_an_event_with_the_block(
     req = stops([_bubble(waist=0.95), cav])
     assert (req["kind"], req["class"], req["handler"]) == ("gas-neck", "G", "n-chain-split")
     assert req["neck_side"] == "gas" and req["r_neck"] == pytest.approx(5e-4, rel=1e-3)
+    # a genuine gas waist: as deep against its adjacent shoulders as against the global ones
+    assert req["neck_depth_adjacent"] == pytest.approx(req["neck_depth"], rel=1e-12)
+    assert req["neck_shoulder_adjacent"] == pytest.approx(req["neck_shoulder"], rel=1e-12)
+    assert {"neck_shoulder_left", "neck_shoulder_right"} <= set(req)
     from test_reconnect_geometry import _bubble_with_jet
 
     jet_cav = _cavity(z_tip=4.70)
@@ -544,6 +610,80 @@ def test_the_events_are_the_same_in_units_of_delta_at_every_delta():
         assert out[4][0] == "liquid-neck-unresolved"
         if ref is None:
             ref = out
+        assert out == ref, (k, out, ref)
+
+
+def _gas_dips(bubble, delta):
+    """The gas-side necks of the bubble narrower than ``delta``, each with its index, its global
+    depth (``chain_necks``) and its depth against its adjacent shoulders."""
+    out = []
+    for nk in rc.chain_necks(bubble.points, bubble.end_types):
+        if nk["side"] == "gas" and nk["r"] < delta:
+            adj = min(rc.adjacent_shoulders(bubble.points[:, 0], nk["index"]))
+            out.append((nk, 1.0 - nk["r"] / adj))
+    return out
+
+
+def test_a_stationary_pair_on_the_inner_wall_of_a_rim_is_no_gas_neck():
+    """The head of the hanging jet turned up into a rim (:func:`bubble_with_rim`), whose inner wall,
+    just past vertical, carries a stationary pair of a maximum and a minimum 3e-6 delta apart in
+    ``r``, as on the state the first pilot after the cut at delta 1e-3 stopped on. The pair's
+    minimum is a gas-side neck below delta 42% below ``chain_necks``' global shoulder (the rim's
+    outer face, beyond the wall), so the gas test of e330650 (that depth alone) made it a
+    ``gas-neck`` event; against its adjacent shoulders it is 6.4e-6 deep, and the run goes on, with
+    and without the guard of a stepped mesh, the jet's own neck tracked with its head and not
+    landed. Narrower than ``neck_elements h_min`` (``neck_elements`` 8, so that ``h_min`` and every
+    limit of ``3 h_min`` stay as they are), it is still a gas neck whatever its depth, its request
+    with the adjacent depth. Without the pair there is no gas-side neck below delta. The same
+    verdicts, at the same offsets from the jet's neck, at every delta."""
+    bubble = bubble_with_rim(1e-3)
+    chains = [bubble, cavity()]
+    s = rc.ReconnectSettings(delta=1e-3)
+    h_min = s.tip_size * s.delta
+    ((nk, adj_depth),) = _gas_dips(bubble, 1e-3)
+    # (a) e330650's gas test, inline: the global depth alone
+    assert nk["r"] == pytest.approx(4.6159852e-4, rel=1e-7)
+    assert nk["depth"] == pytest.approx(0.41569, rel=1e-4)
+    assert nk["r"] < max(s.delta, 3.0 * h_min) and nk["depth"] >= s.neck_depth
+    # (b) the adjacent shoulders reject it: no stop, with or without the stepped guard
+    assert adj_depth == pytest.approx(6.4e-6, rel=0.05)
+    assert _stops(chains) is None
+    stepped = {"fresh": False, "h_floor": 1e-3 / 512, "refine_ratio": 1.5}
+    assert _stops(chains, guard=stepped) is None
+    (x,) = ev.liquid_necks((("bubble", bubble), ("open", chains[1])), LIQUID.liquid)
+    assert x["chain"] == "bubble" and x["status"] == "head" and not x["landed"]
+    assert x["r_n"] == pytest.approx(2.7e-4, rel=1e-4)
+    # (c) narrower than neck_elements h_min (8 x 6.25e-5 = 5e-4): a gas neck whatever its depth
+    req = _stops(chains, neck_elements=8.0)
+    assert (req["reason"], req["kind"], req["class"], req["handler"]) == (
+        ev.EVENT_REQUEST, "gas-neck", "G", "n-chain-split")
+    assert req["chain"] == "bubble" and req["index"] == nk["index"]
+    assert req["neck_depth"] == nk["depth"] and req["neck_depth_adjacent"] < 1e-5
+    assert req["neck_shoulder_adjacent"] == min(req["neck_shoulder_left"],
+                                                req["neck_shoulder_right"])
+    assert list(req)[list(req).index("neck_side") + 1:] == [
+        "neck_shoulder_left", "neck_shoulder_right", "neck_shoulder_adjacent",
+        "neck_depth_adjacent"]
+    # (d) without the pair: no gas-side neck below delta
+    flat = bubble_with_rim(1e-3, A=0.0)
+    assert _gas_dips(flat, 1e-3) == [] and _stops([flat, chains[1]]) is None
+    # (e) the same in units of delta
+    ref = None
+    for k in range(4):
+        d = 1e-3 * 2.0 ** -k
+        out = []
+        for A in (3e-6, 0.0):
+            b = bubble_with_rim(d, A=A)
+            (root,) = [n for n in rc.chain_necks(b.points, b.end_types) if n["side"] == "liquid"
+                       and n["r"] < d]
+            dips = [(n["index"] - root["index"], n["depth"] >= 0.25, depth >= 0.25)
+                    for n, depth in _gas_dips(b, d)]
+            stop = _stops([b, cavity()], delta=d)
+            out.append((dips, None if stop is None else stop["kind"]))
+        if ref is None:
+            ref = out
+            assert out[0][0] and all(g and not a for _, g, a in out[0][0]) and out[0][1] is None
+            assert out[1] == ([], None)
         assert out == ref, (k, out, ref)
 
 
@@ -623,6 +763,42 @@ def test_the_stop_states_of_runs_after_a_cut_go_on_with_the_block(run):
     req = rc.post_cut_stops(chains, cut, s, h_tip, events=landed, **kw)
     assert req["kind"] == "liquid-neck" and req["index"] == neck["index"]
     assert req["chain"] == neck["chain"]
+
+
+@pytest.mark.skipif(not GASNECK_RUNS, reason="FARADAY_GASNECK_RUNS not set")
+@pytest.mark.parametrize("run", GASNECK_RUNS, ids=[f"run{k}" for k in range(len(GASNECK_RUNS))])
+def test_the_gas_neck_stops_of_runs_the_adjacent_shoulders_reject_go_on(run):
+    """Each run with the block that stopped on a ``gas-neck`` event under e330650's gas test (the
+    global depth alone), on a stationary pair the adjacent shoulders reject: its stop state, read
+    from the profiles of its stop, the cut from the record of the state before the event
+    (``states/precut_e<k>.json``; a run continued from a dump has no ``cut_diagnostics.json``) and
+    the block from its parameters. ``chain_necks`` finds the recorded neck again, to round-off,
+    whose depth against its adjacent shoulders lies below ``neck_depth``, and the stops of the
+    events branch go on from that state, without the guard and with the guard of the mesh it was
+    on."""
+    chains, stop, params = _stop_state(run)
+    assert stop["reason"] == ev.EVENT_UNHANDLED and stop["kind"] == "gas-neck"
+    meta = json.loads((run / "states" / f"precut_e{int(stop['k']):03d}.json").read_text())
+    cut = rc.CutGeometry(**meta["cut"]["geometry"])
+    h_tip = meta["cut"]["sizing"]["h_tip"]
+    s = rc.ReconnectSettings.from_dict(meta["cut"]["settings"])
+    block = ev.EventSettings.from_dict(params["reconnect_events"])
+    c = params["collapse"]
+    kw = {"neck_elements": c["neck_stop_elements"], "fold_ratio": c["fold_ratio"],
+          "fold_stop": c["fold_stop"], "fold_stop_elements": c["fold_stop_elements"],
+          "fold_search": 4.0}
+    chain = chains[0] if stop["chain"] == "bubble" else chains[1]
+    (nk,) = [x for x in rc.chain_necks(chain.points, chain.end_types)
+             if x["index"] == stop["index"]]
+    assert nk["side"] == "gas"
+    for key, recorded in (("r", "r_neck"), ("depth", "neck_depth"), ("shoulder", "neck_shoulder")):
+        assert nk[key] == pytest.approx(stop[recorded], rel=1e-12)
+    adj = min(rc.adjacent_shoulders(chain.points[:, 0], nk["index"]))
+    assert 1.0 - nk["r"] / adj < s.neck_depth
+    assert rc.post_cut_stops(chains, cut, s, h_tip, events=block, **kw) is None
+    guard = {"fresh": bool(meta["mesh_fresh"]), "h_floor": block.post.h_floor or c["h_floor"],
+             "refine_ratio": c["refine_ratio"]}
+    assert rc.post_cut_stops(chains, cut, s, h_tip, events=block, guard=guard, **kw) is None
 
 
 # --- the floors after the cut, in units of delta --------------------------------------------------

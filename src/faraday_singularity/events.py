@@ -671,10 +671,12 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
        across the base of a jet, trigger ``fold-gap``), then the closing groove closest to its
        limit (``groove``, class ``A-groove``, with the head's neck as ``a_head`` where one is
        reached); each with the jet whose base its pair straddles; a gas neck at the cut's
-       secondary-pinch test (``gas-neck``, class ``G``); the bridge closing (``bridge-closing``,
-       ``B``) and the chains approaching (``chain-contact``, ``X``)."""
-    from .reconnect import (Chain, chains_disjoint, chain_necks, edge_reading, fold_contact,
-                            interface_guard, revolved_volume, spline_contact_stop)
+       secondary-pinch test, deep also against its adjacent shoulders
+       (``reconnect.adjacent_shoulders``: a stationary pair on a nearly vertical wall is none), its
+       request with both shoulders and depths (``gas-neck``, class ``G``); the bridge closing
+       (``bridge-closing``, ``B``) and the chains approaching (``chain-contact``, ``X``)."""
+    from .reconnect import (Chain, adjacent_shoulders, chains_disjoint, chain_necks, edge_reading,
+                            fold_contact, interface_guard, revolved_volume, spline_contact_stop)
     from .selfcontact import InterfaceSelfIntersection, fold_gap
 
     if len(chains) != 2:
@@ -737,15 +739,27 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
         return _request("piercing", "W1", bubble_length=length, limit=limit)
     neck_limit = max(settings.delta, neck_elements * h_min)
 
-    def secondary(side):  # the cut's test of a new neck (reconnect.post_cut_stops)
+    def secondary(side):  # the cut's test of a new neck (reconnect.post_cut_stops); a gas neck is
+        # deep only against its adjacent shoulders as well (reconnect.adjacent_shoulders): a
+        # stationary pair of a maximum and a minimum on a nearly vertical wall is no gas neck
         for name, c in named:
             for nk in chain_necks(c.points, c.end_types):
-                if nk["side"] == side and nk["r"] < neck_limit and (
-                        nk["depth"] >= settings.neck_depth or nk["r"] < neck_elements * h_min):
-                    return {"chain": name, "r_neck": nk["r"], "z_neck": nk["z"],
-                            "index": int(nk["index"]), "neck_limit": neck_limit,
-                            "neck_shoulder": nk["shoulder"], "neck_depth": nk["depth"],
-                            "neck_side": side}
+                if nk["side"] != side or not nk["r"] < neck_limit:
+                    continue
+                found = {"chain": name, "r_neck": nk["r"], "z_neck": nk["z"],
+                         "index": int(nk["index"]), "neck_limit": neck_limit,
+                         "neck_shoulder": nk["shoulder"], "neck_depth": nk["depth"],
+                         "neck_side": side}
+                deep = nk["depth"] >= settings.neck_depth
+                if side == "gas":
+                    left, right = adjacent_shoulders(c.points[:, 0], int(nk["index"]))
+                    adj = float(np.minimum(left, right))  # NaN where either side is
+                    adj_depth = 1.0 - nk["r"] / adj if adj > 0.0 else 0.0
+                    deep = deep and adj_depth >= settings.neck_depth
+                    found.update(neck_shoulder_left=left, neck_shoulder_right=right,
+                                 neck_shoulder_adjacent=adj, neck_depth_adjacent=adj_depth)
+                if deep or nk["r"] < neck_elements * h_min:
+                    return found
         return None
 
     if ls.enabled:

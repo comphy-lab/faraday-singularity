@@ -170,7 +170,9 @@ class ReconnectSettings:
     # a new neck on either chain stops the run (secondary-pinch-approach) only where it is narrower
     # than the cut radius and at least this fraction narrower than the lower of the widest points on
     # either side of it along the chain, or narrower than the mesh can follow (neck_elements h_min):
-    # a ripple on a jet thinner than the cut radius is no neck
+    # a ripple on a jet thinner than the cut radius is no neck; with the events block a neck on the
+    # gas side must also be this fraction narrower than its adjacent shoulders
+    # (adjacent_shoulders)
     neck_depth: float = 0.25
     bubble_stop: float = 0.01  # or the bubble has shrunk below this fraction of its volume at the cut
     # The interface after the cut, read on its quadratic elements (p2_edges, interface_guard) after
@@ -389,7 +391,9 @@ def chain_neck(points, end_types, skip: int = 2) -> tuple[float, float, int]:
 def chain_necks(points, end_types, skip: int = 2) -> list[dict]:
     """Every interior local minimum of ``r`` along one chain (as :func:`chain_neck`), narrowest
     first, with its depth: ``shoulder``, the lower of the largest ``r`` on either side of it along
-    the chain, and ``depth = 1 - r/shoulder``;
+    the whole chain (the global shoulder; :func:`adjacent_shoulders` gives the shoulders next to
+    it, against which the gas-neck test after the cut with the events block also measures a gas
+    neck), and ``depth = 1 - r/shoulder``;
     ``side`` is ``gas`` where the gas lies at smaller ``r`` (the chain runs upwards there, with the
     liquid on its right, as every chain is ordered) and ``liquid`` on a jet or thread of liquid."""
     P = np.asarray(points, dtype=float)
@@ -405,6 +409,49 @@ def chain_necks(points, end_types, skip: int = 2) -> list[dict]:
                     "depth": 1.0 - r_n / shoulder if shoulder > 0.0 else 0.0,
                     "side": "gas" if dz > 0.0 else "liquid"})
     return out
+
+
+def adjacent_shoulders(r, i: int) -> tuple[float, float]:
+    """``(left, right)``: the shoulders of the node ``i`` of a chain's radii ``r`` (in the chain's
+    stored order, :func:`orient_chain`) against the surface next to it, its prominence along the
+    chain. From the node the chain is walked each way, towards its first node (``left``) and
+    towards its last (``right``), while ``r`` stays at least ``r[i]``; the shoulder of a side is
+    the largest ``r`` met before ``r`` first falls below ``r[i]``, or before the chain's end.
+
+    A neck is as deep as the surface it is the narrowest point of, not as the widest point anywhere
+    along the chain (:func:`chain_necks`' ``shoulder``, which the lower of the two never exceeds): a
+    stationary pair of a maximum and a minimum on a wall of nearly constant ``r``, a wall just past
+    vertical, is only as deep as the pair, whatever wider surface lies beyond the narrower one
+    around it. An equal radius is not below: a flat bottom, reported once at its first node, or a
+    twin neck of the same radius across a hump, is walked across, and has the depth of the whole
+    neck (a strict comparison would make each twin as shallow as the hump between them). Of two
+    unequal minima across a hump the narrower walks across the wider and has the full depth, the
+    wider stops at the narrower and is shallow. A side with no node, or whose first node lies below
+    ``r[i]``, has the shoulder ``r[i]``: no minimum on that side, depth 0. An end on the axis is
+    never reached (``r = 0`` there), whatever nodes :func:`chain_necks` skips as candidates; the
+    wall end of the open chain is, and is included, as the global ``r[i + 1:].max()`` includes it.
+    Each walked set is a subset of its side, so for finite radii each shoulder is at most the
+    largest ``r`` of its side and the lower of the two at most :func:`chain_necks`' ``shoulder``.
+
+    NaN on both sides where ``r[i]`` is not finite, and on a side whose walk stops at a NaN (a NaN
+    beyond the node a walk stops at is never read); :class:`IndexError` for ``i`` outside the chain
+    (a negative ``i`` does not wrap). The gas-neck test of the events block reads it
+    (``events.post_cut_events``); the cut's own stops do not."""
+    r = np.asarray(r, dtype=float)
+    if not 0 <= i < len(r):
+        raise IndexError(f"adjacent_shoulders: node {i} outside a chain of {len(r)} nodes")
+    r_n = float(r[i])
+    if not math.isfinite(r_n):
+        return math.nan, math.nan
+
+    def shoulder(side):  # the nodes of one side in walking order, away from the node
+        below = ~(side >= r_n)  # below r_n, or NaN: the walk stops there
+        k = int(np.argmax(below)) if below.any() else len(side)
+        if k < len(side) and math.isnan(side[k]):
+            return math.nan
+        return float(side[:k].max()) if k > 0 else r_n
+
+    return shoulder(r[:i][::-1]), shoulder(r[i + 1:])
 
 
 # --- chains -------------------------------------------------------------------------------------
@@ -918,9 +965,10 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
     examined on its own, so the bridge between the two is never a fold.
 
     With ``events``, the events block (``events.EventSettings``), the stops are those of the events
-    branch instead, in its own order and with its own limits (``events.post_cut_events``), and
-    ``invalid`` is the check of a fresh mesh's curved elements the driver makes among the stops of
-    an invalid state; without it the stops are those above, unchanged."""
+    branch instead, in its own order and with its own limits (``events.post_cut_events``; a gas
+    neck deep also against its adjacent shoulders, :func:`adjacent_shoulders`), and ``invalid`` is
+    the check of a fresh mesh's curved elements the driver makes among the stops of an invalid
+    state; without it the stops are those above, unchanged."""
     if events is not None:
         from .events import post_cut_events
 
