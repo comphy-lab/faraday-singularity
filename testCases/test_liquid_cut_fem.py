@@ -581,7 +581,7 @@ def test_each_cut_removes_its_head_and_rebuilds_the_mesh_as_planned(jets):
         assert r2["removed_total"][x] == pytest.approx(r1["removed"][x] + r2["removed"][x])
     # the events made, as the dumps keep them, the polygon of the ghost in the file only
     assert [e["k"] for e in jets["events"]] == [1, 2]
-    assert ev.events_done(jets["events"]) == {"liquid": 2, "gap": 0}
+    assert ev.events_done(jets["events"]) == {"liquid": 2, "gap": 0, "ring": 0}
     assert "polygon" not in r1["ghost"] and "polygon" not in jets["file1"]["removed"]
     assert len(jets["file1"]["ghost"]["polygon"]) > 10
     assert jets["file1"]["dumps"]["postcut"] == r1["dumps"]["postcut"]

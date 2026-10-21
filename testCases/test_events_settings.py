@@ -230,8 +230,8 @@ def test_a_class_is_fixed_after_its_first_event_but_from_the_state_before_one():
 def test_events_done_count_the_made_events_by_class():
     records = [{"kind": "liquid-neck"}, {"kind": "a-head"}, {"kind": "groove-fill"},
                {"kind": "liquid-neck"}, {"kind": "piercing"}, "junk"]
-    assert ev.events_done(records) == {"liquid": 3, "gap": 1}
-    assert ev.events_done(None) == {"liquid": 0, "gap": 0}
+    assert ev.events_done(records) == {"liquid": 3, "gap": 1, "ring": 1}
+    assert ev.events_done(None) == {"liquid": 0, "gap": 0, "ring": 0}
 
 
 def test_the_block_is_split_off_the_collapse_block():

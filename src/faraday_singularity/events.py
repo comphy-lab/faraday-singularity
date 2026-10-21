@@ -8,7 +8,7 @@ how a run after the cut meets them, in a block of its own beside ``collapse.reco
 (:class:`~faraday_singularity.reconnect.ReconnectSettings`, the settings of the cut, which it does
 not change): a case without it runs exactly as before the block existed.
 
-The block has three parts and a few keys of its own:
+The block has four parts and a few keys of its own:
 
 * ``liquid`` (:class:`LiquidEventSettings`): a neck on the liquid side of either chain, at the root
   of a jet whose far end is on the axis (its head), followed from ``track_depth`` on and landed once
@@ -21,14 +21,22 @@ The block has three parts and a few keys of its own:
   the mesh at the necks, oomph-lib's smallest step after the cut, the open chain's neck stop, the
   sizing of the bubble's bottom, which dumps of the events the run keeps, the pruning of the
   meshes no dump refers to and the log of the noise of a cut's box in an ordinary rebuild;
+* ``ring`` (:class:`RingEventSettings`): the cut of a bubble its downward jet pierces, on the axis
+  (``ringsurgery.ring_cut``), the ring of gas it leaves, kept at the passive constant pressure of
+  the free surface on a mesh frozen at the cut, and the ring's removal below ``bubble_stop`` of the
+  bubble's volume at the gas cut (``ringsurgery.ring_removal``); off by default, when the piercing
+  stays an event without a handler, and written into the block only where it differs from its
+  defaults, so that every block recorded before it existed, and its hash, is unchanged;
 * of its own: the most events a run makes (``max_events``) and the test of a cascade of events at
   one tip (``cascade_min_interval``, ``cascade_ratio``, ``cascade_count``).
 
-Which keys a restart may change: the keys of ``liquid`` and ``gap`` are the keys of their class of
-events (:meth:`EventSettings.class_keys`), fixed once an event of the class has been made, except
-in a restart from the state before an event (``precut_e<k>``), from which they apply anew; every
-other key is a key of the leg, which any restart may change (:meth:`EventSettings.
-refused_changes`). Lengths and times are in the solver's units (length ``1/k``, capillary time).
+Which keys a restart may change: the keys of ``liquid``, ``gap`` and ``ring`` are the keys of their
+class of events (:meth:`EventSettings.class_keys`), fixed once an event of the class has been made
+(for ``ring``, the cut of the piercing or the ring's removal), except in a restart from the state
+before an event (``precut_e<k>``), from which they apply anew; every other key is a key of the leg,
+which any restart may change (:meth:`EventSettings.refused_changes`), ``ring.after_removal`` among
+them (:data:`EventSettings.LEG_KEYS_OF_CLASSES`). Lengths and times are in the solver's units
+(length ``1/k``, capillary time).
 
 With the block the stops of a state after the cut are those of :func:`post_cut_events`, in three
 ranks: a state that is not valid stops the run; the bubble emptying ends the window; every change of
@@ -77,15 +85,24 @@ OOMPH_MINIMUM_DT = 1e-12  # oomph-lib's smallest step by default (Problem::Minim
 BUBBLE_BOTTOM_SIZINGS = ("kept", "frozen")
 CAP_SHAPES = ("hemispheroid",)  # the cap that closes the stump of a cut liquid neck
 CAP_FILLS = ("sample", "transfer")  # the velocity of its nodes: the old bulk's, or the transfer's
+# the ring of a pierced bubble (RingEventSettings): the velocity of the former gas a ring surgery
+# fills (pyoomph's nearest-node blend, as the gas cut's default, or zero), what the run does once
+# the ring is removed, and the largest splice radius, in radii of the downward jet's shoulder (the
+# splice then lies between the jet's tip and its shoulder, off the vertical tangent there)
+RING_FILLS = ("blend", "zero")
+RING_AFTER_REMOVAL = ("stop", "continue")
+RING_RHO_MAX = 0.8
 # the kinds of the events a run makes, by class: the keys of a class are fixed after its first event
-EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head"), "gap": ("groove-fill",)}
+EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head"), "gap": ("groove-fill",),
+                 "ring": ("piercing", "ring-collapse")}
 # a dump of the state before an event, from which a restart may change the keys of its class
 PRECUT_EVENT = "precut-event"
 # the keys of the block that size the mesh after the cut: a restart that changes one of them does
 # not take a dumped mesh no step had run on as fresh (the checks of a fresh mesh would meet the
 # mesh of the old sizes again); the rule of its rebuilds remeshes it at the new sizes instead
 SIZING_KEYS = ("post.h_floor", "post.neck_floor", "post.neck_elements_per_scale",
-               "post.bubble_bottom_sizing", "post.bubble_bottom_size")
+               "post.bubble_bottom_sizing", "post.bubble_bottom_size", "ring.size",
+               "ring.cut_elements")
 
 
 def _number(value) -> bool:
@@ -263,6 +280,79 @@ class PostCutSettings:
         _flag("post", "log_box_noise", self.log_box_noise)
 
 
+@dataclass(frozen=True)
+class RingEventSettings:
+    """``ring``: the cut of a bubble its downward jet pierces, and the ring of gas the cut leaves.
+
+    With ``enabled`` false (the default) the piercing request (class ``W1``) is met at
+    ``bubble_length < max(delta, 3 h_min)`` and stays an event without a handler, as before the part
+    existed. With it the request fires at ``bubble_length < max(gap delta, 3 h_min)`` and the driver
+    makes the cut (``ringsurgery.ring_cut``): the gas is cut on the axis between the plug below and
+    the downward jet's cap above, by a closure of the liquid column the cut makes (an arc, a
+    vertical segment of radius ``r_w = waist rho`` and an arc, tangent to the cap at the splice
+    radius ``rho = rho s_t``, ``s_t`` the radius of the jet's shoulder, and to the plug,
+    ``ring.ring_cut_geometry``); the bubble's rest is kept as a ring of the passive, constant (zero)
+    gas pressure of the whole free surface, on its own boundary ``interface`` as a closed loop,
+    until it collapses below ``reconnect.bubble_stop`` of the bubble's volume at the gas cut, where
+    it is removed (``ringsurgery.ring_removal``, class ``W2``). ``cut_elements`` gives the elements
+    per waist radius on the closure and in the column's region (the reconnect block's
+    ``elements_per_scale`` when null). ``fill`` is the velocity of the former gas each ring surgery
+    turns into liquid (the column at the cut, the ring at its removal): pyoomph's nearest-node blend
+    (``blend``, the gas cut's default) or ``zero``; with ``projection`` the pressure-impulse
+    projection of the cut follows each, and the first step after it is ``restart``
+    (``reconnect.restart`` when null). The budgets of each are taken within ``max(box_radius delta,
+    2 L_fill)`` of the filled region, ``L_fill`` its reach, and the limits of the hard closures are
+    never below a multiple of the noise of the box (``sigma_V``, ``sigma_Pz``, ``sigma_KE``, in the
+    solver's units, the ring's own, none until set, ``ringsurgery.RING_NOISE_FLOORS``). The ring's
+    mesh is frozen at the cut: nowhere coarser than ``max(h_cut, size)`` (``h_cut`` the gas cut's
+    focus size; ``size`` null keeps ``h_cut``), the regions of the bubble that were finer kept at
+    their sizes. The ring coming up to the axis again, ``r_min < max(axis_ratio r_w, 3 h_col)``
+    (``h_col`` the column's element size), is a resumable stop (class ``RA``). ``after_removal``
+    ``stop`` ends the window at the removal (``bubble-vanishing``, ``window_end``), ``continue``
+    goes on with the open chain alone; unlike the other keys of this part, which are keys of the
+    class ``ring``, it is a key of the leg (:data:`EventSettings.LEG_KEYS_OF_CLASSES`), so that a
+    continuation from the state the window ended on may choose to go on."""
+    enabled: bool = False
+    gap: float = 1.0
+    rho: float = 0.5
+    waist: float = 0.5
+    cut_elements: float | None = None
+    fill: str = "blend"
+    projection: bool = True
+    restart: str | None = None
+    box_radius: float = 4.0
+    sigma_V: float = 0.0
+    sigma_Pz: float = 0.0
+    sigma_KE: float = 0.0
+    size: float | None = None
+    axis_ratio: float = 0.5
+    after_removal: str = "stop"
+
+    def __post_init__(self):
+        from .reconnect import RESTARTS
+
+        _flag("ring", "enabled", self.enabled)
+        _flag("ring", "projection", self.projection)
+        for name, lo, hi, closed_hi in (("gap", 0.0, 1.0, True), ("rho", 0.0, RING_RHO_MAX, True),
+                                        ("waist", 0.0, 1.0, False),
+                                        ("axis_ratio", 0.0, 1.0, False)):
+            value = getattr(self, name)
+            if not (_number(value) and lo < value and (value <= hi if closed_hi else value < hi)):
+                raise ValueError(f"collapse.{EVENTS_BLOCK}.ring.{name} must lie in ({lo:g}, "
+                                 f"{hi:g}{']' if closed_hi else ')'}")
+        _positive("ring", "cut_elements", self.cut_elements, optional=True)
+        _positive("ring", "size", self.size, optional=True)
+        _positive("ring", "box_radius", self.box_radius)
+        for name in ("sigma_V", "sigma_Pz", "sigma_KE"):
+            _non_negative("ring", name, getattr(self, name))
+        for name, allowed in (("fill", RING_FILLS), ("after_removal", RING_AFTER_REMOVAL)):
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"collapse.{EVENTS_BLOCK}.ring.{name} must be one of {allowed}")
+        if self.restart is not None and self.restart not in RESTARTS:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.ring.restart must be one of {RESTARTS}, "
+                             "or null")
+
+
 def event_dump_policy(value) -> tuple[int, int] | None:
     """``post.keep_event_dumps`` as ``(N, M)`` for ``first<N>-last<M>``, None for ``all``. Raises
     ``ValueError`` for any other value."""
@@ -311,17 +401,29 @@ class EventSettings:
     leg: the most events a run makes (``max_events``, over all its legs; the run stops resumably at
     the next, ``max-events``) and the test of a cascade of events at one tip
     (:class:`CascadeMonitor`: ``cascade_min_interval`` in ``delta^2``, ``cascade_ratio``,
-    ``cascade_count``)."""
+    ``cascade_count``).
+
+    The part ``ring`` (:class:`RingEventSettings`) is written into the block (:meth:`to_dict`, and
+    so into its hash, every leg and every dump) only where it differs from its defaults: a block
+    without it, as every block recorded before it existed, is the same to the byte, and a record
+    without it reads as the defaults (:meth:`_completed`)."""
     liquid: LiquidEventSettings = field(default_factory=LiquidEventSettings)
     gap: GapSettings = field(default_factory=GapSettings)
     post: PostCutSettings = field(default_factory=PostCutSettings)
+    ring: RingEventSettings = field(default_factory=RingEventSettings)
     max_events: int = 1000
     cascade_min_interval: float = 0.25
     cascade_ratio: float = 0.7
     cascade_count: int = 3
 
-    PARTS = {"liquid": LiquidEventSettings, "gap": GapSettings, "post": PostCutSettings}
-    CLASSES = ("liquid", "gap")  # the parts whose keys are the keys of a class of events
+    PARTS = {"liquid": LiquidEventSettings, "gap": GapSettings, "post": PostCutSettings,
+             "ring": RingEventSettings}
+    CLASSES = ("liquid", "gap", "ring")  # the parts whose keys are the keys of a class of events
+    # keys of a part of a class that are keys of the leg all the same: what the run does after the
+    # ring's removal, which a continuation from the state the window ended on may change
+    LEG_KEYS_OF_CLASSES = ("ring.after_removal",)
+    # the parts written into the block only where they differ from their defaults (to_dict)
+    OPTIONAL_PARTS = ("ring",)
     KEYS = ("max_events", "cascade_min_interval", "cascade_ratio", "cascade_count")  # of the leg
 
     def __post_init__(self):
@@ -368,7 +470,10 @@ class EventSettings:
         return cls(**kw)
 
     def to_dict(self) -> dict:
-        return {**{name: asdict(getattr(self, name)) for name in self.PARTS},
+        """The block as its records hold it: every part but those of ``OPTIONAL_PARTS`` at their
+        defaults, which are left out, and the keys of its own."""
+        return {**{name: asdict(getattr(self, name)) for name, part in self.PARTS.items()
+                   if name not in self.OPTIONAL_PARTS or getattr(self, name) != part()},
                 **{name: getattr(self, name) for name in self.KEYS}}
 
     def sha256(self) -> str:
@@ -376,7 +481,7 @@ class EventSettings:
         return hashlib.sha256(json.dumps(self.to_dict(), sort_keys=True).encode()).hexdigest()
 
     def class_keys(self, kind: str) -> dict:
-        """The keys of a class of events (``liquid`` or ``gap``)."""
+        """The keys of a class of events (``liquid``, ``gap`` or ``ring``)."""
         if kind not in self.CLASSES:
             raise ValueError(f"no class of events {kind!r}; the classes are {self.CLASSES}")
         return asdict(getattr(self, kind))
@@ -384,8 +489,11 @@ class EventSettings:
     @classmethod
     def _completed(cls, recorded: dict) -> dict:
         """A recorded block with the keys it lacks at their defaults (a block recorded before a
-        key existed ran with the key's default)."""
-        out = cls().to_dict()
+        key existed ran with the key's default), every part included, those a block leaves out at
+        their defaults too (``OPTIONAL_PARTS``)."""
+        defaults = cls()
+        out = {**{name: asdict(part()) for name, part in cls.PARTS.items()},
+               **{name: getattr(defaults, name) for name in cls.KEYS}}
         for name, sub in (recorded or {}).items():
             if name in cls.PARTS:
                 out[name] = {**out.get(name, {}), **(sub if isinstance(sub, dict) else {})}
@@ -395,9 +503,9 @@ class EventSettings:
 
     def changed_keys(self, recorded: dict | None) -> list[str]:
         """The keys in which the block differs from a recorded one, dotted for those of a part
-        (``liquid.eps_d``); a key the record lacks counts at its default."""
+        (``liquid.eps_d``); a key the record lacks counts at its default, on either side."""
         old = self._completed(recorded or {})
-        new = json.loads(json.dumps(self.to_dict()))
+        new = self._completed(json.loads(json.dumps(self.to_dict())))
         out = []
         for name in sorted(set(old) | set(new)):
             if name not in self.PARTS:
@@ -415,12 +523,13 @@ class EventSettings:
         existed, which may take any block) that a restart may not make: those of the keys of a class
         of which ``done`` counts an event already made, unless the restart is from the state before
         an event, ``precut_e<recut_from>``, from which the class keys apply anew (events before it
-        stay as made). The keys of the leg (``post`` and the block's own, ``KEYS``) may change at
-        any restart."""
+        stay as made). The keys of the leg (``post``, the block's own, ``KEYS``, and those of
+        ``LEG_KEYS_OF_CLASSES``) may change at any restart."""
         if recorded is None or recut_from is not None:
             return []
         return [k for k in self.changed_keys(recorded)
-                if k.split(".", 1)[0] in self.CLASSES and done.get(k.split(".", 1)[0], 0) > 0]
+                if k.split(".", 1)[0] in self.CLASSES and k not in self.LEG_KEYS_OF_CLASSES
+                and done.get(k.split(".", 1)[0], 0) > 0]
 
 
 def events_done(records) -> dict[str, int]:
@@ -455,20 +564,31 @@ EVENT_SCHEMA = "faraday-event/2"  # the schema of an event's record (events/even
 # occurs), by class and not by kind: a liquid neck without a single head, with one too large, or
 # met with liquid events off (L-unhandled) has none, whatever found it
 HANDLERS = {"W1": "ring", "L": "liquid-cut", "A-head": "liquid-cut", "L-unhandled": None,
-            "A-groove": "groove-fill", "G": "n-chain-split", "B": None, "X": None}
+            "A-groove": "groove-fill", "G": "n-chain-split", "B": None, "X": None,
+            # in the ring stage (ring.ring_stage_events): the ring emptied below bubble_stop of the
+            # bubble's volume at the gas cut, removed; the ring coming up to the axis; a fold of
+            # the ring closing (its top wedge, its corners, its pinching in two)
+            "W2": "ring-removal", "RA": None, "RF": None}
 # the handlers the driver makes within the run (surgery.liquid_cut); an event whose handler is
 # another, or none, is a resumable stop (EVENT_UNHANDLED)
 IMPLEMENTED_HANDLERS = ("liquid-cut",)
+# the handlers of the ring (ringsurgery.ring_cut, ringsurgery.ring_removal), which the driver makes
+# only with the block's ring.enabled: without it their events stay without a handler, as before
+RING_HANDLERS = ("ring", "ring-removal")
 # the stops of a run at an event, each with the dump of the state before the event (precut_e<k>),
 # from which a run resumes: an event without a handler; a cascade of events that shrink (the
 # CascadeMonitor); the most events (max_events); a liquid cut refused before anything changed;
 # one whose hard budgets do not close (surgery.BudgetUnclosed), which leaves the problem holding a
-# cut that is not accepted, so that the state before it is the run's end state
+# cut that is not accepted, so that the state before it is the run's end state; the ring cut or
+# the ring's removal refused before anything changed
 EVENT_CASCADE = "event-cascade"
 EVENT_LIMIT = "max-events"
 LIQUID_CUT_REFUSED = "liquid-cut-refused"
 EVENT_UNCLOSED = "event-unclosed"
-EVENT_STOPS = (EVENT_UNHANDLED, EVENT_CASCADE, EVENT_LIMIT, LIQUID_CUT_REFUSED, EVENT_UNCLOSED)
+RING_CUT_REFUSED = "ring-cut-refused"
+RING_REMOVAL_REFUSED = "ring-removal-refused"
+EVENT_STOPS = (EVENT_UNHANDLED, EVENT_CASCADE, EVENT_LIMIT, LIQUID_CUT_REFUSED, EVENT_UNCLOSED,
+               RING_CUT_REFUSED, RING_REMOVAL_REFUSED)
 # the outcome in the record of an event the run stops on before any handler is made for it
 # (events/event_<k>.json, written by the driver); a cut refused or unclosed writes its own record
 STOP_OUTCOMES = {EVENT_UNHANDLED: "unhandled", EVENT_CASCADE: "cascade", EVENT_LIMIT: "max-events"}
@@ -657,7 +777,8 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
        (``bubble-vanishing``, ``window_end``).
     3. The events, each returned as a request (reason ``event-request``, its ``kind``, ``class`` and
        the ``handler`` its class is to have, :data:`HANDLERS`, None for ``L-unhandled``): the
-       bubble's two tips within ``max(delta, 3 h_min)``, the downward jet piercing the bubble
+       bubble's two tips within ``max(delta, 3 h_min)`` (``max(ring.gap delta, 3 h_min)`` with
+       ``ring.enabled``, the request then with its ``gap``), the downward jet piercing the bubble
        (``piercing``, class ``W1``); a landed liquid neck, the one nearest its landing first
        (``liquid-neck``: class ``L``, or ``L-unhandled`` where the neck has no single head or one
        too large; with ``liquid.enabled`` false, a liquid neck at the cut's secondary-pinch test
@@ -734,9 +855,13 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
     zb = sorted([float(bubble.points[0, 1]), float(bubble.points[-1, 1])])
     zc = cavity.axis_ends()[0][1]
     length = zb[1] - zb[0]
-    limit = max(settings.delta, 3.0 * h_min)
+    # with ring.enabled at the trigger gap of the ring cut (ring.gap delta); 1.0 * delta is delta
+    # to the bit, and the request has the field gap only then, so that without it all is as before
+    gap = events.ring.gap if events.ring.enabled else 1.0
+    limit = max(gap * settings.delta, 3.0 * h_min)
     if length < limit:
-        return _request("piercing", "W1", bubble_length=length, limit=limit)
+        return _request("piercing", "W1", bubble_length=length, limit=limit,
+                        **({"gap": gap} if events.ring.enabled else {}))
     neck_limit = max(settings.delta, neck_elements * h_min)
 
     def secondary(side):  # the cut's test of a new neck (reconnect.post_cut_stops); a gas neck is
