@@ -140,6 +140,20 @@ class CutSizing:
             raise ValueError("cut sizes and grading must be positive")
 
 
+@dataclass(frozen=True)
+class RingSizing:
+    """The frozen sizing of the ring of a pierced bubble (``ringsurgery.ring_cut``): no element of
+    the ring coarser than ``h_ring``, growing at ``grading`` away from it."""
+    h_ring: float
+    grading: float
+
+    def __post_init__(self):  # plain numbers: they are written into gmsh field expressions
+        for name in ("h_ring", "grading"):
+            object.__setattr__(self, name, float(getattr(self, name)))
+        if not (self.h_ring > 0 and self.grading > 0):
+            raise ValueError("the ring's size and grading must be positive")
+
+
 class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
     # The class name names the stored .msh files of state dumps; keep it.
     def __init__(self, radius: float, depth: float, elevation: Callable[[np.ndarray], np.ndarray],
@@ -158,6 +172,13 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
         self.high_order_threshold: float | None = None
         self.rebuild_spline = "nodes"
         self.point_snap_tolerance = 0.0  # no merging of nearby points unless a cut needs it
+        # the ring stage, once the ring of a pierced bubble is cut (ringsurgery.ring_cut): every
+        # rebuild meshes the ring as a hole of the liquid (_define_ring_geometry) at its frozen
+        # sizing; the geometry a ring surgery plans for the next build (chains and loops, consumed
+        # by it; no loop removes the ring). Inert until set: before the ring nothing reads them
+        self.ring_stage = False
+        self.ring_sizing: RingSizing | None = None
+        self.pending_ring_geometry: dict | None = None
 
     @property
     def interface_name(self) -> str:
@@ -193,6 +214,12 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
         self.default_resolution = s.h_max
 
         segs = None
+        if self.is_remeshing() and getattr(self, "ring_stage", False):
+            # the ring stage (inert before it): the ring's own build; no pyoomph plan is parked
+            # while a loop exists, whose open chart could not carry it
+            if self.has_pending_surgery_plan(self.interface_name):
+                raise RuntimeError("a surgery plan is parked on the template in the ring stage")
+            return self._define_ring_geometry(focus, h_focus)
         if self.is_remeshing() and self.has_pending_surgery_plan(self.interface_name):
             return self._define_chain_geometry(self._planned_chains(), focus, h_focus)
         if not self.is_first_time():
@@ -319,5 +346,149 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
                 self.set_gmsh_parameter("Mesh.MeshSizeFromCurvature", int(cut.curvature))
         self.set_gmsh_parameter("Mesh.MeshSizeMin", h_min)
         if self.high_order_threshold is not None:  # after a cut: curved elements of this quality
+            self.set_gmsh_parameter("Mesh.HighOrderThresholdMin", float(self.high_order_threshold))
+        self.set_mesh_size_background_field(self.add_mesh_size_field("Min", FieldsList=fields))
+
+    # --- the ring stage: a closed loop of the free surface meshed as a hole -----------------------
+
+    def _ring_stage_curves(self) -> tuple[list[Chain], list[np.ndarray]]:
+        """The chains and the loops a ring-stage build is made of: the planned geometry of a ring
+        surgery (``pending_ring_geometry``, consumed), or the current interface nodes, split into
+        the chains (``reconnect.orient_chain``) and the closed loops (a segment whose first point
+        is its last, within 1e-12, or that ends on neither the axis nor the wall), each loop
+        checked to be ordered (``ring.validate_loop_order``) and counter-clockwise."""
+        from .ring import orient_loop, validate_loop_order
+
+        tol = self._end_tolerance()
+        pending, self.pending_ring_geometry = self.pending_ring_geometry, None
+        if pending is not None:
+            chains = [c if isinstance(c, Chain) else Chain(np.asarray(c["points"], dtype=float),
+                                                           tuple(c["end_types"]))
+                      for c in pending.get("chains") or []]
+            loops = [np.asarray(x, dtype=float).reshape(-1, 2) for x in pending.get("loops") or []]
+        else:
+            chains, loops = [], []
+            for seg in self.get_boundary_coordinates(self.interface_name, sort_along_axis="x+",
+                                                     nondimensional=True):
+                P = np.array([(float(x), float(y)) for x, y in seg])
+                if len(P) > 2 and np.hypot(*(P[0] - P[-1])) <= 1e-12:
+                    loops.append(P[:-1])
+                elif min(abs(P[0, 0]), abs(P[-1, 0])) > tol and min(
+                        abs(P[0, 0] - self.radius), abs(P[-1, 0] - self.radius)) > tol:
+                    loops.append(P)
+                else:
+                    chains.append(orient_chain(P, self.radius, tol))
+        out = []
+        for L in loops:
+            validate_loop_order(L)
+            out.append(orient_loop(L)[0])
+        return sorted(chains, key=lambda c: float(c.points[:, 1].min())), out
+
+    def _define_ring_geometry(self, focus: Focus | None, h_focus: float):
+        """The liquid of the ring stage: bounded by the chains of the free surface (exactly one of
+        them open, as after any cut), the wall, the bottom and the liquid spans of the axis, with
+        at most one ring, a closed loop of the free surface touching neither the axis nor the
+        wall, as a hole, of two splines named ``interface`` (``ring.loop_halves``, split on
+        vertices), so that its nodes are those of the free surface's own boundary. The chains and
+        the loop are checked before meshing (``reconnect.check_chains``; the loop simple, its two
+        splines without contact, ``ring.loop_spline_contact``, off the axis and away from every
+        chain). The sizes are those of a build after the cut (the interface's distance field, the
+        focus regions over the nodes of the chains and the loop, the cut's tip attractor at every
+        end on the axis and its bridge attractor along every bridge), and the ring's frozen size
+        besides (``ring_sizing``: ``h_ring + grading d`` from the loop, at most ``h_max``). After
+        the ring's removal the stage builds with no loop, and keeps the cut's sizing and the
+        regions, which the build of a single free surface would not."""
+        from shapely.geometry import LineString
+
+        from .ring import loop_crossings, loop_halves, loop_spline_contact
+        from .selfcontact import InterfaceSelfIntersection
+
+        s = self.settings
+        cut = self.cut_sizing
+        chains, loops = self._ring_stage_curves()
+        if len(loops) > 1:
+            raise RuntimeError(f"the ring stage holds {len(loops)} loops of the free surface, not "
+                               "at most one")
+        self.point_snap_tolerance = 1e-9
+        check_chains(chains)
+        for L in loops:
+            if loop_crossings(L) or loop_spline_contact(L) is not None:
+                raise InterfaceSelfIntersection("the ring's free surface, or the splines through "
+                                                "it, cross themselves: no hole to mesh")
+            ring_line = LineString(np.vstack([L, L[:1]]))
+            if not float(L[:, 0].min()) > 0.0 or any(
+                    ring_line.distance(LineString(c.points)) <= 0.0 for c in chains):
+                raise RuntimeError("the ring touches the axis or a chain of the free surface")
+        spans = liquid_axis_spans([z for c in chains for _, z in c.axis_ends()])
+
+        regions = focus.regions if focus is not None else ()
+        curves, tips, attractor_pts, nodes, ring_curves = [], {}, [], [], []
+        region_pts = [[] for _ in regions]
+        wall_pt = None
+        for c in chains:
+            pts = [self.point(x, y) for x, y in c.points.tolist()]
+            curves.append(self.spline(pts, name="interface"))
+            nodes += list(zip(pts, c.points.tolist()))
+            for k, z in c.axis_ends():
+                tips[z] = pts[k]
+            if c.is_open:
+                wall_pt = pts[-1]
+            if focus is not None and not regions:
+                attractor_pts += [pt for pt, x in zip(pts, c.points[:, 0]) if x <= focus.radius]
+            for sel, g in zip(region_pts, regions):
+                sel += [pt for pt, inside in zip(pts, g.selects(c.points)) if inside]
+        holes = []
+        for L in loops:
+            pts = [self.point(x, y) for x, y in L.tolist()]
+            a, b = loop_halves(L)
+            m = len(a) - 1
+            halves = [self.spline(pts[:m + 1], name="interface"),
+                      self.spline(pts[m:] + pts[:1], name="interface")]
+            holes.append(halves)
+            ring_curves += halves
+            nodes += list(zip(pts, L.tolist()))
+            for sel, g in zip(region_pts, regions):
+                sel += [pt for pt, inside in zip(pts, g.selects(L)) if inside]
+        lowest = tips[spans[0][1]]
+        outer = curves + self.create_lines(wall_pt, "wall", (self.radius, 0.0), "bottom",
+                                           (0.0, 0.0), "axis", lowest)
+        bridges = [self.line(tips[a], tips[b], name="axis") for a, b in spans[1:]]
+        self.plane_surface(*outer, *bridges, name=self.domain_name, holes=holes or None)
+
+        h_min = min(s.h_interface, h_focus)
+        d_if = self.add_mesh_size_field("Distance", CurvesList=curves + ring_curves, Sampling=2000)
+        g_focus = focus.grading if focus is not None else s.grading
+        if regions:
+            sized = [(g.size, pts or [min(nodes, key=lambda n: math.hypot(n[1][0] - g.r,
+                                                                         n[1][1] - g.z))[0]])
+                     for g, pts in zip(regions, region_pts)]
+        else:
+            sized = [(h_focus, attractor_pts or [lowest])]
+        d_ax = [self.add_mesh_size_field("Distance", PointsList=pts) for _, pts in sized]
+        fields = [self.add_mesh_size_field(
+            "MathEval", F=f"min({s.h_max!r}, {s.h_interface!r} + {s.grading!r}*F{d_if})")]
+        for (size, _), d in zip(sized, d_ax):
+            fields.append(self.add_mesh_size_field(
+                "MathEval", F=f"min({s.h_max!r}, {size!r} + {g_focus!r}*F{d})"))
+            h_min = min(h_min, size)
+        if cut is not None:
+            d_tip = self.add_mesh_size_field("Distance", PointsList=list(tips.values()))
+            fields.append(self.add_mesh_size_field(
+                "MathEval", F=f"min({s.h_max!r}, {cut.h_tip!r} + {cut.grading!r}*F{d_tip})"))
+            if bridges:
+                d_br = self.add_mesh_size_field("Distance", CurvesList=bridges, Sampling=200)
+                h_br = f"{cut.h_bridge!r} + {cut.grading!r}*F{d_br}"
+                fields.append(self.add_mesh_size_field("MathEval", F=f"min({s.h_max!r}, {h_br})"))
+            h_min = min(h_min, cut.h_tip, cut.h_bridge)
+            if cut.curvature > 0:
+                self.set_gmsh_parameter("Mesh.MeshSizeFromCurvature", int(cut.curvature))
+        rs = self.ring_sizing
+        if rs is not None and ring_curves:
+            d_ring = self.add_mesh_size_field("Distance", CurvesList=ring_curves, Sampling=2000)
+            fields.append(self.add_mesh_size_field(
+                "MathEval", F=f"min({s.h_max!r}, {rs.h_ring!r} + {rs.grading!r}*F{d_ring})"))
+            h_min = min(h_min, rs.h_ring)
+        self.set_gmsh_parameter("Mesh.MeshSizeMin", h_min)
+        if self.high_order_threshold is not None:
             self.set_gmsh_parameter("Mesh.HighOrderThresholdMin", float(self.high_order_threshold))
         self.set_mesh_size_background_field(self.add_mesh_size_field("Min", FieldsList=fields))

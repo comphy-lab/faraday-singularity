@@ -362,13 +362,19 @@ def _check_events(meta: dict, events) -> None:
     back to the stops of the cut alone, or under one that changes the keys of a class of events of
     which the state has made one, unless the state is the one before an event (``precut_e<k>``,
     ``cut_stage`` ``precut-event``), from which they apply anew (events.EventSettings.
-    refused_changes). A state written before the block existed takes any block."""
+    refused_changes), and a state of the ring stage (its dump holds ``ring``) under a block whose
+    ring is not enabled. A state written before the block existed takes any block."""
     recorded = meta.get("events_settings")
     if events is None:
         if recorded is not None:
             raise SystemExit(f"the state was written with collapse.{EVENTS_BLOCK}; continuing it "
                              "needs a case with that block")
         return
+    if meta.get("ring") is not None and not events.ring.enabled:
+        # a state of the ring stage (ring.py): the class rule alone would admit a block without
+        # the ring from a later precut_e<k> of the stage
+        raise SystemExit(f"the state is one of the ring stage (its dump holds ring): continuing "
+                         f"it needs collapse.{EVENTS_BLOCK}.ring.enabled")
     recut_from = None
     if meta.get("cut_stage") == PRECUT_EVENT:
         recut_from = (meta.get("event") or {}).get("k")

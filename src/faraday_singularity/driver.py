@@ -303,7 +303,8 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
 from .episodes import ETA_HYS, EpisodeTracker
 from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, EVENT_SCHEMA,
                      EVENT_STOPS, EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, IMPLEMENTED_HANDLERS,
-                     LIQUID_CUT_REFUSED, PRECUT_EVENT, SIZING_KEYS, STOP_OUTCOMES, CascadeMonitor,
+                     LIQUID_CUT_REFUSED, PRECUT_EVENT, RING_CUT_REFUSED, RING_HANDLERS,
+                     RING_REMOVAL_REFUSED, SIZING_KEYS, STOP_OUTCOMES, CascadeMonitor,
                      EventSettings, event_dump_policy, event_dumps_kept, event_neck, event_tip,
                      events_done, fold_stop_after_cut, ghost_place, ghost_recontacts,
                      liquid_necks, minimum_dt_after_cut)
@@ -572,6 +573,18 @@ BOX_NOISE_COLUMNS = ("step", "time", "tau", "tau_p", "reason", "remesh_count", "
                      "Pz_after", "dPz", "KE_before", "KE_after", "dKE", "points_before",
                      "points_after")
 BOX_NOISE_KEYS = ("V", "A", "Pz", "KE")  # the budgets of box_noise.txt, as dV, dA, dPz, dKE
+# ring.txt, in the ring stage only (after the cut of a pierced bubble, ringsurgery.ring_cut): a row
+# per step, the ring as ring.loop_record reads it (its volume, also in units of the bubble's at
+# the gas cut, its section's area and centroid, its extremes, nodes, spacing, speed and Courant
+# time), its fold (ring.loop_fold_gap) against its limit, the limit of its approach to the axis
+# and its distance to the open chain, its worst quadratic element, and the volume, axial momentum
+# and kinetic energy the ring surgeries have filled since the gas cut
+RING_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "ring_volume", "ring_volume_over_V_b",
+                "ring_area_section", "ring_centroid_r", "ring_centroid_z", "ring_r_min",
+                "ring_z_r_min", "ring_r_max", "ring_z_min", "ring_z_max", "ring_points",
+                "ring_h_min", "ring_h_max", "ring_u_max", "ring_courant", "ring_fold_gap",
+                "ring_fold_limit", "ring_axis_limit", "ring_open_gap", "edge_turn_ring",
+                "edge_midside_ring", "V_filled", "Pz_filled", "KE_filled")
 
 
 def _table_cell(v) -> str:
@@ -718,6 +731,7 @@ class CollapseDriver:
         # with the events block: a row per event the run makes (events.txt), and what an event in
         # the making hands its record (_meet_event, _on_event_made)
         self._event_rows = self._drops = self._budget = None
+        self._ring_rows = None  # ring.txt, opened in the ring stage only (_open_ring_rows)
         self._dumps_dropped = 0  # the dumps of events the policy deleted (post.keep_event_dumps)
         self._meshes_pruned = 0  # the files of meshes no dump refers to deleted (post.prune_gmsh)
         self._event_before: tuple | None = None
@@ -747,7 +761,7 @@ class CollapseDriver:
         self._events.close()
         if self._chains is not None:
             self._chains.close()
-        for f in (self._event_rows, self._drops, self._budget, self._noise):
+        for f in (self._event_rows, self._drops, self._budget, self._noise, self._ring_rows):
             if f is not None:
                 f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
@@ -782,6 +796,10 @@ class CollapseDriver:
         key = (self._t(), self.pb.remesh_count, self.state.step)
         if self._post_cut_cache is not None and self._post_cut_cache[0] == key:
             return self._post_cut_cache[1]
+        if self._ring() is not None:
+            state = self._ring_stage_state()
+            self._post_cut_cache = (key, state)
+            return state
         s = self.s
         segs = self.pb.interface_segments()
         rec = post_cut_record(segs) if len(segs) == 2 else {}
@@ -809,14 +827,58 @@ class CollapseDriver:
         self._post_cut_cache = (key, state)
         return state
 
-    def _apexes(self, cavity: dict, bubble: dict, tips: dict) -> dict:
+    def _ring(self) -> dict | None:
+        """The problem's record of the ring stage (``FaradayProblem.ring``), after the ring cut of
+        a pierced bubble (``ringsurgery.ring_cut``); None before it, and on a problem without it."""
+        return getattr(self.pb, "ring", None)
+
+    def _ring_stage_state(self) -> dict:
+        """:meth:`_post_cut_state` in the ring stage, with the same keys: ``segs`` the chains of
+        the free surface (the open chain alone, ``FaradayProblem.interface_segments`` setting the
+        ring aside), ``record`` with every key of ``reconnect.post_cut_record``
+        (``ring.ring_stage_record``: the bubble's volume and widest point the ring's, its other keys
+        NaN; empty where the chains are not the open chain alone, a changed topology a stop
+        records), the Courant limit over the open chain and the ring (``chain`` 1 the ring), no
+        tips of a bubble, the base of the open chain's jet (``apexes``), the quadratic elements of
+        the open chain and the ring (``edges``, ``ring`` the ring's) and the step limits; besides,
+        the ring as ``FaradayProblem.interface_loops`` reads it (``loops``) and its record
+        (``ring_record``, ``ring.loop_record``, None once it is removed)."""
+        from .ring import loop_edges, loop_record, loop_segment, ring_stage_record
+
+        segs = self.pb.interface_segments()
+        loops = self.pb.interface_loops()
+        opens = [c for c in segs if c["open"]]
+        rec = (ring_stage_record(opens[0], loops[0] if len(loops) == 1 else None)
+               if len(segs) == 1 and opens and len(loops) <= 1 else {})
+        cl = courant_limit(segs + [loop_segment(x) for x in loops])
+        apexes = self._apexes(opens[0], None, {}) if opens else {}
+        edges = {("open" if c["open"] else "bubble"):
+                 edge_reading(np.column_stack([c["r"], c["z"]])) for c in segs}
+        if len(loops) == 1:
+            edges["ring"] = loop_edges(np.column_stack([loops[0]["r"], loops[0]["z"]]))
+        R_apex = [a["R_apex"] for a in apexes.values()
+                  if math.isfinite(a["R_apex"]) and a["R_apex"] > 0.0]
+        R_apex_min = min(R_apex) if R_apex else math.inf
+        R = min([x for x in (rec.get("R_tip_min", math.nan), R_apex_min) if math.isfinite(x)],
+                default=math.nan)
+        ring_record = (loop_record(np.column_stack([loops[0]["r"], loops[0]["z"]]),
+                                   np.column_stack([loops[0]["u_r"], loops[0]["u_z"]]))
+                       if len(loops) == 1 else None)
+        return {"segs": segs, "record": rec, "courant": cl, "tips": {}, "apexes": apexes,
+                "edges": edges, "R_apex_min": R_apex_min,
+                "dt_courant": self.reconnect.courant * cl["h_over_u"],
+                "dt_capillary": self.s.capillary * R**1.5 if math.isfinite(R) else math.inf,
+                "loops": loops, "ring_record": ring_record}
+
+    def _apexes(self, cavity: dict, bubble: dict | None, tips: dict) -> dict:
         """The base of the jet on each tip on the axis after a cut where a resolved bump stands (the
         rule by which its radius is a scale): the base (``r``, ``z``, the jet-base radius and
         height in the frame of the axis), its node along its chain (``chain``, ``index``), the
         vertex of the apex there (``apex_r``, ``apex_z``), its radius of curvature ``R_apex`` and
         the opening angle of the groove around the jet (``reconnect.jet_base_apex``), and the fold
         of that groove (``groove_gap``, ``groove_limit``, ``groove_arc``: ``reconnect.groove_gap``,
-        with the driver's fold limits). By tip name."""
+        with the driver's fold limits). By tip name. In the ring stage (``bubble`` None) the open
+        chain's alone."""
         s = self.s
         out = {}
         r, z = np.asarray(cavity["r"], dtype=float), np.asarray(cavity["z"], dtype=float)
@@ -827,7 +889,7 @@ class CollapseDriver:
             if a["apex"] > 0:
                 out["cavity_tip"] = {**a, "chain": "open", "index": a["apex"], "r": jb.r_j,
                                      "z": jb.z_b}
-        n = len(bubble["r"])
+        n = len(bubble["r"]) if bubble is not None else 0
         for name, tj in tips.items():
             if not (tj["bump"] and tj["r_j"] > 0.0 and not tj["flat_bump"]):
                 continue
@@ -875,6 +937,24 @@ class CollapseDriver:
             apexes.setdefault(a["chain"], []).append({"tip": tip, **a})
         s = self.s
         fresh = self._fresh_mesh()
+        ring = self._ring()
+        if self.events is not None and ring is not None:
+            # the ring stage (ring.ring_stage_events): the open chain and the ring, read apart
+            from .ring import ring_stage_events
+
+            loops = [np.column_stack([x["r"], x["z"]]) for x in pc["loops"]]
+            stop = ring_stage_events(chains, loops, CutGeometry(**cut["geometry"]),
+                                     self.reconnect, cut["sizing"]["h_tip"], self.events, ring,
+                                     neck_elements=s.neck_stop_elements, fold_ratio=s.fold_ratio,
+                                     fold_stop=s.fold_stop,
+                                     fold_stop_elements=s.fold_stop_elements,
+                                     fold_search=FOLD_SEARCH, apexes=apexes,
+                                     guard={"fresh": fresh, "h_floor": self._h_floor(),
+                                            "refine_ratio": s.refine_ratio},
+                                     invalid=self._jacobian_stop if fresh else None)
+            if stop is not None:
+                stop.update(self._taus(self._t()))
+            return stop
         if self.events is not None:
             # the events branch: invalid states, the end of the window, then the events, each a
             # request (reason event-request) the run meets with its handler (_meet_event)
@@ -1153,10 +1233,22 @@ class CollapseDriver:
         for) and the longest and shortest element within its region (``h_max``, ``h_min``,
         ``reconnect.region_spacing``; the shortest outside the finer regions within it, with the
         reach of their grading); empty in a state whose topology has changed, which a stop records.
-        Also returns the kink regions as entries, which the step commits at its end."""
+        Also returns the kink regions as entries, which the step commits at its end.
+
+        In the ring stage the features are the open chain's alone, the kink regions those of the
+        open chain and the ring (``kink_ring``), and the ring's own regions are frozen at the cut
+        (the problem's record of the stage, ``sizing.frozen`` and ``sizing.ring_cut``; none once
+        the ring is removed): each emitted at its size, as its target and the size it keeps, with
+        no element read in it (``h_max``, ``h_min`` NaN), so that a rebuild sizes it exactly at its
+        size and none asks for one (:meth:`_regions_focus`); the guard's kink regions still refine
+        the ring where an element bends."""
         pc = self._post_cut_state()
         segs = pc["segs"]
-        if len(segs) != 2 or not pc["record"]:
+        ring = self._ring()
+        if ring is not None:
+            if len(segs) != 1 or not pc["record"]:
+                return [], {}
+        elif len(segs) != 2 or not pc["record"]:
             return [], {}
         s, cut, st = self.s, self._cut_record(), self.state
         regions = feature_regions(segs, cavity, tips, pc["record"], cut, self.reconnect,
@@ -1178,20 +1270,48 @@ class CollapseDriver:
         focus = self.pb.active_mesh_template().focus
         axis_tips = [float(c["z"][k]) for c in segs for k, end in ((0, 0), (-1, 1))
                      if c["end_types"][end] == AXIS]
+        frozen = self._frozen_ring_regions()
+        regions += frozen
         for g in regions:
             current = focus.region(g["name"]) if focus is not None else None
             g["size"] = current.size if current is not None else math.nan
         grading = s.focus_grading
+        spaced = segs
+        if ring is not None:  # the ring's elements count in the regions' spacing
+            from .ring import loop_segment
+
+            spaced = segs + [loop_segment(x) for x in pc["loops"]]
         for g in regions:
+            if g.get("frozen"):
+                g["h_max"] = g["h_min"] = math.nan
+                continue
             own = g["size"] if math.isfinite(g["size"]) else g["target"]
             finer = []
             for f in regions:
                 other = f["size"] if math.isfinite(f["size"]) else f["target"]
                 if f is not g and other < own:
                     finer.append((f["r"], f["z"], f["radius"] + (own - other) / grading))
-            g["h_max"], g["h_min"] = region_spacing(segs, g, axis_tips, cut.get("sizing"), own,
+            g["h_max"], g["h_min"] = region_spacing(spaced, g, axis_tips, cut.get("sizing"), own,
                                                     finer)
         return regions, kinks
+
+    def _frozen_ring_regions(self) -> list[dict]:
+        """The ring's regions frozen at its cut (the problem's record of the stage, ``sizing``:
+        the copies of the bubble's finer regions, ``ring_<name>``, and the column's, ``ring_cut``),
+        each at its size as target and as the size it keeps (``frozen``); none before the ring and
+        once it is removed."""
+        ring = self._ring()
+        if ring is None or ring.get("removed") is not None:
+            return []
+        sizing = ring.get("sizing") or {}
+        out = []
+        for g in list(sizing.get("frozen") or []) + ([sizing["ring_cut"]]
+                                                     if sizing.get("ring_cut") else []):
+            size = float(g["size"])
+            out.append({"name": g["name"], "target": size, "r": float(g["r"]),
+                        "z": float(g["z"]), "radius": float(g["radius"]), "ell": math.inf,
+                        "floor": size, "kept": size, "frozen": True})
+        return out
 
     def _post_region_keys(self) -> dict:
         """The keys of the events block's ``post`` that size the regions after the cut
@@ -1300,15 +1420,79 @@ class CollapseDriver:
         self._chains.write("\t".join(cell(c) for c in CHAIN_COLUMNS) + "\n")
         if self._budget is not None:  # with the events block only
             self._write_budget_row(values)
+        if self._ring_rows is not None:  # in the ring stage only
+            self._write_ring_row(dt)
+
+    def _filled(self) -> dict:
+        """What the ring surgeries made have filled of the gas since the gas cut (the column of the
+        ring cut, the ring at its removal): the volume, axial momentum and kinetic energy of the
+        liquid each put there (its record's ``filled``), summed; zero without one."""
+        rings = [e for e in self._made_events() if e.get("kind") in EVENT_CLASSES["ring"]
+                 and isinstance(e.get("filled"), dict)]
+        return {"events": len(rings), **{key: sum((float(e["filled"].get(key) or 0.0)
+                                                   for e in rings), 0.0)
+                                         for key in ("V", "Pz", "KE")}}
 
     def _removed(self) -> dict:
         """What the events made have removed of the liquid since the gas cut: the volume, axial
         momentum and kinetic energy of each removed head at its cut (its record's ``removed``),
-        summed, and the number of events."""
+        summed, and the number of events; with ring surgeries made (the ring stage), net of what
+        they filled (:meth:`_filled`, a fill a negative removal, counted among the events), so that
+        the totals of ``budget.txt`` stay continuous across them."""
         liquid = [e for e in self._made_events() if e.get("kind") in EVENT_CLASSES["liquid"]]
-        return {"events": len(liquid), **{key: sum((float((e.get("removed") or {}).get(key) or 0.0)
-                                                    for e in liquid), 0.0)
-                                          for key in ("V", "Pz", "KE")}}
+        out = {"events": len(liquid), **{key: sum((float((e.get("removed") or {}).get(key) or 0.0)
+                                                   for e in liquid), 0.0)
+                                         for key in ("V", "Pz", "KE")}}
+        filled = self._filled()
+        if filled["events"]:
+            out = {"events": out["events"] + filled["events"],
+                   **{key: out[key] - filled[key] for key in ("V", "Pz", "KE")}}
+        return out
+
+    def _open_ring_rows(self):
+        """``ring.txt`` of this leg's directory, opened at the ring cut or at a restart in the ring
+        stage (a new file per leg, as every table of a leg)."""
+        if self._ring_rows is None:
+            self._ring_rows = open(self.outdir / "ring.txt", "w", buffering=1)
+            self._ring_rows.write("# " + "\t".join(RING_COLUMNS) + "\n")
+
+    def _write_ring_row(self, dt: float):
+        """The row of ``ring.txt`` of a step of the ring stage (:data:`RING_COLUMNS`); NaN for
+        the ring once it is removed."""
+        from .ring import closed, loop_fold_gap, ring_axis_limits
+
+        pc, ring, t = self._post_cut_state(), self._ring(), self._t()
+        rr = pc.get("ring_record") or {}
+        filled = self._filled()
+        V_b = float((ring or {}).get("V_b", math.nan))
+        values = {"step": self.state.step, "time": t, **self._taus(t), "dt": dt,
+                  "V_filled": filled["V"], "Pz_filled": filled["Pz"], "KE_filled": filled["KE"]}
+        if rr:
+            from shapely.geometry import LineString
+
+            L = np.column_stack([pc["loops"][0]["r"], pc["loops"][0]["z"]])
+            fold = loop_fold_gap(L, ratio=self.s.fold_ratio, stop=self._fold_stop(),
+                                 stop_elements=self.s.fold_stop_elements,
+                                 search_factor=FOLD_SEARCH)
+            opens = [c for c in pc["segs"] if c["open"]]
+            values.update({f"ring_{k}": rr[k] for k in ("r_min", "z_r_min", "r_max", "z_min",
+                                                         "z_max", "points", "h_min", "h_max",
+                                                         "u_max", "courant")})
+            values.update(ring_volume=rr["V"], ring_volume_over_V_b=rr["V"] / V_b,
+                          ring_area_section=rr["area_section"], ring_centroid_r=rr["r_c"],
+                          ring_centroid_z=rr["z_c"], ring_fold_gap=fold.gap,
+                          ring_fold_limit=max(self._fold_stop(),
+                                              self.s.fold_stop_elements * fold.h_elem)
+                          if math.isfinite(fold.gap) else math.nan,
+                          ring_axis_limit=max(ring_axis_limits(ring, self.events)),
+                          ring_open_gap=float(LineString(closed(L)).distance(LineString(
+                              np.column_stack([opens[0]["r"], opens[0]["z"]])))) if opens
+                          else math.nan)
+            rd = pc["edges"].get("ring") or {}
+            values.update(edge_turn_ring=rd.get("turn", math.nan),
+                          edge_midside_ring=rd.get("midside", math.nan))
+        self._ring_rows.write("\t".join(_table_cell(values.get(c, math.nan))
+                                         for c in RING_COLUMNS) + "\n")
 
     def _write_budget_row(self, values: dict):
         """The row of ``budget.txt`` of a step after the cut, from the values of its row of
@@ -1329,7 +1513,7 @@ class CollapseDriver:
         read them (the ends on the axis put on ``r = 0``); empty in a state whose topology has
         changed."""
         segs = self._post_cut_state()["segs"]
-        if len(segs) != 2:
+        if len(segs) != (1 if self._ring() is not None else 2):
             return []
         out = []
         for c in segs:
@@ -1380,6 +1564,11 @@ class CollapseDriver:
         from .surgery import box_grid, box_integrals, box_polyline_budgets
 
         chains = [c for _, c in self._named_post_cut_chains()]
+        if self._ring() is not None:  # the ring, a hole of the liquid, bounds its gas too
+            from .ring import closed
+
+            chains += [Chain(closed(np.column_stack([x["r"], x["z"]])), ("loop", "loop"))
+                       for x in self._post_cut_state()["loops"]]
         out = []
         for b in boxes:
             poly = box_polyline_budgets(chains, b["z"], b["R"], self.reconnect.reservoir_depth)
@@ -1696,9 +1885,24 @@ class CollapseDriver:
                        np.column_stack([bubble[k] for k in ("r", "z", "u_r", "u_z")]),
                        header=json.dumps(dict(header, chain="bubble")) + "\nr z u_r u_z",
                        comments="# ")
+        self._write_ring_profile(path, header)
         st.snapshots += 1
         st.last_snapshot_t = m["time"]
         st.last_snapshot_ell = m["ell"]
+
+    def _write_ring_profile(self, path: Path, header: dict, loops=None):
+        """In the ring stage: beside the profile ``path`` of the open chain, the ring's
+        (``<stem>_ring.txt``, header ``chain`` ``ring``), its closed polyline from its seam
+        (``ring.closed``), instead of a bubble's; nothing before the ring or once it is removed."""
+        if self._ring() is None:
+            return
+        if loops is None:
+            loops = self._post_cut_state().get("loops") or []
+        for x in loops[:1]:
+            P = np.column_stack([x[k] for k in ("r", "z", "u_r", "u_z")])
+            np.savetxt(path.with_name(path.stem + "_ring.txt"), np.vstack([P, P[:1]]),
+                       header=json.dumps(dict(header, chain="ring")) + "\nr z u_r u_z",
+                       comments="# ")
 
     def _maybe_snapshot(self, m: dict, forced: str | None = None):
         st = self.state
@@ -1993,6 +2197,8 @@ class CollapseDriver:
                             legs=[dict(x) for x in st.legs],
                             # whether a step has run on the mesh since it was built (restore)
                             mesh_fresh=self._fresh_mesh())
+                if self._ring() is not None:  # the ring stage: its record, restored with it
+                    meta["ring"] = self._ring()
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -2157,6 +2363,15 @@ class CollapseDriver:
             if self.events is not None:
                 self.pb.events = [dict(x) for x in meta.get("events") or []]
                 st.legs = [dict(x) for x in meta.get("legs") or []]
+                if meta.get("ring") is not None:
+                    # the ring stage: its record and the ring's sizing on the template the loaded
+                    # mesh is rebuilt from, before the state is measured
+                    from .ringsurgery import restore_ring
+
+                    self.pb.ring = json.loads(json.dumps(meta["ring"]))
+                    restore_ring(self.pb, self.pb.ring)
+                    self._post_cut_cache = None
+                    self._open_ring_rows()
         ep = self.episodes
         resume = {"resume_at": RESUME_REMESH_CHECK} if self._checks_pending else {}
         m = self.measure()
@@ -2227,6 +2442,10 @@ class CollapseDriver:
                 raise RuntimeError("a state written with the events block after its cut is "
                                    "continued only by a driver with that block")
             return
+        if meta.get("ring") is not None and not self.events.ring.enabled:
+            # the class rule alone would admit it from a later precut_e<k> of the ring stage
+            raise ValueError("a state of the ring stage (its dump holds ring) is continued only "
+                             "under an events block with ring.enabled")
         recut_from = ((meta.get("event") or {}).get("k")
                       if meta.get("cut_stage") == PRECUT_EVENT else None)
         refused = self.events.refused_changes(recorded, events_done(meta.get("events")),
@@ -2468,6 +2687,63 @@ class CollapseDriver:
                     record=f"events/event_{int(k):03d}.json")
         self._track_tips(m, snapshot=False)
         self._snapshot(m, "liquid-cut")
+        return m
+
+    def _on_ring_made(self, rec: dict):
+        """The driver's bookkeeping of a ring surgery made (``ringsurgery.ring_cut`` or
+        ``ring_removal``'s ``on_made``, before the state after it is kept and its record written),
+        into its record: the event's place in the run (``step``, ``leg``, ``tau_over_delta2``,
+        ``t_prime_over_T``, the source ``commit``, ``dt.before``); then :meth:`reset_after_ring`
+        and the commit of the jets' bases and the kink regions of the fresh mesh
+        (:meth:`_commit_post_cut`), which the state after the event, kept next, holds as the run
+        steps from it."""
+        st, delta = self.state, self.reconnect.delta
+        t_cut, t_p = self._cut_times()
+        T, tau_p = t_p - t_cut, rec.get("tau_p")
+        rec.update(step=st.step, leg=len(st.legs) - 1,
+                   tau_over_delta2=_finite(float(rec["tau"]) / delta**2),
+                   t_prime_over_T=(_finite(float(tau_p) / T) if tau_p is not None
+                                   and math.isfinite(T) and T != 0.0 else None),
+                   commit=self.leg_info.get("commit"))
+        rec.setdefault("dt", {})["before"] = _finite(st.dt_prev)
+        kind = "ring-removal" if rec.get("kind") == "ring-collapse" else "ring-cut"
+        m_new = self.reset_after_ring(rec, kind)
+        self._commit_post_cut(m_new)
+        self._event_after = m_new
+
+    def reset_after_ring(self, record: dict, kind: str) -> dict:
+        """Restart the bookkeeping that a ring surgery invalidates (``record`` its record; ``kind``
+        ``ring-cut`` or ``ring-removal``) and measure the fresh mesh, as :meth:`reset_after_event`
+        does for a liquid cut: no new cycle, the births, series, holds and last step kept; the
+        growth limit of the local scale and the rate limit of the step restart, the apex histories
+        of the bubble's two tips and its kink region are dropped (at the cut the bubble's tips are
+        gone; ``tip_born`` is kept for the record), every ghost whose far tip was one of the
+        bubble's loses it (``far_tip`` None, ``status_note``), and the remesh check of the step is
+        not made on the fresh mesh (``_checks_pending`` cleared, so that the state after the event
+        is kept without ``resume_at``); the event ``kind`` is recorded, ``ring.txt`` opened and a
+        profile written (reason ``kind``)."""
+        st = self.state
+        st.ell_prev = st.t_prev = math.nan
+        for tip in BUBBLE_TIP_SIGNS:
+            st.apex_history.pop(tip, None)
+        st.kinks.pop("bubble", None)
+        if kind == "ring-cut":
+            for e in self._made_events():
+                g = e.get("ghost")
+                if isinstance(g, dict) and g.get("far_tip") in BUBBLE_TIP_SIGNS:
+                    g.update(far_tip=None, status_note="far tip gone (ring)")
+        self._checks_pending = False
+        self._post_cut_cache = None  # the stage begins or ends at the same step and rebuild
+        self._open_ring_rows()
+        m = self.measure()
+        k = record.get("k")
+        filled = record.get("filled") or {}
+        self._event(kind, m, k=k, kind=record.get("kind"), **{"class": record.get("class")},
+                    chain=record.get("chain"), V_fill=filled.get("V"), Pz_fill=filled.get("Pz"),
+                    KE_fill=filled.get("KE"),
+                    record=f"events/event_{int(k):03d}.json" if k is not None else None)
+        self._track_tips(m, snapshot=False)
+        self._snapshot(m, kind)
         return m
 
     def _write_event_row(self, rec: dict):
@@ -3022,3 +3298,5 @@ class CollapseDriver:
                        np.column_stack([bubble[k] for k in ("r", "z", "u_r", "u_z")]),
                        header=json.dumps(dict(header, chain="bubble")) + "\nr z u_r u_z",
                        comments="# ")
+        if cached and cached.get("loops"):
+            self._write_ring_profile(path, header, cached["loops"])

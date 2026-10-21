@@ -66,6 +66,91 @@ CACHED_INTEGRALS = {"liquid": ("volume", "kinetic_energy", "dissipation"),
                     "liquid/interface": ("area", "amp")}
 
 
+class RingTolerantArclength(AssignZetaCoordinatesByArclength):
+    """The arclength chart of the free surface (``interface``), which also charts a ring.
+
+    The ring of a pierced bubble (``ring.py``, ``ringsurgery.ring_cut``) is a closed loop of the
+    free surface's own boundary: pyoomph refuses a problem with equations on a boundary its mesh
+    lacks, at ``initialise`` and at ``load_state`` alike, so a boundary of the ring's own could
+    never load a state written before the ring, while on ``interface`` the ring carries the free
+    surface's own equations and nothing new is compiled. pyoomph's arclength chart refuses a closed
+    loop beside other segments of its boundary; this one charts the open segments as pyoomph does
+    and each loop beyond their range (``segment_jump_offset`` beyond the largest zeta, by arclength
+    counter-clockwise from its vertex node of largest ``r``, normalised to a unit range), with the
+    period 0 of an open chart, so that pyoomph's test of an invertible chart holds. The loop's chart
+    is never used for a transfer: its seam element runs backwards over the loop's range, so every
+    rebuild with a loop on either mesh places the interface nodes by projection onto the old
+    interface instead (``try_to_use_zeta_on_boundary`` off, set in the hook before the transfer,
+    :meth:`_before_mesh_to_mesh_interpolation`), and while a ring surgery is under way
+    (``FaradayProblem._ring_transfer``) the axis nodes are located in the old bulk, as pyoomph's
+    reconnection does for its axis. Without a loop and without a ring surgery it is pyoomph's own
+    chart, call for call: the class only names the equation differently in the problem's
+    generated-code tree, and the generated code is the same."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._loop_seen = False
+
+    def _compute_zetas(self, mesh, cache, whole_interface):
+        from pyoomph.meshes.zeta import _find_closed_segments
+
+        segs, ninter = cache.get_interface_line_segments()
+        closed = _find_closed_segments(cache, segs)
+        if not any(closed) or len(segs) == 1:
+            return super()._compute_zetas(mesh, cache, whole_interface)
+        opened = [s for s, c in zip(segs, closed) if not c]
+        saved = cache.interface_lines_segs, cache.interface_lines_segs_ninter
+        cache.interface_lines_segs, cache.interface_lines_segs_ninter = opened, ninter
+        try:
+            _, out = super()._compute_zetas(mesh, cache, False)
+        finally:
+            cache.interface_lines_segs, cache.interface_lines_segs_ninter = saved
+        pts = cache.get_coordinates()
+        vertices = {int(e[0]) for e in cache.elem_indices} | {int(e[-1])
+                                                             for e in cache.elem_indices}
+        start = (max(z for _, z in out) if out else 0.0) + self.segment_jump_offset
+        for seg, c in zip(segs, closed):
+            if not c:
+                continue
+            loop = [int(i) for i in (seg[:-1] if seg[0] == seg[-1] else seg)]
+            n = len(loop)
+            area = sum(pts[0, loop[k]] * pts[1, loop[(k + 1) % n]]
+                       - pts[0, loop[(k + 1) % n]] * pts[1, loop[k]] for k in range(n))
+            if area < 0:
+                loop = [loop[0]] + loop[1:][::-1]
+            cand = [k for k, i in enumerate(loop) if i in vertices] or list(range(n))
+            k0 = max(cand, key=lambda k: (float(pts[0, loop[k]]), float(pts[1, loop[k]])))
+            loop = loop[k0:] + loop[:k0]
+            d = [math.hypot(pts[0, loop[(k + 1) % n]] - pts[0, loop[k]],
+                            pts[1, loop[(k + 1) % n]] - pts[1, loop[k]]) for k in range(n)]
+            total, acc = sum(d), 0.0
+            for k, i in enumerate(loop):
+                out.append((i, start + acc / total))
+                acc += d[k]
+            start += 1.0 + self.segment_jump_offset
+        self._loop_seen = True
+        return 0.0, out
+
+    def _before_mesh_to_mesh_interpolation(self, eqtree, interpolator):
+        self._loop_seen = False
+        out = super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
+        if self._loop_seen:  # a loop on the old mesh or the new one: no transfer through the chart
+            interpolator.try_to_use_zeta_on_boundary = False
+        try:
+            problem = self.get_problem()
+        except RuntimeError:  # an equation not bound to a problem
+            problem = None
+        transfer = getattr(problem, "_ring_transfer", None) if problem is not None else None
+        if transfer:
+            if transfer.get("axis_bulk"):
+                interpolator.bulk_locate_boundaries.add("axis")
+            reach = float(transfer.get("reach") or 0.0)
+            if reach > 0.0:
+                interpolator.boundary_max_distances["interface/axis"] = reach
+                interpolator.boundary_max_distances["axis/interface"] = reach
+        return out
+
+
 class FaradayProblem(Problem):
     mesh_class = FaradayCylinderMesh
 
@@ -85,6 +170,11 @@ class FaradayProblem(Problem):
         self.cut: dict | None = None  # the record of a cut, once one has been made
         # the records of the events made after the cut (the events block, events.EventSettings)
         self.events: list[dict] = []
+        # the ring of a pierced bubble, once its cut is made (ringsurgery.ring_cut, its record of
+        # the stage, dumped with every state of it), and the transfer settings of the rebuild of a
+        # ring surgery while it is under way (RingTolerantArclength); None before the ring
+        self.ring: dict | None = None
+        self._ring_transfer: dict | None = None
         self._projecting = False  # set while the projection's auxiliary solve runs
         # the thresholds of RemeshWhen, pyoomph's defaults: an element shrunk below 0.6 or grown
         # beyond 1.75 times its size at the build, or of a fifth of its quality then
@@ -129,7 +219,8 @@ class FaradayProblem(Problem):
         eqs += AssignZetaCoordinatesByEulerianCoordinate("y") @ "axis"
         eqs += AssignZetaCoordinatesByEulerianCoordinate("y") @ "wall"
         eqs += AssignZetaCoordinatesByEulerianCoordinate("x") @ "bottom"
-        self.interface_zeta = AssignZetaCoordinatesByArclength(sort_along_axis="x+")
+        # pyoomph's arclength chart, which also charts the ring of a pierced bubble (inert without)
+        self.interface_zeta = RingTolerantArclength(sort_along_axis="x+")
         eqs += self.interface_zeta @ "interface"
 
         strain = (grad(u) + transpose(grad(u))) / 2
@@ -268,7 +359,11 @@ class FaradayProblem(Problem):
 
     def interface_segments(self) -> list[dict]:
         """Every interface chain: ``open`` (reaches the wall), ``end_types`` and ``r, z, u_r, u_z``
-        ordered from the axis to the wall (open chain) or upwards (a chain from axis to axis)."""
+        ordered from the axis to the wall (open chain) or upwards (a chain from axis to axis). A
+        closed loop of the free surface, the ring of a pierced bubble, is no chain: it is set aside
+        (:meth:`interface_loops` reads it), which no state without a ring has."""
+        from pyoomph.meshes.zeta import _find_closed_segments
+
         cache = self.get_cached_mesh_data("liquid/interface", nondimensional=True,
                                           tesselate_tri=False)
         xy = cache.get_coordinates()
@@ -276,7 +371,10 @@ class FaradayProblem(Problem):
         ur, uz = cache.get_data("velocity_x"), cache.get_data("velocity_y")
         tol = 1e-7 * max(1.0, self.nd.radius)
         out = []
-        for seg in segs:
+        closed = _find_closed_segments(cache, segs) if len(segs) > 1 else [False] * len(segs)
+        for seg, loop in zip(segs, closed):
+            if loop:
+                continue
             seg = list(seg)
             ch = orient_chain(np.column_stack([xy[0, seg], xy[1, seg]]), self.nd.radius, tol)
             first = (abs(xy[0, seg[0]] - ch.points[0, 0]) + abs(xy[1, seg[0]] - ch.points[0, 1])
@@ -286,6 +384,41 @@ class FaradayProblem(Problem):
             out.append({"open": ch.is_open, "end_types": ch.end_types, "r": xy[0, seg],
                         "z": xy[1, seg], "u_r": ur[seg], "u_z": uz[seg]})
         return sorted(out, key=lambda c: float(np.min(c["z"])))
+
+    def interface_loops(self) -> list[dict]:
+        """Every closed loop of the free surface (the ring of a pierced bubble, ``ring.py``):
+        ``r, z, u_r, u_z`` of its nodes in the order of the walk around it, its start not
+        repeated, checked to be ordered (``ring.validate_loop_order``), counter-clockwise in
+        ``(r, z)`` and starting at its seam, the vertex node of largest ``r`` (ties to the larger
+        ``z``), so that its closed polyline (``ring.closed``) has ``2N + 1`` nodes from a vertex;
+        ``open`` False, ``end_types`` ``("loop", "loop")``. Empty without a loop."""
+        from pyoomph.meshes.zeta import _find_closed_segments
+
+        from .ring import orient_loop, rotate, seam_index, validate_loop_order
+
+        cache = self.get_cached_mesh_data("liquid/interface", nondimensional=True,
+                                          tesselate_tri=False)
+        segs, _ = cache.get_interface_line_segments()
+        if len(segs) < 2:
+            return []
+        xy = cache.get_coordinates()
+        ur, uz = cache.get_data("velocity_x"), cache.get_data("velocity_y")
+        vertices = {int(e[0]) for e in cache.elem_indices} | {int(e[-1])
+                                                             for e in cache.elem_indices}
+        out = []
+        for seg, loop in zip(segs, _find_closed_segments(cache, segs)):
+            if not loop:
+                continue
+            idx = np.array([int(i) for i in (seg[:-1] if seg[0] == seg[-1] else seg)])
+            P = np.column_stack([xy[0, idx], xy[1, idx]])
+            validate_loop_order(P)
+            vertex = np.array([i in vertices for i in idx])
+            P, idx, vertex = orient_loop(P, idx, vertex)
+            P, idx, vertex = rotate(P, seam_index(P, vertex), idx, vertex)
+            out.append({"open": False, "end_types": ("loop", "loop"), "r": P[:, 0].copy(),
+                        "z": P[:, 1].copy(), "u_r": np.asarray(ur)[idx],
+                        "u_z": np.asarray(uz)[idx], "vertex": vertex})
+        return out
 
     def cut_observables(self) -> dict[str, float]:
         """The budgets a cut reports: bulk integrals, on the free surface its area and the integral

@@ -10,6 +10,12 @@ commit and that of c4620f6, each in a fresh process with MKL on one thread.
 * (b) The same with ``ring.enabled``: up to the request the same, the rows of the steps before it,
   the dump of the state before the event and its record, but for the block it records (which holds
   the enabled part, by design) and the request's fields, a superset of c4620f6's.
+* (c) The finite-element run after the cut of the synthetic necked cavity with the block, the ring
+  absent (``test_events_fem.py``: rebuilds by the rule at every step it may and a dump at every
+  step) and a restart in a new process from one of its dumps: every output and every mesh gmsh
+  wrote the same, to the byte, so that the problem's chart of a ring
+  (``problem.RingTolerantArclength``, always present) and the readers that set a loop aside change
+  nothing without a ring.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+import test_events_fem as fem_pins  # noqa: E402
 from test_events_fem import _reference_src, _without_wall  # noqa: E402
 from test_events_gasneck import BATTERY, PRELUDE, _run  # noqa: E402
 from test_events_legacy import _same_outputs  # noqa: E402
@@ -124,3 +131,20 @@ def test_a_piercing_with_the_block_is_c4620f6s_without_the_ring_and_up_to_it_wit
         for leg in d["legs"]:
             leg.pop("settings_sha256")
     assert x == y
+
+
+def test_a_finite_element_run_with_the_block_and_no_ring_is_c4620f6s(tmp_path):
+    ref = _reference_src(tmp_path, RING_REFERENCE)
+    spec = {"physics": fem_pins.fem.PHYSICS, "mesh": fem_pins.fem.MESH, "cut": fem_pins.CUT,
+            "collapse": fem_pins.COLLAPSE, "events": {}}
+    runs = {name: fem_pins._run(src, tmp_path / name, spec) for name, src in
+            (("ref", ref), ("head", ROOT / "src"))}
+    names = fem_pins._same_outputs(runs["ref"], runs["head"])
+    result = json.loads((runs["head"] / "result.json").read_text())
+    assert result["steps"] == 6 and result["remesh_count"] >= 2, result
+    assert "budget.txt" in names and len(fem_pins._gmsh_files(runs["head"])) > 1
+    again = {}
+    for name, src in (("ref", ref), ("head", ROOT / "src")):
+        r = dict(spec, restart=str(tmp_path / name / "run" / "states" / "state_00000003.dump"))
+        again[name] = fem_pins._run(src, tmp_path / f"{name}-restart", r)
+    fem_pins._same_outputs(again["ref"], again["head"])

@@ -38,7 +38,13 @@ This module needs no finite-element problem (numpy and shapely only):
   (:func:`loop_fold_gap`), the two splines a mesh is built on (:func:`loop_halves`) and their
   contacts (:func:`loop_spline_contact`), its quadratic elements (:func:`loop_edges`), what a run
   records of it (:func:`loop_record`) and the check that a loop read off a mesh is ordered
-  (:func:`validate_loop_order`, pyoomph's own test of a closed loop).
+  (:func:`validate_loop_order`, pyoomph's own test of a closed loop);
+* the ring stage: what a run records of a state of it (:func:`ring_stage_record`, the keys of
+  ``reconnect.post_cut_record`` with the bubble's those of the ring or NaN; :func:`loop_segment`)
+  and its stops and events (:func:`ring_stage_events`: the open chain read as before the ring, the
+  ring's emptying below ``bubble_stop`` of ``V_b`` the request of its removal, class ``W2``, its
+  approach to the axis, ``RA``, its folds, ``RF``, and its approach to the open chain, ``X``, each
+  without a handler but the removal's, and so a resumable stop).
 
 Lengths are in the solver's units (``1/k``).
 """
@@ -604,3 +610,278 @@ def ring_cut_geometry(bubble, open_chain, ring, *, elements_per_scale: float, mi
                    A_cl=revolved_area(np.vstack([Pt, C, Pb])),
                    L_fill=float(np.max(np.hypot(Q[:, 0], Q[:, 1] - z_mid))), z_mid=z_mid,
                    gap=gap, checks=checks)
+
+
+# --- the ring stage: what a run records, and its stops and events ---------------------------------
+
+# the record of a state of the ring stage has every key of reconnect.post_cut_record: the open
+# chain's as before, the bubble's volume and widest point those of the ring, every other key of
+# the bubble (its tips, the bridge, its neck) NaN, so that chains.txt keeps its columns
+BUBBLE_KEYS = ("z_bubble_bottom", "w_bubble_bottom", "R_bubble_bottom", "z_bubble_top",
+               "w_bubble_top", "R_bubble_top", "bridge", "r_neck_bubble", "z_neck_bubble")
+
+
+def ring_stage_record(open_seg: dict, loop: dict | None) -> dict:
+    """What a run records of a state of the ring stage, with the keys of
+    ``reconnect.post_cut_record``: the open chain's tip, its radius of curvature and its neck as
+    before; ``bubble_volume``, ``bubble_r_max`` and ``bubble_z_r_max`` those of the ring (NaN once
+    it is removed); the bubble's tips, the bridge and the bubble's neck NaN; ``R_tip_min`` the open
+    chain's tip's radius. ``open_seg`` and ``loop`` as ``FaradayProblem.interface_segments`` and
+    ``interface_loops`` give them."""
+    from .reconnect import chain_neck, revolved_volume, tip_radius
+
+    cr, cz, cw = (np.asarray(open_seg[k], dtype=float) for k in ("r", "z", "u_z"))
+    no = chain_neck(np.column_stack([cr, cz]), tuple(open_seg["end_types"]))
+    out = {k: math.nan for k in BUBBLE_KEYS}
+    out.update(z_cavity_tip=float(cz[0]), w_cavity_tip=float(cw[0]),
+               R_cavity_tip=tip_radius(cr, cz), r_neck_open=no[0], z_neck_open=no[1],
+               bubble_volume=math.nan, bubble_r_max=math.nan, bubble_z_r_max=math.nan)
+    if loop is not None:
+        L = np.column_stack([loop["r"], loop["z"]])
+        k = int(np.argmax(L[:, 0]))
+        out.update(bubble_volume=revolved_volume(L), bubble_r_max=float(L[k, 0]),
+                   bubble_z_r_max=float(L[k, 1]))
+    out["R_tip_min"] = out["R_cavity_tip"]
+    return out
+
+
+def loop_segment(loop: dict) -> dict:
+    """A loop of ``FaradayProblem.interface_loops`` as a segment the readers of chains take (its
+    closed polyline, :func:`closed`, its velocities alike; ``open`` False): what
+    ``reconnect.courant_limit`` and ``reconnect.region_spacing`` read of it."""
+    def wrap(x):
+        x = np.asarray(x, dtype=float)
+        return np.concatenate([x, x[:1]])
+
+    return {"open": False, "end_types": ("loop", "loop"), "r": wrap(loop["r"]),
+            "z": wrap(loop["z"]), "u_r": wrap(loop["u_r"]), "u_z": wrap(loop["u_z"])}
+
+
+def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: dict, *,
+                      neck_elements: float, fold_ratio: float, fold_stop: float,
+                      fold_stop_elements: float, fold_search: float, apexes: dict | None,
+                      guard: dict | None, invalid=None) -> dict | None:
+    """The stops and events of a state of the ring stage (after the ring cut,
+    ``ringsurgery.ring_cut``; ``ring`` the problem's record of the stage), on the open chain
+    (``chains``, ``reconnect.Chain``) and the ring (``loops``, ``(n, 2)`` arrays as
+    ``FaradayProblem.interface_loops`` orders them), with the arguments of
+    ``events.post_cut_events``, in its three ranks.
+
+    1. The state itself: not one open chain, more than one loop, a loop after the ring's removal
+       or none before it (``topology-changed``, with ``chains`` and ``loops``); the open chain's
+       nodes crossing, or the ring's (raised, ``InterfaceSelfIntersection``), the ring touching the
+       open chain or the axis (raised); a spline through the open chain's nodes that contacts
+       itself, or one of the ring's two (``self-contact-approach``, trigger ``spline-contact``,
+       chain ``ring`` for the ring's); on a freshly built mesh a tracked liquid neck of the open
+       chain narrower than ``liquid.resolution`` element lengths, the guard of the interface over
+       the open chain and the ring, and ``invalid()``.
+    2. The end of the ring: before its removal, its volume below ``bubble_stop`` of the bubble's at
+       the gas cut (``ring-collapse``, class ``W2``, handler ``ring-removal``).
+    3. The events, in this order: the ring coming up to the axis, ``r_min < max(ring.axis_ratio
+       r_w, 3 h_col)`` with ``r_w`` the column's waist and ``h_col`` its size (``ring-axis``,
+       class ``RA``); the open chain's liquid necks as ``events.post_cut_events`` reads them
+       (``L``, ``L-unhandled``; with liquid events off the cut's second-pinch test); the closing
+       folds of the open chain and of its tracked heads (``A-head`` first, then a contact at the
+       scale of the mesh, which stops the run) together with the ring's fold
+       (:func:`loop_fold_gap`, against ``max(gap.kappa_g delta, fold_stop_elements h_elem)``: at
+       the scale of the mesh a ``self-contact-approach`` of chain ``ring``, otherwise
+       ``ring-fold``, class ``RF``), the closest to its limit first among the open chain's grooves
+       (``A-groove``) and the ring's folds; the open chain's gas neck (``G``); the ring within
+       ``3 h_min`` of the open chain (``chain-contact``, ``X``); on a mesh a step has run on, the
+       guard last. Not tested: the piercing (no bubble), the bridge (the axis is liquid up to the
+       cavity's tip) and the bubble emptying. The ring's own events have no handler but the
+       removal's: each is a resumable stop."""
+    from shapely.geometry import LineString
+
+    from .events import (_neck_fields, _request, fold_stop_after_cut, head_fold, head_of_fold,
+                         liquid_necks)
+    from .reconnect import (Chain, adjacent_shoulders, chain_necks, edge_reading, fold_contact,
+                            interface_guard, revolved_volume, spline_contact_stop)
+    from .selfcontact import InterfaceSelfIntersection, fold_gap
+
+    removed = ring.get("removed") is not None
+    opens = [c for c in chains if c.is_open]
+    if len(chains) != 1 or len(opens) != 1 or len(loops) > 1 or (loops and removed) or (
+            not loops and not removed):
+        return {"reason": "topology-changed", "chains": len(chains), "loops": len(loops)}
+    cavity = opens[0]
+    L = np.asarray(loops[0], dtype=float) if loops else None
+    named = (("open", cavity),)
+    ls = events.liquid
+    # 1. the state itself
+    stop_abs = fold_stop_after_cut(events, settings.delta, fold_stop)
+    fold = fold_gap(cavity.points[:, 0], cavity.points[:, 1], ratio=fold_ratio, stop=stop_abs,
+                    stop_elements=fold_stop_elements, search_factor=fold_search)
+    if fold.crossed:
+        raise InterfaceSelfIntersection("the open chain's free surface crosses itself after the "
+                                        "cut")
+    ring_gap = math.inf
+    if L is not None:
+        if loop_crossings(L):
+            raise InterfaceSelfIntersection("the ring's free surface crosses itself")
+        ring_gap = float(LineString(closed(L)).distance(LineString(cavity.points)))
+        if not ring_gap > 0.0 or not float(L[:, 0].min()) > 0.0:
+            raise RuntimeError("the ring touches or crosses the open chain or the axis")
+    stride = 2 if settings.rebuild_spline == "vertices" else 1
+    stop = spline_contact_stop([("open", Chain(cavity.points[::stride], cavity.end_types))
+                                if stride > 1 and len(cavity.points) % 2 == 1
+                                else ("open", cavity)])
+    if stop is not None:
+        return stop
+    if L is not None:
+        contact = loop_spline_contact(L)
+        if contact is not None:
+            return {"reason": "self-contact-approach", "trigger": "spline-contact",
+                    "chain": "ring", "contact": contact["what"], "nodes": list(contact["nodes"]),
+                    "contact_r": contact["at"][0], "contact_z": contact["at"][1],
+                    "crossings": contact["count"]}
+    necks = liquid_necks(named, ls) if ls.enabled else []
+    fresh = bool(guard["fresh"]) if guard is not None else False
+    if fresh:
+        unresolved = [x for x in necks if x["r_n"] < ls.resolution * x["h_loc"]]
+        if unresolved:
+            x = min(unresolved, key=lambda x: x["r_n"] / x["h_loc"])
+            return {"reason": "liquid-neck-unresolved", **_neck_fields(x),
+                    "limit": ls.resolution * x["h_loc"], "resolution": ls.resolution,
+                    "fresh": True}
+
+    def guarded():  # the guard of the interface on the quadratic elements of both
+        readings = {"open": edge_reading(cavity.points)}
+        if L is not None:
+            readings["ring"] = loop_edges(L)
+        return interface_guard(readings, settings, fresh=fresh, h_floor=float(guard["h_floor"]),
+                               refine_ratio=float(guard["refine_ratio"]))["stop"]
+
+    if guard is not None and fresh:
+        stop = guarded()
+        if stop is not None:
+            return stop
+    if invalid is not None:
+        stop = invalid()
+        if stop is not None:
+            return stop
+    # 2. the end of the ring
+    V_b = float(cut.bubble_volume)
+    if L is not None:
+        V = revolved_volume(L)
+        limit = settings.bubble_stop * V_b
+        if V < limit:
+            return _request("ring-collapse", "W2", chain="ring", ring_volume=V,
+                            ratio=V / V_b, limit=limit, V_b=V_b)
+    # 3. the events
+    if L is not None:
+        r_w = float(ring.get("r_w", math.nan))
+        h_col = float((ring.get("sizing") or {}).get("h_col", math.nan))
+        axis_limit = max(ring_axis_limits(ring, events))
+        k = int(np.argmin(L[:, 0]))
+        if float(L[k, 0]) < axis_limit:
+            return _request("ring-axis", "RA", chain="ring", r_min=float(L[k, 0]),
+                            z_r_min=float(L[k, 1]), limit=axis_limit, r_w=r_w, h_col=h_col)
+    neck_limit = max(settings.delta, neck_elements * h_min)
+
+    def secondary(side):  # the open chain's part of the test of events.post_cut_events
+        for nk in chain_necks(cavity.points, cavity.end_types):
+            if nk["side"] != side or not nk["r"] < neck_limit:
+                continue
+            found = {"chain": "open", "r_neck": nk["r"], "z_neck": nk["z"],
+                     "index": int(nk["index"]), "neck_limit": neck_limit,
+                     "neck_shoulder": nk["shoulder"], "neck_depth": nk["depth"],
+                     "neck_side": side}
+            deep = nk["depth"] >= settings.neck_depth
+            if side == "gas":
+                left, right = adjacent_shoulders(cavity.points[:, 0], int(nk["index"]))
+                adj = float(np.minimum(left, right))
+                adj_depth = 1.0 - nk["r"] / adj if adj > 0.0 else 0.0
+                deep = deep and adj_depth >= settings.neck_depth
+                found.update(neck_shoulder_left=left, neck_shoulder_right=right,
+                             neck_shoulder_adjacent=adj, neck_depth_adjacent=adj_depth)
+            if deep or nk["r"] < neck_elements * h_min:
+                return found
+        return None
+
+    if ls.enabled:
+        landed = sorted((x for x in necks if x["landed"]), key=lambda x: x["ratio"])
+        if landed:
+            x = landed[0]
+            return _request("liquid-neck", "L" if x["status"] == "head" else "L-unhandled",
+                            eps_d=ls.eps_d, **_neck_fields(x))
+    else:
+        found = secondary("liquid")
+        if found is not None:
+            return _request("liquid-neck", "L-unhandled", detected_by="secondary-pinch", **found)
+    closing = {}
+
+    def offer(name, f):
+        fold_limit = max(stop_abs, fold_stop_elements * f.h_elem)
+        if math.isfinite(f.gap) and f.gap < fold_limit:
+            closing.setdefault((name, tuple(f.pair)), (f.gap / fold_limit, name, f, fold_limit))
+
+    offer("open", fold)
+    for x in necks:
+        if x.get("head") is not None:
+            offer("open", head_fold(cavity.points, x["head"], x["index"], ratio=fold_ratio,
+                                    stop=stop_abs, stop_elements=fold_stop_elements,
+                                    search_factor=fold_search))
+    if L is not None:
+        offer("ring", loop_fold_gap(L, ratio=fold_ratio, stop=stop_abs,
+                                    stop_elements=fold_stop_elements,
+                                    search_factor=fold_search))
+    lands, kinks, grooves = [], [], []
+    for score, name, f, fold_limit in closing.values():
+        rec = {"chain": name, "contact": fold_contact(f.arc, f.h_elem), "fold_gap": f.gap,
+               "fold_r": f.r, "fold_z": f.z, "fold_arc": f.arc, "fold_h_elem": f.h_elem,
+               "fold_limit": fold_limit, "fold_pair": list(f.pair),
+               "kappa_g": events.gap.kappa_g}
+        jet = None
+        if name == "open":
+            a, b = f.pair
+            jet = next((x for x in (apexes or {}).get("open", []) if a < int(x["index"]) < b),
+                       None)
+            if jet is not None:
+                rec.update(jet=jet["tip"], apex_index=int(jet["index"]),
+                           apex_r=jet.get("r", math.nan), apex_z=jet.get("z", math.nan),
+                           R_apex=jet.get("R_apex", math.nan),
+                           groove_angle=jet.get("groove_angle", math.nan))
+        if rec["contact"] == "kink":
+            reason = "self-contact-approach" if jet is None else "annular-contact-approach"
+            kinks.append((score, {"reason": reason, "trigger": "fold-gap", **rec}))
+            continue
+        if name == "ring":
+            grooves.append((score, "RF", rec))
+            continue
+        head = head_of_fold(f.pair, necks)
+        if head is not None:
+            rec["a_head"] = {**_neck_fields(head), "r_n_over_s": head["r_n"] / head["s"],
+                             "eps_max": ls.eps_max}
+            if head["r_n"] <= ls.eps_max * head["s"]:
+                lands.append(((head["r_n"] / head["s"], score), head, rec))
+                continue
+        grooves.append((score, "A-groove", rec))
+    if lands:
+        _, head, rec = min(lands, key=lambda x: x[0])
+        return _request("a-head", "A-head" if head["status"] == "head" else "L-unhandled", **rec)
+    if kinks:
+        return min(kinks, key=lambda x: x[0])[1]
+    if grooves:
+        _, cls, rec = min(grooves, key=lambda x: x[0])
+        return _request("groove" if cls == "A-groove" else "ring-fold", cls, **rec)
+    found = secondary("gas")
+    if found is not None:
+        return _request("gas-neck", "G", **found)
+    if L is not None and ring_gap < 3.0 * h_min:
+        return _request("chain-contact", "X", chain="ring", chain_gap=ring_gap,
+                        limit=3.0 * h_min)
+    if guard is not None and not fresh:
+        return guarded()
+    return None
+
+
+def ring_axis_limits(ring: dict, events) -> tuple[float, float]:
+    """The two terms of the ring's approach to the axis (:func:`ring_stage_events`, class ``RA``):
+    ``ring.axis_ratio`` times the column's waist ``r_w`` and three times the column's element size
+    ``h_col``, from the problem's record of the stage (``ring``; NaN terms count as zero)."""
+    r_w = float(ring.get("r_w", math.nan))
+    h_col = float((ring.get("sizing") or {}).get("h_col", math.nan))
+    a = events.ring.axis_ratio * r_w if math.isfinite(r_w) else 0.0
+    b = 3.0 * h_col if math.isfinite(h_col) else 0.0
+    return a, b

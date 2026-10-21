@@ -1146,13 +1146,17 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
     ``rise``, ``bump`` and ``flat_bump`` as the driver measures it), ``tips`` the bubble's two
     (:func:`tip_jet`), ``necks`` the record (:func:`post_cut_record`: ``r_neck_open``,
     ``z_neck_open``, ``r_neck_bubble``, ``z_neck_bubble``, ``R_bubble_top``); ``cut`` is the cut
-    record (``rmin``, ``focus.kept``)."""
+    record (``rmin``, ``focus.kept``). In the ring stage (``ring.py``) ``segs`` holds the open
+    chain alone: the regions of the bubble (its top, its bottom, the bases of their jets, its neck)
+    are then none, the ring's being frozen at its cut
+    (``driver.CollapseDriver._feature_regions``)."""
     rmin = float(cut.get("rmin") or cut["delta"])
     h_cut = settings.focus_size * rmin
     r_cut = settings.focus_radius * rmin
     ell_cap = h_axis * elements_per_scale
-    bubble = next(c for c in segs if not c["open"])
-    z_bb, z_bt = float(bubble["z"][0]), float(bubble["z"][-1])
+    bubble = next((c for c in segs if not c["open"]), None)
+    z_bb, z_bt = ((float(bubble["z"][0]), float(bubble["z"][-1])) if bubble is not None
+                  else (math.nan, math.nan))
 
     def jet(t: dict) -> tuple[list[float], float]:
         """The scale of the jet on a tip (its base radius, where a resolved bump stands) and the
@@ -1182,12 +1186,15 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
     scales, reach = jet(cavity)
     scales = finite(scales + ([1.0 / abs(k)] if math.isfinite(k) and k != 0.0 else []))
     out += fresh_tip("cavity_tip", float(cavity["z_tip"]), scales, reach)
-    scales, reach = jet(tips.get("bubble_top", {}))
-    out += fresh_tip("bubble_top", z_bt, finite(scales + [necks.get("R_bubble_top", math.nan)]),
-                     reach)
+    if bubble is not None:
+        scales, reach = jet(tips.get("bubble_top", {}))
+        out += fresh_tip("bubble_top", z_bt,
+                         finite(scales + [necks.get("R_bubble_top", math.nan)]), reach)
     scales, reach = jet(tips.get("bubble_bottom", {}))
     kept = (cut.get("focus") or {}).get("kept")
-    if bubble_bottom_sizing == "frozen":
+    if bubble is None:
+        pass  # the ring stage: no bubble
+    elif bubble_bottom_sizing == "frozen":
         # never coarser than the frozen size, over the region the landing resolved, if any
         size = float(bubble_bottom_size)
         ell = min(scales + [ell_cap])
