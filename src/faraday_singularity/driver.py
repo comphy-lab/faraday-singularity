@@ -280,6 +280,18 @@ has its own. ``events.txt`` holds a row per event made. The dumps of the events 
 ``post.keep_event_dumps`` says, and with ``post.prune_gmsh`` the meshes no dump refers to are
 deleted after every dump and every event (:meth:`CollapseDriver._prune_meshes`).
 
+With the block's ``ring.enabled`` the piercing of the bubble by its downward jet (class ``W1``) is
+met by the ring cut (``ringsurgery.ring_cut``, :meth:`CollapseDriver._meet_ring`) and the run goes
+on in the ring stage (``FaradayProblem.ring``): the open chain read as before, the ring apart
+(``ring.ring_stage_events``, :meth:`CollapseDriver._ring_stage_state`), its regions frozen at the
+cut (:meth:`CollapseDriver._frozen_ring_regions`), ``ring.txt`` a row per step, the profiles the
+ring's beside the open chain's, the totals of ``budget.txt`` net of the fills, until the ring's
+removal below ``bubble_stop`` of the bubble's volume at the gas cut (class ``W2``,
+``ringsurgery.ring_removal``), after which the window ends (``ring.after_removal`` ``stop``) or
+the run goes on with the open chain alone; a liquid cut in the ring stage, and every other event of
+the ring, is a resumable stop (:meth:`CollapseDriver.reset_after_ring` restarts the bookkeeping a
+ring surgery invalidates).
+
 Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore` restores
 (``surgery.restore_cut``), only into a driver whose reconnect settings are those of the cut but for
 ``tau_end`` (``reconnect.CONTINUATION_KEYS``), which a continuation may raise; the run then
@@ -2543,7 +2555,16 @@ class CollapseDriver:
            failed one, raised.
         3. The driver's bookkeeping of the cut made (:meth:`_on_event_made`, which commits the
            jets' bases and the kink regions of the fresh mesh, :meth:`_commit_post_cut`, before the
-           state after the event is kept) and its row of ``events.txt``."""
+           state after the event is kept) and its row of ``events.txt``.
+
+        With the block's ``ring.enabled`` the ring's handlers (``events.RING_HANDLERS``) are made
+        too (:meth:`_meet_ring`); in the ring stage a liquid cut is not made yet (its rebuild would
+        go through pyoomph's parked plan, whose open chart cannot carry the ring's loop): a
+        resumable stop, its request marked ``stage`` ``ring``."""
+        if request.get("handler") in RING_HANDLERS and self.events.ring.enabled:
+            return self._meet_ring(m, request)
+        if self._ring() is not None and request.get("handler") == "liquid-cut":
+            return m, self._unhandled_event({**request, "stage": "ring"})
         if request.get("handler") not in IMPLEMENTED_HANDLERS:
             return m, self._unhandled_event(request)
         if len(self._made_events()) >= self.events.max_events:
@@ -2582,6 +2603,80 @@ class CollapseDriver:
         self._drop_event_dumps()
         self._prune_meshes()
         return m, None
+
+    def _meet_ring(self, m: dict, request: dict) -> tuple[dict, dict | None]:
+        """Meet a request of the ring's handlers (``ring``: the piercing, class ``W1``;
+        ``ring-removal``: the ring emptied, class ``W2``), with the block's ``ring.enabled``: the
+        event after ``max_events`` made is a resumable stop (``max-events``); the surgery
+        (``ringsurgery.ring_cut``, ``ringsurgery.ring_removal``), with no test of a cascade (no
+        tip of the axis makes them), the run's last step as the history's: a refusal, which leaves
+        the problem unchanged, is a resumable stop (``ring-cut-refused``,
+        ``ring-removal-refused``), and so are hard budgets that do not close (``event-unclosed``);
+        any other failure ends the run as a failed one, raised. Made: its row of ``events.txt``,
+        the dumps the policy drops, the meshes pruned; after the removal with
+        ``ring.after_removal`` ``stop`` the window ends (``bubble-vanishing``, ``window_end``,
+        ``ring_removed``), otherwise the run goes on from the fresh mesh."""
+        if len(self._made_events()) >= self.events.max_events:
+            return m, self._event_stop(EVENT_LIMIT, request, max_events=self.events.max_events)
+        from .ringsurgery import ring_cut, ring_removal
+        from .surgery import BudgetUnclosed, CutRefused
+
+        st, r = self.state, self.reconnect
+        k = len(self._made_events()) + 1
+        eps = self.s.elements_per_scale if r.elements_per_scale is None else r.elements_per_scale
+        dt_prev = st.dt_prev if st.dt_prev else float(self._cut_record()["settings"]["dt0"])
+        removal = request.get("handler") == "ring-removal"
+        surgery = ring_removal if removal else ring_cut
+        self._event_after = None
+        try:
+            made = surgery(self.pb, self.events, r, self.outdir, request, k=k, dt_prev=dt_prev,
+                           elements_per_scale=eps, h_floor=self._h_floor(), driver=self,
+                           on_made=self._on_ring_made)
+        except (CutRefused, BudgetUnclosed) as e:
+            rec = getattr(e, "record", None) or {}
+            reason = (EVENT_UNCLOSED if isinstance(e, BudgetUnclosed) else
+                      RING_REMOVAL_REFUSED if removal else RING_CUT_REFUSED)
+            extra = {"hard": (rec.get("closures") or {}).get("hard")} if reason == \
+                EVENT_UNCLOSED else {}
+            return m, self._event_stop(reason, request, precut=e.precut,
+                                       failed_at=rec.get("failed_at"),
+                                       error=rec.get("error", f"{type(e).__name__}: {e}"),
+                                       record=f"events/event_{k:03d}.json", **extra)
+        m = self._event_after
+        self._write_ring_event_row(made)
+        self._drop_event_dumps()
+        self._prune_meshes()
+        if removal and self.events.ring.after_removal == "stop":
+            return m, {"reason": "bubble-vanishing", "window_end": True, "ring_removed": k,
+                       "bubble_volume": (made.get("filled") or {}).get("V"),
+                       **self._taus(m["time"])}
+        return m, None
+
+    def _write_ring_event_row(self, rec: dict):
+        """The row of ``events.txt`` of a ring surgery made: its chain ``ring``, its fill as a
+        negative removal (``V_rem``, ``Pz_rem``, ``KE_rem``), its closures R1-R6 (Q1-Q6 for the
+        removal) relative to their scales in ``F1``-``F6``, the cutoff identity, the transfer's
+        counts, the step of the history and its wall time; every other column empty."""
+        filled = rec.get("filled") or {}
+        closures = rec.get("closures") or {}
+        rel = closures.get("relative") or {}
+        prefix = "Q" if rec.get("kind") == "ring-collapse" else "R"
+        phi = closures.get(f"{prefix}3_phi") or {}
+        tr = rec.get("transfer") or {}
+        neg = {key: (-float(filled[x]) if filled.get(x) is not None else None)
+               for key, x in (("V_rem", "V"), ("Pz_rem", "Pz"), ("KE_rem", "KE"))}
+        values = {"k": rec.get("k"), "step": rec.get("step"), "time": rec.get("t"),
+                  "tau": rec.get("tau"), "tau_p": rec.get("tau_p"),
+                  "tau_over_delta2": rec.get("tau_over_delta2"), "kind": rec.get("kind"),
+                  "class": rec.get("class"), "chain": "ring", **neg,
+                  **{f"F{i}": rel.get(f"{prefix}{i}") for i in range(1, 7)},
+                  "phi_relative_error": phi.get("phi_relative_error"),
+                  "predicted_unlocated": tr.get("predicted_unlocated"),
+                  "reported_unlocated": tr.get("reported_unlocated"),
+                  "dt_history": (rec.get("dt") or {}).get("history"),
+                  "wall": rec.get("wall_seconds")}
+        self._event_rows.write("\t".join(_table_cell(values.get(c)) for c in EVENT_COLUMNS)
+                               + "\n")
 
     def _drop_event_dumps(self) -> list[str]:
         """Under ``post.keep_event_dumps`` ``first<N>-last<M>`` (``events.event_dumps_kept``,
@@ -2877,9 +2972,18 @@ class CollapseDriver:
                     if x.get("kind") == kind) for kind in ("rear", "front")},
                 "dumps_dropped": self._dumps_dropped, "meshes_pruned": self._meshes_pruned,
                 "box_noise": self._box_noise_summary(),
+                **({"ring": self._ring_summary()} if self._ring() is not None else {}),
                 "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
                                                          "handler", "record")}
                          if stop.get("reason") in EVENT_STOPS else None)}
+
+    def _ring_summary(self) -> dict:
+        """The ring of the run's result in the ring stage: the event of its cut, that of its
+        removal (None while it lasts) and the time after the gas cut of the removal."""
+        ring = self._ring() or {}
+        removed = ring.get("removed") or {}
+        return {"cut": ring.get("k_cut"), "removed": removed.get("k"),
+                "tau_removed": removed.get("tau")}
 
     def _neck_sample(self, m: dict):
         """Offer the measured neck to the series from which :meth:`pinch_time` fits; no neck

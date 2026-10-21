@@ -29,6 +29,12 @@ observables the cut reports (axial momentum, ``int (div u)^2`` of the P2 velocit
 discretisation diagnostic rather than a test of the projection, the change made by the projection, the
 pressure on the free surface). It adds no field, degree of freedom or global parameter, so state dumps
 of either kind of problem load into the other. Without ``reconnect`` the problem is the one above.
+
+The free surface's chart (:class:`RingTolerantArclength`) also charts the ring of a pierced bubble
+(``ring.py``, ``ringsurgery.py``), a closed loop of the free surface's own boundary that carries
+the same equations, and :meth:`FaradayProblem.interface_loops` reads it apart from the chains,
+which :meth:`FaradayProblem.interface_segments` give without it; without a loop the chart is
+pyoomph's own, call for call, and nothing else changes.
 """
 
 from __future__ import annotations

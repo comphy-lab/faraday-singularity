@@ -265,6 +265,33 @@ def run_info(run, records: list[dict]) -> dict:
             "delta": delta, "T": T, "chains": chains}
 
 
+RING_KINDS = ("piercing", "ring-collapse")  # the kinds of the ring surgeries (ringsurgery.py)
+
+
+def _removal(rec: dict) -> dict:
+    """What an event made took from the liquid: a liquid cut's ``removed``; a ring surgery's fill
+    (``filled``, the gas it turned into liquid) as a negative removal; empty for the others."""
+    if rec.get("removed"):
+        return rec["removed"]
+    filled = rec.get("filled") if rec.get("kind") in RING_KINDS else None
+    if not filled:
+        return {}
+    return {key: -_num(filled.get(key)) for key in ("V", "Pz", "KE")}
+
+
+def _closure_fields(closures: dict, kind) -> tuple[dict, float]:
+    """The closures of an event's record as ``F1``-``F6``, relative to their scales, and the
+    relative error of the cutoff identity: a liquid cut's own, a ring surgery's R1-R6 (Q1-Q6 for
+    the ring's removal) in their places."""
+    rel = closures.get("relative") or {}
+    if kind in RING_KINDS:
+        prefix = "Q" if kind == "ring-collapse" else "R"
+        return ({f"F{i}": _num(rel.get(f"{prefix}{i}")) for i in range(1, 7)},
+                _num((closures.get(f"{prefix}3_phi") or {}).get("phi_relative_error")))
+    return ({f: _num(rel.get(f)) for f in ("F1", "F2", "F3", "F4", "F5", "F6")},
+            _num((closures.get("F3_phi") or {}).get("phi_relative_error")))
+
+
 def event_rows(run, *, near_base: float = 3.0) -> list[dict]:
     """The rows of the events of one run (module docstring)."""
     records = event_records(run)
@@ -272,10 +299,10 @@ def event_rows(run, *, near_base: float = 3.0) -> list[dict]:
     d, T = info["delta"], info["T"]
     rows = []
     for rec in records:
-        trig, removed = rec.get("trigger") or {}, rec.get("removed") or {}
+        trig, removed = rec.get("trigger") or {}, _removal(rec)
         cascade, ghost = rec.get("cascade") or {}, rec.get("ghost") or {}
         closures = rec.get("closures") or {}
-        rel, tr = closures.get("relative") or {}, rec.get("transfer") or {}
+        tr = rec.get("transfer") or {}
         r_n, s, r_j = _num(trig.get("r_n")), _num(trig.get("s")), _num(trig.get("r_j"))
         z_n, z_b = _num(trig.get("z_n")), _num(trig.get("z_b"))
         V = _num(removed.get("V"))
@@ -306,9 +333,8 @@ def event_rows(run, *, near_base: float = 3.0) -> list[dict]:
                "dt_over_delta2": _ratio((rec.get("dt") or {}).get("history"), d * d),
                "Re_n": _num(trig.get("Re_n")), "We_n": _num(trig.get("We_n")),
                "U_ghost": _num(ghost.get("U")), "du_stump": _num(ghost.get("du_stump")),
-               **{f: _num(rel.get(f)) for f in ("F1", "F2", "F3", "F4", "F5", "F6")},
-               "phi_relative_error": _num((closures.get("F3_phi") or {})
-                                          .get("phi_relative_error")),
+               **_closure_fields(closures, rec.get("kind"))[0],
+               "phi_relative_error": _closure_fields(closures, rec.get("kind"))[1],
                "flags": " ".join(closures.get("flags") or ()),
                "hard": " ".join(closures.get("hard") or ()),
                "predicted_unlocated": tr.get("predicted_unlocated", ""),
@@ -424,8 +450,8 @@ def run_row(run, *, tip: str = "cavity_tip", after_events: int = 1,
         at = [r for r in made if r.get("tip") == t]
         row[f"events_{t}"] = len(at)
         row[f"cascade_{t}"] = (at[-1].get("cascade") or {}).get("verdict", "") if at else ""
-    row["V_removed_over_delta3"] = _ratio(sum(_num((r.get("removed") or {}).get("V"))
-                                              for r in made) if made else 0.0, d**3)
+    row["V_removed_over_delta3"] = _ratio(sum(_num(_removal(r).get("V")) for r in made
+                                              if _removal(r)) if made else 0.0, d**3)
     budget = join_rows(legs, "budget.txt")
     for key, name in (("volume", "volume_drift"), ("volume_total", "volume_total_drift")):
         col = [_num(x) for x in budget.get(key, [])]

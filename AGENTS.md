@@ -247,8 +247,9 @@ add a second top-level `cases/` tree.
   the events, as in the cut's own stops), then the end of the window (`bubble-vanishing` with
   `window_end`), then the events as requests (`event-request`: `kind`, `class`, the `handler` of its
   class, `events.HANDLERS`, none for `L-unhandled`) in the order `piercing` (W1, the bubble's tips
-  within `delta`), `liquid-neck` (L, landed at `r_n <= eps_d s`, nearest first; `L-unhandled`
-  without a single head or with one beyond `max_head_volume s^3`, and with liquid events off at the
+  within `delta`, or `max(ring.gap delta, 3 h_min)` with `ring.enabled`), `liquid-neck` (L, landed
+  at `r_n <= eps_d s`, nearest first; `L-unhandled` without a single head or with one beyond
+  `max_head_volume s^3`, and with liquid events off at the
   cut's second-pinch test, its head never classified), a closing fold, below `max(kappa_g delta,
   fold_stop_elements h_elem)`, among the fold of each chain and that of each tracked head
   (`events.head_fold`, so that a closer fold elsewhere on its chain hides none): first one that
@@ -330,8 +331,9 @@ add a second top-level `cases/` tree.
   `events.STOP_OUTCOMES`, with the request, the neck of a liquid event as its `trigger`, its tip,
   times and the dump; a cut refused or unclosed has its own, to which the dump is added; `record`
   in the stop):
-  `event-unhandled` (no handler made: the ring of a piercing, the groove fill, the split of a gas
-  neck, a liquid neck without a single head), `max-events` (the event after `max_events`),
+  `event-unhandled` (no handler made: the ring of a piercing without `ring.enabled`, the groove
+  fill, the split of a gas neck, a liquid neck without a single head), `max-events` (the event
+  after `max_events`),
   `event-cascade` (`events.CascadeMonitor` judges it to shrink: an interval at its tip below
   `cascade_min_interval delta^2`, or the last `cascade_count` pairs of ratios of intervals and of
   head volumes below `cascade_ratio`), `liquid-cut-refused` (the problem unchanged),
@@ -363,6 +365,50 @@ add a second top-level `cases/` tree.
   failing at the floor must still be halved), never before the cut, where `classify_failure` reads
   oomph-lib's message at 1e-12; at 1e-12 an accepted step below 2.5e-13 ends the solve and a failed
   one below 2e-12 is not halved (`testCases/test_events_fem.py`).
+- The ring of a pierced bubble is the events block's `ring` part (`events.RingEventSettings`, off by
+  default and written into the block and its hash only where it differs from its defaults, so that
+  every recorded block, leg hash and dump is unchanged; without it, and without `ring.enabled`, runs
+  are as before: `testCases/test_ring_identity.py` pins the stops, a stand-in piercing and the
+  finite-element run after the synthetic cut with the block, and a restart from one of its dumps,
+  against c4620f6, to the byte, besides the 1b65916, e330650 and 148340e pins). With `ring.enabled`
+  the driver makes the handlers `ring` (W1, `ringsurgery.ring_cut`) and `ring-removal` (W2,
+  `ringsurgery.ring_removal`) within the run (`CollapseDriver._meet_ring`, no cascade test): the gas
+  cut on the axis between the plug and the downward jet's cap by the closure of
+  `ring.ring_cut_geometry` (an arc, a vertical segment of radius `waist rho` and an arc, tangent to
+  the cap at `rho = ring.rho s_t` and to the plug, refused where the old mesh does not hold `rho`,
+  `RHO_MIN_NODES`), the bubble's rest kept as a ring, a closed loop of the free surface's own
+  boundary `interface` (a boundary of its own would be refused by pyoomph at `load_state` of every
+  earlier dump), at the passive constant pressure; the problem's chart
+  `problem.RingTolerantArclength` (always present, the same chart without a loop) charts the loop
+  beyond the open chain and turns the zeta transfer off with a loop on either mesh, the template
+  meshes the ring as a hole of two splines (`mesh.FaradayCylinderMesh._define_ring_geometry`,
+  `ring_stage`, `ring_sizing`, `pending_ring_geometry`), the rebuild is the project's own (no
+  pyoomph plan is parked while a loop exists) and its transfer is checked against the nodes the
+  geometry predicts unlocated (closure, column, axis gap); then the fill (`ring.fill`), the
+  projection and the closures R1-R6 (`ringsurgery._ring_closures`: R1 the volume gained, R2 the
+  momentum the transfer carried, R3 the projection's momentum balance in the box, the cutoff
+  identity, hard; the box's change of momentum by the projection, `R3_box`, recorded only, since at
+  a piercing the projection is an impact whose impulse leaves the box; R4-R6 flags), floored at
+  `ring.sigma_*`, which every ring case must set from the box's noise; the ring's sizing frozen at
+  the cut (`ring_<name>` copies of the bubble's finer regions, `ring_cut` the column's, emitted at
+  their sizes by `CollapseDriver._frozen_ring_regions`). The ring stage (`FaradayProblem.ring`,
+  dumped as `ring` with every state of it, restored by `ringsurgery.restore_ring` after
+  `surgery.restore_cut`) reads the open chain as before and the ring apart
+  (`FaradayProblem.interface_loops`; `interface_segments` sets loops aside); its stops are
+  `ring.ring_stage_events` (the open chain's necks, folds, heads and gas neck as
+  `events.post_cut_events` reads them, a liquid cut there a resumable stop for now with `stage`
+  `ring`; the ring's removal below `bubble_stop V_b`, W2; its approach to the axis, RA, its folds,
+  RF, its approach to the open chain, X, each a resumable stop). After the removal
+  `ring.after_removal` `stop` ends the window (`bubble-vanishing`, `ring_removed`), `continue` goes
+  on with the open chain alone; it is a key of the leg (`EventSettings.LEG_KEYS_OF_CLASSES`), every
+  other ring key a class key, and a state of the ring stage is refused under a block without
+  `ring.enabled` (`run_case._check_events`, `CollapseDriver._check_events_meta`). Files: `ring.txt`
+  (`driver.RING_COLUMNS`), `_ring.txt` profiles, an `events.txt` row per surgery (its fill a
+  negative removal), `budget.txt` totals net of the fills, `events.ring` in the run's result;
+  `testCases/test_ring_settings.py`, `test_ring_geometry.py`, `test_ring_stops.py`,
+  `test_ring_driver.py` and `test_ring_fem.py` (a ring meshed, stepped, rebuilt, restarted in new
+  processes and removed; the cut and the removal on a synthetic pierced state,
+  `testCases/ring_fem_state.py`) cover it.
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the

@@ -432,8 +432,9 @@ lengths at it (`liquid-neck-unresolved`), the guard of the interface and the che
 elements; on a mesh a step has run on, the guard comes last, after the events, as in the cut's own
 stops (an event's handler rebuilds the mesh). The bubble emptying (below `bubble_stop` of its volume
 at the cut) ends the window (`bubble-vanishing`, with `window_end`). Every change of topology is
-then an event, in this order: the bubble's two tips within `delta` of each other, the downward jet
-piercing the bubble (`piercing`); a landed liquid neck (`liquid-neck`); a closing fold, one that
+then an event, in this order: the bubble's two tips within `delta` of each other (within
+`max(ring.gap delta, 3 h_min)` with `ring.enabled`, below), the downward jet piercing the bubble
+(`piercing`); a landed liquid neck (`liquid-neck`); a closing fold, one that
 lands the neck of a head it reaches (`a-head`) on either chain before any closing groove (`groove`,
 the one closest to its limit), each head's own fold searched apart from the fold of its chain so
 that a closer fold elsewhere hides none; a gas neck (`gas-neck`: narrower than `delta` and at
@@ -455,11 +456,12 @@ single head or with one too large, or met with liquid events off, whose head is 
 classified, is of class `L-unhandled`, which has none. The run makes the cut of a landed liquid
 neck, `L` or `A-head` (below), within itself and goes on; it stops on any other event, resumably
 (`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of its class:
-the ring of a piercing, the fill of a groove and the split of a gas neck are still to be built),
+the fill of a groove and the split of a gas neck are still to be built, and the ring of a piercing
+is made only with `ring.enabled`, below),
 and keeps the state before it as `states/precut_e<k>.dump` (`cut_stage` `precut-event`), besides
 the state it ends on, with the record of the event (`events/event_<k>.json`, `outcome`
 `unhandled`); a continuation from it meets the event again, and its handler once one exists. The
-bubble's tips meeting ends no window: until the ring is built the piercing is such a stop. The
+bubble's tips meeting ends no window: without `ring.enabled` the piercing is such a stop. The
 keys of `liquid` also set the cut of a landed neck: the cap that closes the stump (`liquid.cap`,
 `hemispheroid`, of height `liquid.cap_height`, 1, in neck radii and at most one), the
 velocity of the cap's nodes (`liquid.cap_fill`: `sample`, the old bulk velocity at their places, or
@@ -576,6 +578,58 @@ verdicts, the ghosts' recontacts, the dumps and meshes deleted, the log of the b
 stopped at, the bubble emptying); a run that failed in a liquid cut records that event (`event`:
 its number, kind, class, outcome, the stage it failed at, its record and the dump of the state
 before it).
+
+The block's `ring` part (off by default, and written into the block and its hash only where it
+differs from its defaults, so that every block recorded before it is unchanged) makes the cut of a
+bubble its downward jet pierces (`ringsurgery.ring_cut`, class `W1`) and keeps the bubble's rest as
+a ring of gas, at the passive constant (zero) pressure of the whole free surface, until it
+collapses. The ring is a closed loop of the free surface's own boundary: pyoomph refuses a problem
+with equations on a boundary its mesh lacks, so a boundary of the ring's own could not load a state
+written before the ring, while on the free surface's it needs nothing compiled; the problem's
+arclength chart charts the loop beyond the open chain (`problem.RingTolerantArclength`, the same
+chart as pyoomph's without a loop) and every rebuild with a loop transfers the interface by
+projection onto the old one. With `ring.enabled` the piercing is met at `bubble_length <
+max(ring.gap delta, 3 h_min)` (`gap`, 1). The cut (`ring.ring_cut_geometry`) splices the closure of
+the liquid column it makes to the downward jet's cap at the radius `rho = ring.rho s_t` (`rho`, 0.5,
+at most 0.8; `s_t` the radius of the jet's shoulder) and to the plug below: an arc, a vertical
+segment of radius `ring.waist rho` (`waist`, 0.5) and an arc, tangent to both, its points at
+`ring.cut_elements` per waist radius (null for the cut's elements per scale); it is refused before
+anything changes where the old mesh does not hold `rho` (at least 1.5 element lengths at the
+splices), where the closure leaves the old gas or makes a knife-edge angle, and where the ring would
+be born below `bubble_stop` of the bubble's volume at the gas cut. The rebuild is the project's own,
+the transfer checked against the nodes the geometry predicts it cannot locate (on the closure, in
+the column, on the axis between the bubble's old tips), then the fill of the former gas
+(`ring.fill`: `blend`, pyoomph's nearest-node blend, or `zero`) and the pressure-impulse projection
+(`ring.projection`, `ring.restart`). Its budgets within `max(ring.box_radius delta, 2 L_fill)` of
+the column (R1-R6): the liquid volume gained against the filled volume, the axial momentum the
+transfer carried against the filled region's, and the projection's momentum balance in the box (the
+identity of the box's cutoff in the projection's weak form; at a piercing the projection is the
+collision of the jet with the plug, whose impulse leaves the box through its boundary, so the box's
+own change of momentum is recorded, not limited) are hard checks, the kinetic energy and the area
+flags, each limit floored at a multiple of the ring's own noise floors (`ring.sigma_V`, `sigma_Pz`,
+`sigma_KE`, 0 until set). The ring's mesh is frozen at the cut: nowhere coarser than `max(h_cut,
+ring.size)` (`size`, null), the bubble's finer regions kept as copies (`ring_<name>`) and the
+column's region (`ring_cut`) at their sizes. In the ring stage the open chain is read as before (its
+necks, folds, heads and gas neck; a liquid cut there is a resumable stop for now, its request marked
+`stage` `ring`), and the ring's own events are resumable stops: its approach to the axis
+(`ring-axis`, class `RA`, below `max(ring.axis_ratio r_w, 3 h_col)`), the closing of one of its
+folds (`ring-fold`, `RF`) and its approach to the open chain (`chain-contact`, `X`). Once its volume
+falls below `bubble_stop` of the bubble's at the gas cut (`ring-collapse`, class `W2`) it is removed
+(`ringsurgery.ring_removal`) by the same sequence and closures (Q1-Q6), the removal logged;
+`ring.after_removal` `stop` (the default) then ends the window (`bubble-vanishing`, with
+`window_end` and `ring_removed`), `continue` goes on with the open chain alone. The ring's keys are
+those of a class of events, fixed once the ring is cut except from the state before an event, but
+for `after_removal`, a key of the leg; a state of the ring stage is continued only under a block
+with `ring.enabled`. In the ring stage `chains.txt` keeps its columns (the bubble's volume and
+widest point the ring's, its other keys NaN), `ring.txt` has a row per step (the ring's volume, also
+in units of the bubble's at the gas cut, its section, extremes, spacing, speed and Courant time, its
+fold, the limit of its approach to the axis, its distance to the open chain, and the volume,
+momentum and kinetic energy filled since the gas cut), the profiles have the ring's beside the open
+chain's (`_ring.txt`), `events.txt` a row per ring surgery (its fill a negative removal, its
+closures in `F1`-`F6`), the totals of `budget.txt` are net of the fills, so that they stay
+continuous across the surgeries, the dumps hold the record of the stage (`ring`) and
+`run_status.json` the events of the ring (`events.ring`: the event of the cut, that of the removal
+and its time).
 
 `postProcess/event_table.py` tabulates the events of such runs, one row per event and one per run
 and tip (`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event, made or the one

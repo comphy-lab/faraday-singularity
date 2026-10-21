@@ -43,6 +43,12 @@ After a cut gmsh's optimiser of curved elements is asked for the cut's ``high_or
 the lower bound of the scaled Jacobian of every curved element reaches the cut's ``jacobian_min``;
 and with ``rebuild_spline`` ``vertices`` (for a sensitivity test only) a rebuild splines each chain
 through its vertices, every other node, rather than through every node.
+
+In the ring stage (the ring of a pierced bubble, ``ringsurgery.ring_cut``: ``ring_stage`` set on
+the template) every rebuild meshes the ring, a closed loop of the free surface, as a hole of the
+liquid of two splines named ``interface``, at its frozen sizing (:class:`RingSizing`), from the
+geometry a ring surgery plans (``pending_ring_geometry``) or from the current nodes
+(``FaradayCylinderMesh._define_ring_geometry``); before the stage nothing reads it.
 """
 
 from __future__ import annotations

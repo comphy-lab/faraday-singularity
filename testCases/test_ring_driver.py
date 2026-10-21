@@ -216,3 +216,137 @@ def test_a_restart_in_the_ring_stage_needs_the_ring_enabled(tmp_path, monkeypatc
     plain_path.write_text(json.dumps(plain))
     with pytest.raises(SystemExit, match="ring.enabled"):
         _admit(state, plain, plain_path)
+
+
+# --- the routing of the ring's handlers (ringsurgery stood in for) --------------------------------
+
+
+class PiercedProblem(RingProblem):
+    """``RingProblem`` whose bubble is 8e-4 long (delta 1e-3): pierced at the start; its ring, once
+    cut, empties at ``removed`` (no loop)."""
+
+    def __init__(self, **kw):
+        super().__init__(a=1e-3, b=4e-4, **kw)
+        self.removed = False
+
+    def interface_loops(self):
+        return [] if self.removed else super().interface_loops()
+
+
+def fake_cut(calls, fail=None):
+    from faraday_singularity import surgery
+
+    def ring_cut(pb, events, reconnect, outdir, request, *, k, dt_prev, elements_per_scale,
+                 h_floor, driver=None, on_made=None, log=print):
+        calls.append(("cut", request["kind"], request["class"], k, dt_prev))
+        precut = str(driver.keep_state(Path(outdir) / "states" / f"precut_e{k:03d}.dump",
+                                       cut_stage=ev.PRECUT_EVENT, event=dict(request, k=k)))
+        if fail is not None:
+            err = fail("refused for the test")
+            err.precut, err.record = precut, {"outcome": "refused", "failed_at": "geometry",
+                                              "error": "refused for the test"}
+            raise err
+        made = made_ring_cut(driver, pb, k=k)
+        driver.keep_state(Path(outdir) / "states" / f"postcut_e{k:03d}.dump",
+                          cut_stage="postcut-event", event_k=k)
+        return made
+
+    def ring_removal(pb, events, reconnect, outdir, request, *, k, dt_prev, elements_per_scale,
+                     h_floor, driver=None, on_made=None, log=print):
+        calls.append(("removal", request["kind"], request["class"], k, dt_prev))
+        pb.removed = True
+        pb.ring = dict(pb.ring, removed={"k": k, "t": pb.t, "tau": pb.t, "V": 1e-9})
+        rec = {"schema": ev.EVENT_SCHEMA, "k": k, "kind": "ring-collapse", "class": "W2",
+               "handler": "ring-removal", "chain": "ring", "t": pb.t, "tau": pb.t,
+               "tau_p": pb.t + 1e-6, "outcome": "made", "filled": {"V": 1e-9, "Pz": 0.0,
+                                                                   "KE": 0.0},
+               "dt": {"history": dt_prev}}
+        pb.events = list(pb.events) + [rec]
+        on_made(rec)
+        return rec
+
+    return ring_cut, ring_removal, surgery
+
+
+def test_the_piercing_is_met_by_the_ring_cut_and_its_refusals_are_resumable_stops(tmp_path,
+                                                                               monkeypatch):
+    from faraday_singularity import ringsurgery
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    for name, fail in (("made", None), ("refused", "CutRefused"), ("unclosed", "BudgetUnclosed")):
+        calls = []
+        cut, removal, _ = fake_cut(calls, None if fail is None else getattr(surgery_mod(), fail))
+        monkeypatch.setattr(ringsurgery, "ring_cut", cut)
+        monkeypatch.setattr(ringsurgery, "ring_removal", removal)
+        run = tmp_path / name
+        pb = PiercedProblem()
+        out = _events_driver(run, pb, recon, events=RING_ON, state_dt=0.0).run(1e-9)
+        assert calls and calls[0][:4] == ("cut", "piercing", "W1", 1), (name, calls)
+        if fail is None:
+            assert out["stop"]["reason"] == "max-steps" and out["steps"] == 3
+            assert out["events"]["made"] == 1 and out["events"]["ring"]["cut"] == 1
+            row = (run / "events.txt").read_text().splitlines()[1].split("\t")
+            head = (run / "events.txt").read_text().splitlines()[0][2:].split("\t")
+            assert row[head.index("chain")] == "ring" and row[head.index("kind")] == "piercing"
+            assert float(row[head.index("V_rem")]) == -1e-9
+        else:
+            reason = ev.RING_CUT_REFUSED if fail == "CutRefused" else ev.EVENT_UNCLOSED
+            assert out["stop"]["reason"] == reason and out["steps"] == 0
+            assert Path(out["stop"]["precut"]).name == "precut_e001.dump"
+            assert out["events"]["made"] == 0
+
+
+def surgery_mod():
+    from faraday_singularity import surgery
+
+    return surgery
+
+
+def test_the_rings_removal_ends_the_window_or_the_run_goes_on(tmp_path, monkeypatch):
+    from faraday_singularity import ringsurgery
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    for mode in ("stop", "continue"):
+        calls = []
+        cut, removal, _ = fake_cut(calls)
+        monkeypatch.setattr(ringsurgery, "ring_cut", cut)
+        monkeypatch.setattr(ringsurgery, "ring_removal", removal)
+        block = ev.EventSettings.from_dict({"ring": {"enabled": True, "after_removal": mode}})
+        pb = PiercedProblem()
+        drv = _events_driver(tmp_path / mode, pb, recon, events=block, state_dt=0.0,
+                             max_steps=4)
+        # the ring cut at the start; then the bubble's volume at the gas cut far above the ring's,
+        # so that the ring lies below bubble_stop of it after the first step
+        orig = drv._post_cut_stop
+
+        def stop():
+            if pb.ring is not None and pb.t > 0.0:
+                pb.cut["geometry"]["bubble_volume"] = 1e6
+            return orig()
+
+        drv._post_cut_stop = stop
+        out = drv.run(1e-9)
+        drv.close()
+        kinds = [c[0] for c in calls]
+        assert kinds == ["cut", "removal"], calls
+        assert calls[1][1:3] == ("ring-collapse", "W2")
+        if mode == "stop":
+            assert out["stop"]["reason"] == "bubble-vanishing" and out["stop"]["window_end"]
+            assert out["stop"]["ring_removed"] == 2 and out["window_end"] is not None
+        else:
+            assert out["stop"]["reason"] == "max-steps" and out["steps"] == 4
+            assert out["events"]["ring"]["removed"] == 2
+            rows = (tmp_path / mode / "ring.txt").read_text().splitlines()
+            assert rows[-1].split("\t")[RING_COLUMNS.index("ring_volume")] == "nan"
+
+
+def test_without_the_ring_the_piercing_stays_an_event_without_a_handler(tmp_path, monkeypatch):
+    from faraday_singularity import ringsurgery
+
+    calls = []
+    cut, removal, _ = fake_cut(calls)
+    monkeypatch.setattr(ringsurgery, "ring_cut", cut)
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    out = _events_driver(tmp_path, PiercedProblem(), recon, events=ev.EventSettings()).run(1e-9)
+    assert out["stop"]["reason"] == ev.EVENT_UNHANDLED and out["stop"]["handler"] == "ring"
+    assert calls == []

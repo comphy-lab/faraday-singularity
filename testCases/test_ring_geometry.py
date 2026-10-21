@@ -60,7 +60,7 @@ def pierced_bubble(g=0.8 * DELTA, *, a=DELTA / 6, a_n=None, R0=4 * DELTA, H=4 * 
     a_n = 0.6 * a if a_n is None else a_n
     h = a / 40 if h is None else h
     h_far = 4 * h if h_far is None else h_far
-    q = 0.5 * DELTA  # the fillets of the outer wall
+    q = R0 / 8  # the fillets of the outer wall
     q2 = 0.5 * a  # the fillet of the roof into the neck
     z_roof = z0 + H
     z_c = z0 + g + a  # the head's centre

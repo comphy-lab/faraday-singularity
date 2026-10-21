@@ -38,7 +38,7 @@ This module needs no finite-element problem (numpy and shapely only):
   (:func:`loop_fold_gap`), the two splines a mesh is built on (:func:`loop_halves`) and their
   contacts (:func:`loop_spline_contact`), its quadratic elements (:func:`loop_edges`), what a run
   records of it (:func:`loop_record`) and the check that a loop read off a mesh is ordered
-  (:func:`validate_loop_order`, pyoomph's own test of a closed loop);
+  (:func:`validate_loop_order`, after pyoomph's own test of a closed loop);
 * the ring stage: what a run records of a state of it (:func:`ring_stage_record`, the keys of
   ``reconnect.post_cut_record`` with the bubble's those of the ring or NaN; :func:`loop_segment`)
   and its stops and events (:func:`ring_stage_events`: the open chain read as before the ring, the
@@ -76,7 +76,7 @@ RHO_MAX = RING_RHO_MAX  # the largest splice radius, in radii of the jet's shoul
 RHO_MIN_NODES = 1.5
 CLOSURE_SIN_MARGIN = 0.05  # 1 - sin(phi) at least this: the cap's tangent not along the axis
 WAIST_MIN = 0.1  # the waist at least this times the splice radius
-LOOP_STEP_RATIO = 5.0  # no step of a loop longer than this times its median (pyoomph's own test)
+LOOP_STEP_RATIO = 5.0  # no chord of a loop longer than this times the shorter chord beside it
 
 
 class RingCutRefused(RuntimeError):
@@ -306,22 +306,26 @@ def loop_record(L, u=None) -> dict:
 
 def validate_loop_order(L) -> None:
     """Raise ``RuntimeError`` unless the loop is geometrically ordered: no chord, the closing one
-    included, longer than ``LOOP_STEP_RATIO`` times the median chord (pyoomph's own test of a
-    closed loop, which a misordered walk of a remeshed loop once failed), and its start not
-    repeated at its end."""
+    included, longer than ``LOOP_STEP_RATIO`` times the shorter of the two chords beside it (a
+    misordered walk jumps across the loop and back, each jump beside a chord of the walk's own
+    spacing; a graded mesh changes its spacing by a small factor per node, so that the test, unlike
+    pyoomph's against the median chord of its periodic chart, holds on a ring meshed finely near
+    the axis and coarsely far from it), and its start not repeated at its end."""
     P = np.asarray(L, dtype=float).reshape(-1, 2)
     if len(P) < 3:
         raise RuntimeError(f"a loop needs at least three nodes, not {len(P)}")
     d = loop_steps(P)
     if not d[-1] > 0.0:
         raise RuntimeError("the loop repeats its start at its end: pass it without the repeat")
-    median = float(np.median(d))
-    worst = int(np.argmax(d))
-    if median > 0.0 and d[worst] > LOOP_STEP_RATIO * median:
+    beside = np.minimum(np.roll(d, 1), np.roll(d, -1))
+    ratio = np.where(beside > 0.0, d / np.maximum(beside, 1e-300), np.inf)
+    worst = int(np.argmax(ratio))
+    if ratio[worst] > LOOP_STEP_RATIO:
         a, b = P[worst], P[(worst + 1) % len(P)]
         raise RuntimeError(f"the loop is not geometrically ordered: the chord from ({a[0]:.9g}, "
                            f"{a[1]:.9g}) to ({b[0]:.9g}, {b[1]:.9g}) is {d[worst]:.6g}, more "
-                           f"than {LOOP_STEP_RATIO:g} times the median chord {median:.6g}")
+                           f"than {LOOP_STEP_RATIO:g} times the shorter chord beside it "
+                           f"({beside[worst]:.6g})")
 
 
 # --- the geometry of the ring cut -----------------------------------------------------------------
