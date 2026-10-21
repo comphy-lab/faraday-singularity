@@ -13,6 +13,13 @@ boundary, on ``FaradayProblem``.
   runner makes it, no hook before ``load_state``, the stage put back after it,
   ``ringsurgery.restore_ring``) steps the same in both to the bit, and as the process that wrote it
   to within what a reload changes (the mesh read back from its file); the ring removed, three steps.
+* F2 and F3, the ring cut and the ring's removal on the synthetic pierced state of
+  ``ring_fem_state.py``, made by the driver: the refusals, the rebuilt mesh, the transfer, the
+  closures, the steps, rows and dumps of the stage, its restart in new processes, the removal; and
+  each hard closure violated in turn (R1-R3 and ``R3_box`` of the cut, Q1-Q3 and ``Q3_box`` of the
+  removal: the filled volume misread, momentum added between the transfer and the fill, the impulse
+  the box's balance reads shifted, a flow that is not solenoidal), each a stop ``event-unclosed``
+  with the state before the event kept.
 
 Each problem compiles in seconds; the module takes a few minutes.
 """
@@ -306,6 +313,7 @@ def pierced(tmp_path_factory):
         res["record"] = record
         S.impose(pb)
         initial = Path(surgery._keep(pb, None, out, "initial", {})["path"])
+        res["initial"] = initial
         # the noise of the cut's box in an ordinary rebuild of the state, the floors of its closures
         g = ring.ring_cut_geometry(*[dict(surgery._named_chains(pb)[0])[x]
                                      for x in ("bubble", "open")], ev.RingEventSettings(),
@@ -369,8 +377,8 @@ def test_the_piercing_is_requested_and_the_refused_cuts_change_nothing(pierced):
     unclosed = pierced["unclosed"]
     assert unclosed["outcome"] == "unclosed" and unclosed["failed_at"] == "postcut"
     hard = unclosed["closures"]["hard"]
-    assert hard and set(hard) <= {"R1", "R2", "R3"}
-    noise = {"R1": "V", "R2": "Pz", "R3": "Pz"}
+    assert hard and set(hard) <= {"R1", "R2", "R3", "R3_box"}
+    noise = {"R1": "V", "R2": "Pz", "R3": "Pz", "R3_box": "Pz"}
     for x in hard:
         assert unclosed["closures"][x] < 5.0 * pierced["noise"][noise[x]], x
 
@@ -398,11 +406,16 @@ def test_the_ring_cut_rebuilds_the_mesh_as_planned_and_its_budgets_close(pierced
     assert gas["axis"] == gas["predicted_axis"] > 0
     assert abs(gas["bulk"] - gas["predicted_bulk"]) <= max(0.1 * gas["predicted_bulk"], 5)
     c = rec["closures"]
-    assert c["hard"] == [] and set(c["limits"]) == {f"R{i}" for i in range(1, 7)}
-    # the cutoff identity against its scale, the larger of its sides and the column's impulse
-    # (here the solenoidal flow leaves the projection little to change in the box)
-    assert c["R3"] <= c["limits"]["R3"] and c["R3"] <= 1e-2 * c["scales"]["P_ref"]
-    assert math.isfinite(c["R3_phi"]["phi_relative_error"]) and c["R3_box"] >= 0.0
+    assert c["hard"] == [] and set(c["limits"]) == {f"R{i}" for i in range(1, 7)} | {"R3_box"}
+    # the cutoff identity against its own scale, the larger of its sides, floored at the box's
+    # noise, and the box's momentum the projection changed against P_ref (here the solenoidal flow
+    # leaves the projection little to change in the box)
+    phi = c["R3_phi"]
+    assert c["R3"] <= c["limits"]["R3"] and math.isfinite(phi["phi_relative_error"])
+    assert c["relative"]["R3"] == pytest.approx(
+        c["R3"] / max(abs(phi["phi_lhs"]), abs(phi["phi_rhs"])))
+    assert c["R3_box"] <= c["limits"]["R3_box"] and c["R3_box"] <= 0.05 * c["scales"]["P_ref"]
+    assert tr["closure_nodes"] > 0 and tr["corners"]["new"] == 0 and tr["no_value"] == {}
     assert c["scales"]["U"] == pytest.approx(abs(S.W_JET - S.W_PLUG), rel=0.1)
     assert rec["filled"]["V"] == pytest.approx(g.V_fill)
     stage = pierced["ring_stage"]
@@ -558,3 +571,194 @@ def test_the_ring_is_removed_below_bubble_stop_and_the_window_ends_or_the_run_go
     go = outs["continue"]["result"]
     assert go["stop"]["reason"] == "max-steps" and go["steps"] == meta["step"] + 3
     assert go["events"]["ring"]["removed"] == outs["continue"]["events"][-1]["k"]
+
+
+# --- the hard closures fire: a violation of each stops the run event-unclosed --------------------
+
+
+def _add_velocity(pb, region, du_r, du_z):
+    """Add ``(du_r(r, z), du_z(r, z))`` to the velocity (current level) of the liquid's nodes where
+    ``region(r, z)`` holds; ``u_r`` stays pinned on the axis."""
+    m = pb.get_mesh("liquid")
+    fi = m.get_nodal_field_indices()
+    iu, iw = fi["velocity_x"], fi["velocity_y"]
+    n_set = 0
+    for n in m.nodes():
+        r, z = n.x(0), n.x(1)
+        if region(r, z):
+            if not n.is_pinned(iu):
+                n.set_value(iu, n.value(iu) + du_r(r, z))
+            n.set_value(iw, n.value(iw) + du_z(r, z))
+            n_set += 1
+    pb.invalidate_cached_mesh_data()
+    return n_set
+
+
+def radial_inflow(r, z) -> float:
+    """The part of ``ring_fem_state.closing_flow`` that is not solenoidal, its radial inflow."""
+    ur_open, _ = S.closing_flow(np.array([r]), np.array([z]), solenoidal=False)
+    ur, _ = S.closing_flow(np.array([r]), np.array([z]))
+    return float(ur_open[0] - ur[0])
+
+
+def _transfer_then(action):
+    """``ringsurgery._transfer_check`` that, once the transfer has passed its checks, applies
+    ``action()``: a field changed between the transfer and the fill, as a broken transfer would
+    leave it."""
+    original = ringsurgery._transfer_check
+
+    def check(*a, **kw):
+        problems = original(*a, **kw)
+        if not problems:
+            action()
+        return problems
+
+    return check
+
+
+def _impulse_then(pb, region, dPi):
+    """``surgery.sample_fields`` that, when the projection reads its pressure impulse on the box
+    (the only reading with the pressure), first adds ``dPi`` to the impulse at the pressure nodes
+    where ``region(r, z)`` holds: an impulse that is not the one the velocity changed by."""
+    original = surgery.sample_fields
+
+    def sample(problem, r, z, names):
+        if "pressure" in names:
+            ip, nodes = surgery._pressures(pb)
+            for n, v in nodes:
+                if region(n.x(0), n.x(1)):
+                    n.set_value(ip, v + dPi)
+            pb.invalidate_cached_mesh_data()
+        return original(problem, r, z, names)
+
+    return sample
+
+
+def _volume_misread(extra_floors: float):
+    """``ringsurgery._ring_closures`` with the filled volume read ``extra_floors`` times the limit
+    of R1 (floored) too large: the liquid gains less than the surgery says it filled."""
+    original = ringsurgery._ring_closures
+
+    def closures(fill, *a, sigma=None, **kw):
+        limit = max(ringsurgery.RING_BUDGET_LIMITS["R1"] * fill["V"], rs_floor("R1", sigma))
+        return original(dict(fill, V=fill["V"] + extra_floors * limit), *a, sigma=sigma, **kw)
+
+    return closures
+
+
+def rs_floor(name: str, sigma: dict | None) -> float:
+    noise, factor = ringsurgery.RING_NOISE_FLOORS[name]
+    return factor * float((sigma or {}).get(noise, 0.0))
+
+
+def _unclosed_run(pb, out: Path, meta: dict | None, block: ev.EventSettings, max_steps: int):
+    """A run of the driver from the problem's state (the gas cut's, or a dump of the ring stage
+    restored from ``meta``) up to its first surgery; returns its stop, its result and the record of
+    the surgery."""
+    driver = CollapseDriver(pb, CollapseSettings(**DRIVER, max_steps=max_steps), out,
+                            reconnect=S.RECON, events=block)
+    if meta is None:
+        driver.reset_after_cut(pb.cut)
+    else:
+        driver.restore(json.loads(json.dumps(meta)))
+    result = driver.run(1e-8)
+    driver.close()
+    stop = result["stop"]
+    path = out / "events" / f"event_{int(stop.get('k', 0)):03d}.json"
+    rec = json.loads(path.read_text()) if path.is_file() else {}
+    return {"stop": stop, "result": result, "record": rec}
+
+
+@pytest.fixture(scope="module")
+def unclosed(pierced, tmp_path_factory):
+    """The ring cut of the pierced state and the ring's removal, each made by the driver with one
+    hard closure violated: R1 (Q1) the filled volume read three floors too large; R2 (Q2) axial
+    momentum added to the liquid between the transfer and the fill, outside the filled region;
+    R3 (Q3) the pressure impulse the box's balance reads shifted in the box's lower shell; R3_box a
+    flow that is not solenoidal (the radial inflow of ``ring_fem_state.closing_flow``), whose
+    projection moves momentum out of the box, and Q3_box the same inflow added after the removal's
+    transfer; the removal's violations are sized against its own limits, its scale ``P_ref``
+    being that of the ring's volume."""
+    out = tmp_path_factory.mktemp("unclosed")
+    noise = pierced["noise"]
+    events = ring_block(noise)
+    g = pierced["geometry"]
+    z_mid, R_b = g.z_mid, max(4.0 * S.DELTA, 2.0 * g.L_fill)
+    res = {}
+    with S.pierce_problem(out / "pb") as pb:
+        pb.initialise()
+        cases = {
+            "R1": lambda: {"_ring_closures": _volume_misread(3.0)},
+            "R2": lambda: {"_transfer_check": _transfer_then(lambda: _add_velocity(
+                pb, lambda r, z: r < 0.06 and 0.47 < z < 0.53, lambda r, z: 0.0,
+                lambda r, z: 1e-2))},
+            "R3": lambda: {"sample_fields": _impulse_then(
+                pb, lambda r, z: z < z_mid and 0.6 * R_b < math.hypot(r, z - z_mid) < R_b,
+                1e-3)},
+            "R3_box": lambda: {}}
+        for name, patches in cases.items():
+            reload(pb, pierced["initial"], pierced["record"])
+            if name == "R3_box":
+                S.impose(pb, solenoidal=False)
+            with pytest.MonkeyPatch.context() as mp:
+                for attr, fn in patches().items():
+                    mp.setattr(surgery if attr == "sample_fields" else ringsurgery, attr, fn)
+                res[name] = _unclosed_run(pb, out / name, None, events, 1)
+    run = pierced["run"]
+    end = Path(pierced["result"]["stop"]["end_state"])
+    end = end if end.is_absolute() else run.parent / end
+    meta = json.loads(end.with_suffix(".json").read_text())
+    meta["cut"]["geometry"]["bubble_volume"] *= 4.0
+    meta["ring"]["V_b"] *= 4.0
+    block = ev.EventSettings.from_dict(meta["events_settings"])
+    for name in ("Q1", "Q2", "Q3", "Q3_box"):
+        with S.pierce_problem(out / f"pb-{name}") as pb:
+            pb.initialise()
+            pb.load_state(str(end))
+            loop = pb.interface_loops()[0]
+            L = np.column_stack([loop["r"], loop["z"]])
+            z_c = float(ring.loop_record(L)["z_c"])  # the removal's box, as ring_removal takes it
+            Q = ring.closed(L)
+            R_q = max(4.0 * S.DELTA, 2.0 * float(np.max(np.hypot(Q[:, 0], Q[:, 1] - z_c))))
+            # the removal's P_ref (the ring's volume times its largest speed) and the limits of Q2
+            # and Q3_box it sets, which the violations exceed severalfold
+            P_q = rc.revolved_volume(L) * float(np.max(np.hypot(loop["u_r"], loop["u_z"])))
+            limit = max(0.05 * P_q, rs_floor("R2", {"Pz": block.ring.sigma_Pz}))
+            blob = math.pi * 0.06**2 * 0.06  # the liquid below the plug the momentum is added to
+            inflow = 30.0 * limit / 1e-4  # the cut's radial inflow moved about 1e-4 out of its box
+            patches = {
+                "Q1": {"_ring_closures": _volume_misread(3.0)},
+                "Q2": {"_transfer_check": _transfer_then(lambda: _add_velocity(
+                    pb, lambda r, z: r < 0.06 and 0.47 < z < 0.53, lambda r, z: 0.0,
+                    lambda r, z: 5.0 * limit / blob))},
+                "Q3": {"sample_fields": _impulse_then(
+                    pb, lambda r, z: z < z_c and 0.6 * R_q < math.hypot(r, z - z_c) < R_q,
+                    1e-3)},
+                "Q3_box": {"_transfer_check": _transfer_then(lambda: _add_velocity(
+                    pb, lambda r, z: True,
+                    lambda r, z: inflow * radial_inflow(r, z), lambda r, z: 0.0))}}[name]
+            with pytest.MonkeyPatch.context() as mp:
+                for attr, fn in patches.items():
+                    mp.setattr(surgery if attr == "sample_fields" else ringsurgery, attr, fn)
+                res[name] = _unclosed_run(pb, out / name, meta, block, meta["step"] + 1)
+    return res
+
+
+@pytest.mark.parametrize("name", ["R1", "R2", "R3", "R3_box", "Q1", "Q2", "Q3", "Q3_box"])
+def test_a_violated_hard_closure_stops_the_run_event_unclosed_with_the_state_before_it(unclosed,
+                                                                                        name):
+    """Each violation is a hard miss of its closure beyond its limit, floored at the box's noise:
+    the surgery is not accepted, the run stops ``event-unclosed`` with the state before the event
+    kept (``precut_e<k>``) and the record ``unclosed``, its closures and its hard misses."""
+    got = unclosed[name]
+    stop, rec = got["stop"], got["record"]
+    assert stop["reason"] == "event-unclosed", json.dumps(stop, default=float)
+    assert name in stop["hard"] and name in rec["closures"]["hard"], rec["closures"]
+    assert rec["outcome"] == "unclosed" and rec["failed_at"] == "postcut"
+    c = rec["closures"]
+    floor = rs_floor("R" + name[1:], c["sigma"])
+    assert c[name] > c["limits"][name] >= floor > 0.0
+    precut = Path(stop["precut"])
+    assert precut.is_file() and precut.name == f"precut_e{int(stop['k']):03d}.dump"
+    assert rec["dumps"]["precut"] == stop["precut"]
+    assert "postcut" not in rec["dumps"]

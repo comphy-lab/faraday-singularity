@@ -602,34 +602,36 @@ the column, on the axis between the bubble's old tips), then the fill of the for
 (`ring.fill`: `blend`, pyoomph's nearest-node blend, or `zero`) and the pressure-impulse projection
 (`ring.projection`, `ring.restart`). Its budgets within `max(ring.box_radius delta, 2 L_fill)` of
 the column (R1-R6): the liquid volume gained against the filled volume, the axial momentum the
-transfer carried against the filled region's, and the projection's momentum balance in the box (the
-identity of the box's cutoff in the projection's weak form; at a piercing the projection is the
-collision of the jet with the plug, whose impulse leaves the box through its boundary, so the box's
-own change of momentum is recorded, not limited) are hard checks, the kinetic energy and the area
-flags, each limit floored at a multiple of the ring's own noise floors (`ring.sigma_V`, `sigma_Pz`,
-`sigma_KE`, 0 until set). The ring's mesh is frozen at the cut: nowhere coarser than `max(h_cut,
-ring.size)` (`size`, null), the bubble's finer regions kept as copies (`ring_<name>`) and the
-column's region (`ring_cut`) at their sizes. In the ring stage the open chain is read as before (its
-necks, folds, heads and gas neck; a liquid cut there is a resumable stop for now, its request marked
-`stage` `ring`), and the ring's own events are resumable stops: its approach to the axis
-(`ring-axis`, class `RA`, below `max(ring.axis_ratio r_w, 3 h_col)`), the closing of one of its
-folds (`ring-fold`, `RF`) and its approach to the open chain (`chain-contact`, `X`). Once its volume
-falls below `bubble_stop` of the bubble's at the gas cut (`ring-collapse`, class `W2`) it is removed
-(`ringsurgery.ring_removal`) by the same sequence and closures (Q1-Q6), the removal logged;
-`ring.after_removal` `stop` (the default) then ends the window (`bubble-vanishing`, with
-`window_end` and `ring_removed`), `continue` goes on with the open chain alone. The ring's keys are
-those of a class of events, fixed once the ring is cut except from the state before an event, but
-for `after_removal`, a key of the leg; a state of the ring stage is continued only under a block
-with `ring.enabled`. In the ring stage `chains.txt` keeps its columns (the bubble's volume and
-widest point the ring's, its other keys NaN), `ring.txt` has a row per step (the ring's volume, also
-in units of the bubble's at the gas cut, its section, extremes, spacing, speed and Courant time, its
-fold, the limit of its approach to the axis, its distance to the open chain, and the volume,
-momentum and kinetic energy filled since the gas cut), the profiles have the ring's beside the open
-chain's (`_ring.txt`), `events.txt` a row per ring surgery (its fill a negative removal, its
-closures in `F1`-`F6`), the totals of `budget.txt` are net of the fills, so that they stay
-continuous across the surgeries, the dumps hold the record of the stage (`ring`) and
-`run_status.json` the events of the ring (`events.ring`: the event of the cut, that of the removal
-and its time).
+transfer carried against the filled region's, and both momentum statements of the projection in the
+box, the identity of the box's cutoff in the projection's weak form (R3, against the larger of its
+two sides) and the box's own change of momentum (`R3_box`, against the filled volume times the
+closing speed, as for a liquid cut), are hard checks, the kinetic energy and the area flags, each
+limit floored at a multiple of the ring's own noise floors (`ring.sigma_V`, `sigma_Pz`, `sigma_KE`,
+0 until set); a hard miss is a resumable stop (`event-unclosed`). The transfer is refused where a
+node is left without a value off the corner set or the closure holds no node. The ring's mesh is
+frozen at the cut: nowhere coarser than `max(h_cut, ring.size)` (`size`, null), the bubble's finer
+regions kept as copies (`ring_<name>`) and the column's region (`ring_cut`) at their sizes. In the
+ring stage the open chain is read as before (its necks, folds, heads and gas neck; a liquid cut
+there is a resumable stop for now, its request marked `stage` `ring`), and the ring's own events are
+resumable stops: its approach to the axis (`ring-axis`, class `RA`, below `max(ring.axis_ratio r_w,
+3 h_col)`), the closing of one of its folds (`ring-fold`, `RF`) and its approach to the open chain
+(`chain-contact`, `X`). Once its volume falls below `bubble_stop` of the bubble's at the gas cut
+(`ring-collapse`, class `W2`) it is removed (`ringsurgery.ring_removal`) by the same sequence and
+closures (Q1-Q6), the removal logged; `ring.after_removal` `stop` (the default) then ends the window
+(`bubble-vanishing`, with `window_end` and `ring_removed`), `continue` goes on with the open chain
+alone. The ring's keys are those of a class of events, fixed once the ring is cut except from the
+state before an event, but for `after_removal`, a key of the leg; a state of the ring stage is
+continued only under a block with `ring.enabled`. In the ring stage `chains.txt` keeps its columns
+(the bubble's volume and widest point the ring's, its other keys NaN), `ring.txt` has a row per step
+(the ring's volume, also in units of the bubble's at the gas cut, its section, extremes, spacing,
+speed and Courant time, its fold, the limit of its approach to the axis, its distance to the open
+chain, and the volume, momentum and kinetic energy filled since the gas cut), the profiles have the
+ring's beside the open chain's (`_ring.txt`), `events.txt` a row per ring surgery (its fill a
+negative removal, its closures in `F1`-`F6`), the totals of `budget.txt` are net of the fills, so
+that the fill's own amounts make no jump in them (the projection's change of the whole liquid's
+momentum and the noise of the rebuild still enter them, as at a liquid cut), the dumps hold the
+record of the stage (`ring`) and `run_status.json` the events of the ring (`events.ring`: the event
+of the cut, that of the removal and its time).
 
 `postProcess/event_table.py` tabulates the events of such runs, one row per event and one per run
 and tip (`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event, made or the one

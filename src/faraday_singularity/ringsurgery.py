@@ -28,27 +28,31 @@ for a loop (its chart is open on the whole boundary), so the cut is a rebuild th
    ``surgery.CutFailed``.
 5. **Mesh check**: one open chain, one ring, the axis one span up to the cavity's tip, and the
    nodes the transfer leaves unlocated those the geometry predicts: of the interface
-   (``events.predict_unlocated``, on the closure), of the bulk (inside the filled region) and of the
-   axis (between the bubble's old tips).
+   (``events.predict_unlocated``, on the closure, which must hold nodes), of the bulk (inside the
+   filled region) and of the axis (between the bubble's old tips); no node without a value but on
+   the corner set, at most those of it the geometry makes new (none: :func:`_corners`), as
+   ``surgery.transfer_problems`` checks a liquid cut's.
 6. **Fill** (``ring.fill``: the blend, or zero) and the **projection** (``surgery.project``, with
    ``ring.projection`` and ``ring.restart`` or the cut's, the run's last step as the history's, the
-   time unchanged), ``Pi = 0`` on every free surface, the ring's closure included: the inelastic
-   merge of the downward jet with the plug is the projection's impulse.
-7. **Budgets after and closures** (:func:`_ring_closures`, R1-R6), of which the volume the liquid
-   gains, the momentum the transfer carries and the projection's momentum balance in its box (the
-   cutoff identity of ``surgery._box_projection``) are hard checks
+   time unchanged), ``Pi = 0`` on every free surface, the ring's closure included.
+7. **Budgets after and closures** (:func:`_ring_closures`, R1-R6 and ``R3_box``), of which the
+   volume the liquid gains, the momentum the transfer carries and both momentum statements of the
+   projection in its box, the cutoff identity of ``surgery._box_projection`` (R3) and the box's
+   change of momentum (``R3_box``, the liquid cut's F3), are hard checks
    (``surgery.BudgetUnclosed``, ``event-unclosed``); then the record of the stage on the problem
    (``FaradayProblem.ring``), the driver's bookkeeping (``on_made``), ``postcut_e<k>``, the record
    ``events/event_<k>.json`` with the filled region and the ring.
 
-Why the projection's closure is the cutoff identity, not a small change of the box's momentum as
-for a liquid cut: at a piercing the projection is the collision of the jet with the plug, its
-pressure impulse has a source of the order of the column's impulse near a free surface, a dipole as
-seen from the box's boundary, whose flux through it does not fall with the box's radius; the box's
-momentum changes by the order of that impulse through its boundary, physically (balanced at the
-container's bottom), and the statement that must hold is the box's momentum balance with that flux.
-The box's change is recorded (``R3_box``), as the projection's energy (R4, a flag: the merge takes
-kinetic energy physically, and the energy identity of ``surgery.project`` is the numerical check).
+Both momentum statements of the projection are hard, since neither alone settles what happens at a
+piercing. Where the pressure impulse reaches the box's boundary (a source of it beside a free
+surface is a dipole as seen from there, whose flux does not fall with the box's radius), the box's
+momentum changes through that boundary, and the identity is the box's balance with the flux; where
+``Pi = 0`` on a closure close to the axis keeps the impulse within the column, the box's momentum
+barely changes, both sides of the identity lie far below ``P_ref`` and cancel, and its relative
+error is set by the quadrature of the box's grid. The identity is therefore measured against the
+larger of its sides (not against ``P_ref``, which would hide a miss of its whole size) and the
+change against ``P_ref``, each floored at the box's noise; the projection's energy (R4) is a flag,
+the energy identity of ``surgery.project`` the numerical check.
 
 The ring stage lives on the problem (``FaradayProblem.ring``, its record, dumped with every state of
 it) and on the mesh template (``ring_stage``, ``ring_sizing``: every rebuild meshes the ring as a
@@ -90,15 +94,18 @@ from .reconnect import Chain, liquid_axis_spans
 # the stages of a ring surgery before it changes the problem: any failure up to them is a refusal
 RING_UNCHANGED_STAGES = ("admission", "precut", "geometry", "budgets", "park")
 # the closures of a ring surgery within its box (_ring_closures): the coefficient of the limit of
-# each, times the surgery's own scale, and the hard ones (the volume the liquid gains, the momentum
-# the transfer carries, the projection's momentum balance in the box); the kinetic energy and the
-# area are flagged
-RING_BUDGET_LIMITS = {"R1": 1e-2, "R2": 0.05, "R3": 1e-2, "R4": 1.0, "R5": 1e-2, "R6": 0.05}
-HARD_RING_CLOSURES = ("R1", "R2", "R3")
+# each, times its own scale, and the hard ones (the volume the liquid gains, the momentum the
+# transfer carries, the projection's momentum balance in the box, the cutoff identity, against the
+# larger of its sides, and the box's momentum the projection changes, against P_ref, the liquid
+# cut's F3); the kinetic energy and the area are flagged
+RING_BUDGET_LIMITS = {"R1": 1e-2, "R2": 0.05, "R3": 1e-2, "R3_box": 0.05, "R4": 1.0, "R5": 1e-2,
+                      "R6": 0.05}
+HARD_RING_CLOSURES = ("R1", "R2", "R3", "R3_box")
 # the floors of those limits: a multiple of the noise of the box (the block's ring.sigma_V,
 # sigma_Pz, sigma_KE), the noise's name and multiple
-RING_NOISE_FLOORS = {"R1": ("V", 5.0), "R2": ("Pz", 5.0), "R3": ("Pz", 5.0), "R4": ("KE", 3.0),
-                     "R6": ("KE", 5.0)}
+RING_NOISE_FLOORS = {"R1": ("V", 5.0), "R2": ("Pz", 5.0), "R3": ("Pz", 5.0), "R3_box": ("Pz", 5.0),
+                     "R4": ("KE", 3.0), "R6": ("KE", 5.0)}
+CORNER_TOL = 0.05  # a new node of the interface's axis within this times h_tip of an old axis end
 # the bubble's regions of the driver's focus, which the ring cut replaces by its frozen copies
 BUBBLE_REGIONS = ("bubble_top", "bubble_bottom", "jet_base_bubble_top", "jet_base_bubble_bottom",
                   "neck_bubble", "kink_bubble")
@@ -205,50 +212,72 @@ def _zero_inside(problem, sets: dict, polygon, z_range, shrink: float) -> dict:
     return {"zeroed_bulk": int(inside.sum()), "zeroed_axis": int(on_axis.sum())}
 
 
-def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict, scales: dict, areas: dict,
-                   sigma: dict | None = None, prefix: str = "R") -> dict:
+def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict | None, scales: dict,
+                   areas: dict, sigma: dict | None = None, prefix: str = "R") -> dict:
     """The closures of a ring surgery within its box, each against its limit (``RING_BUDGET_LIMITS``
     times its scale, never below the floor of ``RING_NOISE_FLOORS``, a multiple of the ring's noise
     ``sigma``: ``V``, ``Pz``, ``KE``, zero where not given): R1 the liquid volume the box gained
     (its polylines before and after, ``poly``) against the filled volume ``V_fill``; R2 the axial
     momentum the transfer carried (``box``: before, after the transfer and the fill, after the
-    projection) against the filled region's momentum ``Pz_fill``; R3 the projection's momentum
-    balance in the box, the cutoff identity ``|phi_lhs - phi_rhs|`` (``phi``), against
-    ``max(|phi_lhs|, P_ref)``; R4 the kinetic energy the projection changed, against ``KE_ref``
-    (the merge takes it physically: a flag); R5 the area of the interface against the closure's less
-    the removed tips' (``areas``); R6 the kinetic energy the transfer carried against ``KE_fill``.
-    The scales: ``V_fill``, ``P_ref = V_fill U``, ``KE_ref = V_fill U^2 / 2`` (``U`` the closing
-    speed of the cut, the ring's largest speed at its removal). ``flags`` the closures beyond their
-    limits, ``hard`` those of ``HARD_RING_CLOSURES`` among them (named ``prefix`` R, or Q for the
-    removal), and ``R3_box``, the box's momentum change by the projection, recorded only."""
+    projection) against the filled region's momentum ``Pz_fill``, at the scale ``P_ref``; R3 the
+    projection's momentum balance in the box, the cutoff identity ``|phi_lhs - phi_rhs|`` (``phi``,
+    the projection's ``box``, None where no projection was made, R3 then zero), against the larger
+    of its two sides, as ``surgery._box_projection`` states its relative error (a side missing or
+    not finite makes R3 NaN, a miss); ``R3_box`` the box's axial momentum the projection changed,
+    against ``P_ref``, the liquid cut's F3; R4 the kinetic energy the projection changed, against
+    ``KE_ref`` (a flag: an inelastic merge in the box takes kinetic energy physically); R5 the
+    area of the interface against the closure's less the removed tips' (``areas``); R6 the kinetic
+    energy the transfer carried against ``KE_fill``. The scales: ``V_fill``, ``P_ref = V_fill U``,
+    ``KE_ref = V_fill U^2 / 2`` (``U`` the closing speed of the cut, the ring's largest speed at
+    its removal). ``flags`` the closures beyond their limits, ``hard`` those of
+    ``HARD_RING_CLOSURES`` among them (named ``prefix`` R, or Q for the removal: ``Q3_box``).
+    Both momentum statements of the projection are hard: the identity, that the box's momentum
+    balance holds with the impulse's flux through the box's boundary, and the change itself, that
+    the projection moved little momentum across that boundary; neither alone discriminates where
+    the impulse stays within a thin column whose sides cancel (the identity's sides then lie far
+    below ``P_ref``, its relative error set by the quadrature of the box's grid; below the floor it
+    states only that the momentum it misses is below the box's noise)."""
     V, Pz_fill, KE_fill = fill["V"], fill["Pz"], fill["KE"]
     P_ref, KE_ref = scales["P_ref"], scales["KE_ref"]
     before, moved, after = box["before"], box["after_transfer"], box["after_projection"]
     dA = areas["A_cl"] - areas["A_rem"]
+    projected = phi is not None
+    phi = phi or {}
     lhs, rhs = float(phi.get("phi_lhs", math.nan)), float(phi.get("phi_rhs", math.nan))
+    sides = math.isfinite(lhs) and math.isfinite(rhs)
     values = {"R1": abs(poly["after"]["V_liquid"] - poly["before"]["V_liquid"] - V),
               "R2": abs(moved["Pz"] - before["Pz"] - Pz_fill),
-              "R3": abs(lhs - rhs) if math.isfinite(lhs) and math.isfinite(rhs) else 0.0,
+              "R3": (abs(lhs - rhs) if sides else math.nan) if projected else 0.0,
+              "R3_box": abs(after["Pz"] - moved["Pz"]),
               "R4": abs(after["KE"] - moved["KE"]),
               "R5": abs(poly["after"]["A"] - poly["before"]["A"] - dA),
               "R6": abs(moved["KE"] - before["KE"] - KE_fill)}
-    scale = {"R1": V, "R2": P_ref, "R3": max(abs(lhs) if math.isfinite(lhs) else 0.0, P_ref),
-             "R4": KE_ref, "R5": abs(dA), "R6": KE_ref}
+    scale = {"R1": V, "R2": P_ref,
+             "R3": (max(abs(lhs), abs(rhs)) if sides else math.nan) if projected else 0.0,
+             "R3_box": P_ref, "R4": KE_ref, "R5": abs(dA), "R6": KE_ref}
     noise = {"V": 0.0, "Pz": 0.0, "KE": 0.0, **{k: float(v) for k, v in (sigma or {}).items()}}
-    limits = {k: max(RING_BUDGET_LIMITS[k] * scale[k],
-                     RING_NOISE_FLOORS[k][1] * noise[RING_NOISE_FLOORS[k][0]]
-                     if k in RING_NOISE_FLOORS else 0.0) for k in values}
+
+    def limit(k):
+        floor = (RING_NOISE_FLOORS[k][1] * noise[RING_NOISE_FLOORS[k][0]]
+                 if k in RING_NOISE_FLOORS else 0.0)
+        own = RING_BUDGET_LIMITS[k] * scale[k]
+        return own if math.isnan(own) else max(own, floor)  # NaN stays a miss
+
+    limits = {k: limit(k) for k in values}
     flags = [k for k in values if not values[k] <= limits[k]]
 
+    def name(k):
+        return prefix + k[1:]
+
     def named(d):
-        return {prefix + k[1:]: v for k, v in d.items()}
+        return {name(k): v for k, v in d.items()}
 
     return {**named(values), "limits": named(limits),
             "relative": named({k: values[k] / scale[k] if scale[k] else math.nan
                                for k in values}),
-            "flags": [prefix + k[1:] for k in flags],
-            "hard": [prefix + k[1:] for k in flags if k in HARD_RING_CLOSURES], "sigma": noise,
-            "scales": dict(scales), f"{prefix}3_box": abs(after["Pz"] - moved["Pz"]),
+            "flags": [name(k) for k in flags],
+            "hard": [name(k) for k in flags if k in HARD_RING_CLOSURES], "sigma": noise,
+            "scales": dict(scales), f"{prefix}3_projected": projected,
             f"{prefix}3_phi": {x: phi.get(x, math.nan) for x in ("phi_lhs", "phi_rhs",
                                                                  "phi_error",
                                                                  "phi_relative_error")}}
@@ -344,13 +373,43 @@ def _focus_regions(old_focus: Focus | None, grading_default: float):
     return regions, old_focus.grading
 
 
+def _axis_ends(chains) -> list:
+    """The ends on the axis of the chains (``reconnect.Chain``) of the old interface."""
+    return [c.points[k] for c in chains for k, end in ((0, 0), (-1, 1))
+            if c.end_types[end] == "axis"]
+
+
+def _corners(problem, old_ends, tol: float) -> dict:
+    """The nodes of the new interface's axis (its corner set, the mesh ``interface/axis``) and how
+    many of them lie farther than ``tol`` from every axis end of the old interface (``old_ends``,
+    points): those a transfer may leave without a value of their own fields (``_kin_bc``), as the
+    stump's new tip of a liquid cut; the ring surgeries make none, the corner set staying the
+    open chain's tip on the axis."""
+    from .surgery import INTERFACE, mesh_nodes
+
+    X = np.array([[n.x(0), n.x(1)] for n in mesh_nodes(problem.get_mesh(INTERFACE + "/axis"))])
+    X = X.reshape(-1, 2)
+    E = np.asarray(old_ends, dtype=float).reshape(-1, 2)
+    if not len(X):
+        return {"nodes": 0, "new": 0}
+    if not len(E):
+        return {"nodes": len(X), "new": len(X)}
+    d = np.min(np.hypot(X[:, None, 0] - E[None, :, 0], X[:, None, 1] - E[None, :, 1]), axis=1)
+    return {"nodes": len(X), "new": int(np.sum(d > tol))}
+
+
 def _transfer_check(transfer: dict, sets: dict, predicted_iface: np.ndarray, on_closure,
-                    bulk_inside: np.ndarray, axis_in_gap: np.ndarray) -> list[str]:
-    """What the checks of a ring surgery's transfer find wrong in its record: pyoomph's count of
-    unlocated interface nodes within ``UNLOCATED_SLACK`` of the prediction and every predicted one
-    on the closure (``on_closure`` None: none predicted at all), its count of the bulk's within
-    ``BULK_SLACK`` of the bulk nodes predicted (inside the filled region) and of the axis's within
-    ``AXIS_SLACK`` of those predicted (in the gap of the old axis)."""
+                    bulk_inside: np.ndarray, axis_in_gap: np.ndarray,
+                    corners: dict) -> list[str]:
+    """What the checks of a ring surgery's transfer find wrong in its record, as
+    ``surgery.transfer_problems`` checks a liquid cut's: pyoomph's count of unlocated interface
+    nodes within ``UNLOCATED_SLACK`` of the prediction and every predicted one on the closure
+    (``on_closure`` None, the removal: none predicted at all), and the closure holding nodes of the
+    new interface (``closure_nodes``, the liquid cut's ``cap_nodes``); its count of the bulk's
+    within ``BULK_SLACK`` of the bulk nodes predicted (inside the filled region) and of the axis's
+    within ``AXIS_SLACK`` of those predicted (in the gap of the old axis); and no node without a
+    value but on the corner set (``interface/axis``), at most those of it the geometry makes new
+    (``corners``, :func:`_corners`: none for either ring surgery)."""
     from .surgery import INTERFACE, UNLOCATED_SLACK
 
     problems = []
@@ -361,9 +420,12 @@ def _transfer_check(transfer: dict, sets: dict, predicted_iface: np.ndarray, on_
     if on_closure is None:
         if predicted_iface.any():
             problems.append(f"{int(predicted_iface.sum())} interface nodes predicted unlocated")
-    elif np.any(predicted_iface & ~on_closure):
-        problems.append(f"{int(np.sum(predicted_iface & ~on_closure))} predicted unlocated "
-                        "interface nodes off the closure")
+    else:
+        if np.any(predicted_iface & ~on_closure):
+            problems.append(f"{int(np.sum(predicted_iface & ~on_closure))} predicted unlocated "
+                            "interface nodes off the closure")
+        if not np.any(on_closure):
+            problems.append("no interface node on the planned closure")
     rep_bulk = _reported(transfer, "liquid")
     want = int(bulk_inside.sum())
     if abs(rep_bulk - want) > max(BULK_SLACK[0] * want, BULK_SLACK[1]):
@@ -372,10 +434,16 @@ def _transfer_check(transfer: dict, sets: dict, predicted_iface: np.ndarray, on_
     want = int(axis_in_gap.sum())
     if abs(rep_axis - want) > AXIS_SLACK:
         problems.append(f"{rep_axis} axis nodes unlocated, {want} predicted")
+    no_value, corner = transfer.get("no_value") or {}, INTERFACE + "/axis"
+    if set(no_value) - {corner} or no_value.get(corner, [0])[0] > corners["new"]:
+        problems.append(f"nodes without a value beyond the {corners['new']} new node(s) of the "
+                        f"corner set: {no_value}")
     transfer.update(predicted_unlocated=int(predicted_iface.sum()),
                     reported_unlocated=rep_if,
                     predicted_off_closure=int(np.sum(predicted_iface & ~on_closure))
                     if on_closure is not None else int(predicted_iface.sum()),
+                    closure_nodes=int(np.sum(on_closure)) if on_closure is not None else None,
+                    corners=dict(corners),
                     former_gas={"bulk": rep_bulk, "axis": rep_axis,
                                 "predicted_bulk": int(bulk_inside.sum()),
                                 "predicted_axis": int(axis_in_gap.sum())})
@@ -570,7 +638,9 @@ def _ring_cut(pb, events, s, out: Path, record: dict, progress: dict, request: d
     tol = 0.05 * h_col
     axis_gap = ((A[:, 1] > float(P[0, 1]) + tol) & (A[:, 1] < float(P[-1, 1]) - tol)
                 if len(A) else np.zeros(0, dtype=bool))
-    problems = _transfer_check(transfer, sets, predicted, on_closure, bulk_inside, axis_gap)
+    corners = _corners(pb, _axis_ends([cavity, bubble]), CORNER_TOL * h_min)
+    problems = _transfer_check(transfer, sets, predicted, on_closure, bulk_inside, axis_gap,
+                               corners)
     transfer["corner_fields"] = sorted(pb.get_mesh(INTERFACE + "/axis").get_nodal_field_indices())
     if problems:
         raise CutFailed("the transfer of the ring cut is not as planned: " + "; ".join(problems),
@@ -619,7 +689,7 @@ def _ring_cut(pb, events, s, out: Path, record: dict, progress: dict, request: d
     closures = _ring_closures({"V": g.V_fill, "Pz": fill["Pz_fill"], "KE": fill["KE_fill"]},
                               record["budgets"]["polylines"],
                               {"before": box_before, "after_transfer": box_transfer,
-                               "after_projection": box_after}, box or {}, scales,
+                               "after_projection": box_after}, box, scales,
                               {"A_cl": g.A_cl, "A_rem": g.A_rem},
                               sigma={"V": ring.sigma_V, "Pz": ring.sigma_Pz, "KE": ring.sigma_KE})
     closures["global_identity"] = {x: record["projection"].get(x, math.nan)
@@ -788,8 +858,9 @@ def _ring_removal(pb, events, s, out: Path, record: dict, progress: dict, reques
     sets = _node_sets(pb)
     predicted = predict_unlocated(sets["interface"][1], [cavity.points, Q])
     bulk_inside = _inside(sets["bulk"][1], L, 0.05 * h_ring)
+    corners = _corners(pb, _axis_ends([cavity]), CORNER_TOL * float(pb.cut["sizing"]["h_tip"]))
     problems = _transfer_check(transfer, sets, predicted, None, bulk_inside,
-                               np.zeros(len(sets["axis"][1]), dtype=bool))
+                               np.zeros(len(sets["axis"][1]), dtype=bool), corners)
     if problems:
         raise CutFailed("the transfer of the ring's removal is not as planned: "
                         + "; ".join(problems), record["dumps"]["precut"])
@@ -837,7 +908,7 @@ def _ring_removal(pb, events, s, out: Path, record: dict, progress: dict, reques
     closures = _ring_closures({"V": V_ring, "Pz": fill["Pz_fill"], "KE": fill["KE_fill"]},
                               record["budgets"]["polylines"],
                               {"before": box_before, "after_transfer": box_transfer,
-                               "after_projection": box_after}, box or {}, scales,
+                               "after_projection": box_after}, box, scales,
                               {"A_cl": 0.0, "A_rem": revolved_area(Q)},
                               sigma={"V": ring.sigma_V, "Pz": ring.sigma_Pz, "KE": ring.sigma_KE},
                               prefix="Q")

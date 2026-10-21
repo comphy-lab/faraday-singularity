@@ -1450,7 +1450,8 @@ class CollapseDriver:
         momentum and kinetic energy of each removed head at its cut (its record's ``removed``),
         summed, and the number of events; with ring surgeries made (the ring stage), net of what
         they filled (:meth:`_filled`, a fill a negative removal, counted among the events), so that
-        the totals of ``budget.txt`` stay continuous across them."""
+        the fill's own amounts make no jump in the totals of ``budget.txt`` (the projection's change
+        of the whole liquid's momentum and the noise of the rebuild still enter them)."""
         liquid = [e for e in self._made_events() if e.get("kind") in EVENT_CLASSES["liquid"]]
         out = {"events": len(liquid), **{key: sum((float((e.get("removed") or {}).get(key) or 0.0)
                                                    for e in liquid), 0.0)

@@ -387,8 +387,9 @@ add a second top-level `cases/` tree.
   geometry predicts unlocated (closure, column, axis gap); then the fill (`ring.fill`), the
   projection and the closures R1-R6 (`ringsurgery._ring_closures`: R1 the volume gained, R2 the
   momentum the transfer carried, R3 the projection's momentum balance in the box, the cutoff
-  identity, hard; the box's change of momentum by the projection, `R3_box`, recorded only, since at
-  a piercing the projection is an impact whose impulse leaves the box; R4-R6 flags), floored at
+  identity against the larger of its sides, and `R3_box`, the box's change of momentum by the
+  projection against `P_ref`, the liquid cut's F3, all hard; R4-R6 flags; the transfer refused for a
+  node without a value off the corner set or a closure without nodes), floored at
   `ring.sigma_*`, which every ring case must set from the box's noise; the ring's sizing frozen at
   the cut (`ring_<name>` copies of the bubble's finer regions, `ring_cut` the column's, emitted at
   their sizes by `CollapseDriver._frozen_ring_regions`). The ring stage (`FaradayProblem.ring`,
@@ -406,9 +407,11 @@ add a second top-level `cases/` tree.
   (`driver.RING_COLUMNS`), `_ring.txt` profiles, an `events.txt` row per surgery (its fill a
   negative removal), `budget.txt` totals net of the fills, `events.ring` in the run's result;
   `testCases/test_ring_settings.py`, `test_ring_geometry.py`, `test_ring_stops.py`,
-  `test_ring_driver.py` and `test_ring_fem.py` (a ring meshed, stepped, rebuilt, restarted in new
-  processes and removed; the cut and the removal on a synthetic pierced state,
-  `testCases/ring_fem_state.py`) cover it.
+  `test_ring_driver.py`, `test_ring_closures.py` (each hard closure beyond its floored limit, the
+  transfer's no-value and closure checks) and `test_ring_fem.py` (a ring meshed, stepped, rebuilt,
+  restarted in new processes and removed; the cut and the removal on a synthetic pierced state,
+  `testCases/ring_fem_state.py`, and each hard closure of both violated in turn, a stop
+  `event-unclosed` with `precut_e<k>`) cover it.
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the
