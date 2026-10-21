@@ -20,6 +20,13 @@ boundary, on ``FaradayProblem``.
   removal: the filled volume misread, momentum added between the transfer and the fill, the impulse
   the box's balance reads shifted, a flow that is not solenoidal), each a stop ``event-unclosed``
   with the state before the event kept.
+* F4, the liquid cut of the open chain in the ring stage (``surgery.liquid_cut``): on the pierced
+  state with the cavity's tip necked (``ring_fem_state.head_chains``), the driver makes the ring
+  cut and then the cut of the landed neck at the cavity's tip through the ring stage's own rebuild:
+  the ring kept (its loop, nodes and volume, ``ring.loop_kept``), the transfer as predicted from the
+  old chain and the ring, the box's polylines holding the ring's gas, F1-F6 closed, steps after;
+  and after the ring's removal the same cut with no loop, its momentum budget floored at what a
+  projection after an ordinary rebuild of that state changes in the box.
 
 Each problem compiles in seconds; the module takes a few minutes.
 """
@@ -246,6 +253,44 @@ def test_the_ring_is_removed_and_the_run_steps_on(ringed):
     assert ringed["t_end"] > 0.0
 
 
+def test_a_rebuild_of_the_ring_stage_transfers_by_projection_with_or_without_a_loop(monkeypatch):
+    """The chart's hook before the transfer (``RingTolerantArclength.
+    _before_mesh_to_mesh_interpolation``, pyoomph's own stood in for): without a loop and without a
+    rebuild of the ring stage under way it leaves the transfer as pyoomph sets it; a loop on either
+    mesh turns the transfer through the chart off; so does a rebuild of the ring stage under way
+    (``FaradayProblem._ring_transfer``) without a loop, a liquid cut after the ring's removal, with
+    the axis located in the old bulk and its corner's reach set."""
+    from types import SimpleNamespace
+
+    from pyoomph.meshes.zeta import AssignZetaCoordinatesByArclength
+
+    seen = {"loop": False}
+
+    def stock(self, eqtree, interpolator):
+        self._loop_seen = seen["loop"]  # as the charts of both meshes set it
+        return "stock"
+
+    monkeypatch.setattr(AssignZetaCoordinatesByArclength, "_before_mesh_to_mesh_interpolation",
+                        stock)
+    chart = RingTolerantArclength(sort_along_axis="x+")
+    cut = {"axis_bulk": True, "reach": 0.02}
+    for loop, transfer, zeta in ((False, None, True), (True, None, False), (False, cut, False),
+                                 (True, cut, False)):
+        seen["loop"] = loop
+        problem = SimpleNamespace(_ring_transfer=transfer)
+        monkeypatch.setattr(chart, "get_problem", lambda problem=problem: problem)
+        interp = SimpleNamespace(try_to_use_zeta_on_boundary=True, bulk_locate_boundaries=set(),
+                                 boundary_max_distances={})
+        assert chart._before_mesh_to_mesh_interpolation(None, interp) == "stock"
+        assert interp.try_to_use_zeta_on_boundary is zeta, (loop, transfer)
+        if transfer is None:
+            assert interp.bulk_locate_boundaries == set() and interp.boundary_max_distances == {}
+        else:
+            assert interp.bulk_locate_boundaries == {"axis"}
+            assert interp.boundary_max_distances == {"interface/axis": 0.02,
+                                                     "axis/interface": 0.02}
+
+
 def test_restore_ring_needs_its_sizing():
     from types import SimpleNamespace
 
@@ -292,10 +337,10 @@ def request(pb, events):
                              S.RECON, pb.cut["sizing"]["h_tip"], events=events)
 
 
-def reload(pb, state: Path, record: dict):
+def reload(pb, state: Path, record: dict, focus=S.focus):
     pb.load_state(str(state))
     surgery.restore_cut(pb, record)
-    pb.active_mesh_template().focus = S.focus()
+    pb.active_mesh_template().focus = focus()
     pb.events, pb.ring = [], None
     pb.invalidate_cached_mesh_data()
 
@@ -762,3 +807,237 @@ def test_a_violated_hard_closure_stops_the_run_event_unclosed_with_the_state_bef
     assert precut.is_file() and precut.name == f"precut_e{int(stop['k']):03d}.dump"
     assert rec["dumps"]["precut"] == stop["precut"]
     assert "postcut" not in rec["dumps"]
+
+
+# --- F4 (C4): the liquid cut of the cavity's tip in the ring stage --------------------------------
+
+
+def head_block(ring_noise: dict, **liquid) -> ev.EventSettings:
+    """The block of F4: liquid events, tracked from half a neck's depth (the open chain's neck,
+    0.8 deep, and not the thread of the bubble's downward jet, 0.4 deep and coarse in its middle,
+    which the ring cut makes the ring's), and the ring with its noise floors."""
+    return ev.EventSettings.from_dict({
+        "liquid": {"enabled": True, "track_depth": 0.5, **liquid},
+        "post": {"open_neck_stop": False, "neck_floor": 1e-5},
+        "ring": {"enabled": True, "sigma_V": ring_noise["V"], "sigma_Pz": ring_noise["Pz"],
+                 "sigma_KE": ring_noise["KE"]}})
+
+
+def _open_neck_box(pb, liquid: ev.LiquidEventSettings) -> tuple[float, float]:
+    """The box of the liquid cut of the open chain's tracked neck on the current state: its height
+    and radius, ``max(liquid.box_radius delta, 2 L_rem)``, as ``surgery.liquid_cut`` takes them."""
+    named = surgery._named_chains(pb)[0]
+    x = next(n for n in ev.liquid_necks(named, liquid) if n["chain"] == "open")
+    lc = ev.truncate_chain(named, x, eta=liquid.cap_height, elements_per_scale=8.0,
+                           min_angle=S.RECON.min_cap_angle,
+                           reservoir_depth=S.RECON.reservoir_depth)
+    return lc.z_n, max(liquid.box_radius * S.DELTA, 2.0 * lc.L_rem)
+
+
+@pytest.fixture(scope="module")
+def headed(tmp_path_factory):
+    """F4: the pierced state with the cavity's tip necked, the floors of the ring's closures from
+    the rebuild noise of the ring cut's box, run by the driver for three steps: the piercing at the
+    loop's top, the ring cut, the landed neck at the cavity's tip in the ring stage and its cut,
+    then the steps; the box's polylines at the state before that cut with the ring and without.
+    Then the ring removed first: from that state, the bubble's volume at the gas cut taken four
+    times as large (the ring below ``bubble_stop`` of it) with ``ring.after_removal`` ``continue``
+    and the neck not landed (``liquid.eps_d`` 0.15), the removal and a step; on the state it ends on
+    the noise of the liquid cut's box in ordinary rebuilds and the box's momentum a projection
+    after an ordinary rebuild changes (``control``); from it, with ``eps_d`` 0.2 and those floors
+    (``sigma_Pz`` the larger of the two), the cut with no loop and three steps."""
+    from dataclasses import replace
+
+    out = tmp_path_factory.mktemp("headed")
+    res = {"out": out}
+    with S.pierce_head_problem(out / "pb") as pb:
+        pb.initialise()
+        record = S.gas_cut_record(pb)
+        S.impose(pb, z_neck=S.head_chains()[2])
+        initial = Path(surgery._keep(pb, None, out, "initial", {})["path"])
+        named = dict(surgery._named_chains(pb)[0])
+        g = ring.ring_cut_geometry(named["bubble"], named["open"], ev.RingEventSettings(),
+                                   elements_per_scale=8.0, min_angle=30.0, reservoir_depth=3.0,
+                                   V_b=record["geometry"]["bubble_volume"], bubble_stop=0.01)
+        noise = S.rebuild_noise(pb, g.z_mid, max(4.0 * S.DELTA, 2.0 * g.L_fill))
+        res["noise"] = noise
+        reload(pb, initial, record, focus=S.head_focus)
+        events = head_block(noise)
+        res["events_block"] = events
+        res["request"] = request(pb, events)
+        res["necks"] = ev.liquid_necks(surgery._named_chains(pb)[0], events.liquid)
+        run = out / "run"
+        driver = CollapseDriver(pb, CollapseSettings(**DRIVER, max_steps=3), run,
+                                reconnect=S.RECON, events=events)
+        driver.reset_after_cut(pb.cut)
+        res["result"] = driver.run(1e-8)
+        driver.close()
+        res["events"] = [dict(x) for x in pb.events]
+        res["loops"] = pb.interface_loops()
+        res["segs"] = pb.interface_segments()
+        res["spans"] = surgery._axis_spans_of_mesh(pb)
+        res["run"] = run
+        # the box of the liquid cut on the state before it, its polylines with the ring and without
+        pre = run / "states" / "precut_e002.dump"
+        pb.load_state(str(pre))
+        cav = dict(surgery._named_chains(pb)[0])["open"]
+        L = np.column_stack([pb.interface_loops()[0]["r"], pb.interface_loops()[0]["z"]])
+        box = res["events"][1]["budgets"]["box"]
+        res["poly_with"], res["poly_without"] = (
+            surgery.box_polyline_budgets(chains, box["z"], box["R"], S.RECON.reservoir_depth)
+            for chains in ([cav, rc.Chain(ring.closed(L), ("loop", "loop"))], [cav]))
+    # the ring removed first, then the cut with no loop
+    meta = json.loads(pre.with_suffix(".json").read_text())
+    meta["cut"]["geometry"]["bubble_volume"] *= 4.0
+    meta["ring"]["V_b"] *= 4.0
+    block = json.loads(json.dumps(meta["events_settings"]))
+    block["ring"]["after_removal"] = "continue"
+    block["liquid"]["eps_d"] = 0.15
+    with S.pierce_head_problem(out / "pb-removed") as pb:
+        pb.initialise()
+        pb.load_state(str(pre))
+        drv = CollapseDriver(pb, CollapseSettings(**DRIVER, max_steps=meta["step"] + 1),
+                             out / "removed", reconnect=S.RECON,
+                             events=ev.EventSettings.from_dict(block))
+        drv.restore(json.loads(json.dumps(meta)))
+        res["removed_first"] = drv.run(1e-8)
+        drv.close()
+        res["removed_first_events"] = [dict(x) for x in pb.events]
+        end = Path(res["removed_first"]["stop"]["end_state"])
+        end = end if end.is_absolute() else out / end
+        ma = json.loads(end.with_suffix(".json").read_text())
+        liquid = ev.EventSettings.from_dict(ma["events_settings"]).liquid
+        z, R = _open_neck_box(pb, liquid)
+        res["removed_noise"] = S.rebuild_noise(pb, z, R)
+        pb.load_state(str(end))
+        surgery.restore_cut(pb, ma["cut"])
+        ringsurgery.restore_ring(pb, ma["ring"])
+        pb.active_mesh_template().focus = S.head_focus()
+        pb.force_remesh({pb.active_mesh_template()})
+        pb._domains_to_remesh.clear()
+        pb.invalidate_cached_mesh_data()
+        projected = {}
+        surgery.project(pb, replace(S.RECON, dt0=1e-5),
+                        pb.get_current_time(dimensional=False, as_float=True), projected,
+                        box=(z, R))
+        res["control"] = abs(projected["box"]["delta_Pz"])
+        blk = json.loads(json.dumps(ma["events_settings"]))
+        n = res["removed_noise"]
+        blk["liquid"].update(eps_d=0.2, sigma_V=n["V"], sigma_Pz=max(n["Pz"], res["control"]),
+                             sigma_KE=n["KE"])
+        pb.load_state(str(end))
+        drv = CollapseDriver(pb, CollapseSettings(**DRIVER, max_steps=ma["step"] + 3),
+                             out / "removed-cut", reconnect=S.RECON,
+                             events=ev.EventSettings.from_dict(blk))
+        drv.restore(ma)
+        res["removed_cut"] = drv.run(1e-8)
+        drv.close()
+        res["removed_cut_start"] = ma["step"]
+        res["removed_events"] = [dict(x) for x in pb.events]
+        res["removed_loops"] = pb.interface_loops()
+        res["removed_segs"] = pb.interface_segments()
+    return res
+
+
+def test_the_cavity_tips_drop_is_cut_in_the_ring_stage_with_the_ring_kept(headed):
+    """F4: the piercing is met first and the ring cut made; on its fresh mesh the landed neck at
+    the cavity's tip is cut as before the ring, through the ring stage's own rebuild (no plan): the
+    cap clear of the ring, the ring kept (one loop, its nodes within a tenth, its volume within
+    the noise floors and the drift of the rebuild, its quadratic surface's far less), the
+    transfer leaving unlocated exactly the cap nodes the old chain and the ring predict and only the
+    stump's tip without a value, the chains and the axis span planned, the box's polylines holding
+    the ring's gas, F1-F6 closed at zero floors, the ghost with no far tip; three steps after it on
+    the open chain and the ring, the rows and dumps of the stage."""
+    req = headed["request"]
+    assert (req["kind"], req["class"], req["handler"]) == ("piercing", "W1", "ring")
+    tracked = headed["necks"]
+    assert [(x["chain"], x["status"], x["landed"]) for x in tracked] == [("open", "head", True)]
+    result = headed["result"]
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 3, json.dumps(
+        result["stop"], default=float)
+    assert result["events"]["made"] == 2 and result["events"]["ring"]["cut"] == 1
+    cut, drop = headed["events"]
+    assert (cut["kind"], cut["class"], cut["outcome"]) == ("piercing", "W1", "made")
+    assert (drop["kind"], drop["class"], drop["outcome"], drop["stage"]) == (
+        "liquid-neck", "L", "made", "ring")
+    assert (drop["chain"], drop["tip"], drop["k"]) == ("open", "cavity_tip", 2)
+    assert drop["plan"] == {"mode": "ring-stage geometry", "loops": 1}
+    assert not drop["cap"]["retried"]
+    clear = drop["cap"]["attempts"][-1]["checks"]["ring"]
+    assert clear["failed"] == [] and clear["gap"] > 0.0 and clear["overlap"] == 0.0
+    loop = drop["loop"]
+    assert loop["problems"] == [] and loop["loops_before"] == loop["loops_after"] == 1
+    assert abs(loop["nodes_after"] - loop["nodes_before"]) <= 0.1 * loop["nodes_before"]
+    assert loop["sigma_V"] == headed["noise"]["V"]
+    assert loop["limit"] == pytest.approx(5.0 * loop["sigma_V"] + loop["drift"])
+    assert abs(loop["dV"]) <= loop["limit"] and abs(loop["dV_p2"]) < 0.1 * loop["drift"]
+    tr = drop["transfer"]
+    assert tr["reported_unlocated"] == tr["predicted_unlocated"] > 0
+    assert tr["predicted_off_cap"] == 0 and tr["cap_nodes"] > tr["predicted_unlocated"]
+    assert set(tr["unlocated"]) == {surgery.INTERFACE}
+    corner = surgery.INTERFACE + "/axis"
+    assert list(tr["no_value"]) == [corner] and tr["no_value"][corner][0] == 1
+    mesh = drop["mesh"]
+    assert mesh["chains"] == [{"chain": "open", "nodes": mesh["chains"][0]["nodes"],
+                               "end_types": ["axis", "fixed"]}]
+    assert np.ravel(mesh["axis_spans"]) == pytest.approx(np.ravel(mesh["expected_axis_spans"]),
+                                                         abs=1e-12)
+    assert mesh["expected_axis_spans"] == [[0.0, drop["cap"]["z_tip_new"]]]
+    # the box reaches the ring, whose gas its polylines hold
+    before = drop["budgets"]["polylines"]["before"]
+    assert before["V_gas"] == pytest.approx(headed["poly_with"]["V_gas"], rel=1e-12)
+    assert headed["poly_with"]["V_gas"] > headed["poly_without"]["V_gas"]
+    c = drop["closures"]
+    assert c["flags"] == [] and c["hard"] == []
+    assert c["sigma"] == {"V": 0.0, "Pz": 0.0, "KE": 0.0}
+    assert c["relative"]["F1"] < 2e-3 and c["relative"]["F2"] < 1e-2
+    assert c["relative"]["F3"] < 2e-3 and c["relative"]["F4"] < 1e-3
+    assert c["relative"]["F5"] < 2e-3 and c["relative"]["F6"] < 1e-2
+    assert abs(c["F3_phi"]["phi_relative_error"]) < 1e-2
+    g = drop["ghost"]
+    assert (g["tip"], g["far_tip"], g["status"]) == ("cavity_tip", None, "free")
+    # the stage after it: the open chain cut, the ring kept, steps
+    assert len(headed["segs"]) == 1 and headed["segs"][0]["open"]
+    assert len(headed["loops"]) == 1 and len(headed["spans"]) == 1
+    assert headed["spans"][0][0] == 0.0
+    run = headed["run"]
+    rows = (run / "events.txt").read_text().splitlines()
+    head = rows[0][2:].split("\t")
+    assert len(rows) == 3
+    assert [r.split("\t")[head.index("chain")] for r in rows[1:]] == ["ring", "open"]
+    assert rows[2].split("\t")[head.index("kind")] == "liquid-neck"
+    meta = json.loads((run / "states" / "postcut_e002.json").read_text())
+    assert meta["ring"]["k_cut"] == 1 and [e["k"] for e in meta["events"]] == [1, 2]
+    assert meta["cut_stage"] == "postcut-event" and "resume_at" not in meta
+    file = json.loads((run / "events" / "event_002.json").read_text())
+    assert file["stage"] == "ring" and len(file["ghost"]["polygon"]) > 10
+    assert len(np.loadtxt(run / "ring.txt", ndmin=2)) >= 3
+
+
+def test_after_the_rings_removal_the_cavity_tips_drop_is_cut_with_no_loop(headed):
+    """F4 after the ring's removal (``continue``): the ring removed first, then the landed neck
+    at the cavity's tip cut through the ring stage's build with no loop and the transfer by
+    projection (``FaradayProblem._ring_transfer`` with no loop on either mesh): nothing to keep, the
+    transfer as predicted, the hard closures within their limits, the box's momentum the projection
+    changes within five times what a projection after an ordinary rebuild of the state changes,
+    three steps after it on the open chain alone."""
+    first = headed["removed_first"]
+    assert first["stop"]["reason"] == "max-steps", json.dumps(first["stop"], default=float)
+    assert [(e["kind"], e["outcome"]) for e in headed["removed_first_events"]] == [
+        ("piercing", "made"), ("ring-collapse", "made")]
+    result = headed["removed_cut"]
+    assert result["stop"]["reason"] == "max-steps", json.dumps(result["stop"], default=float)
+    assert result["steps"] == headed["removed_cut_start"] + 3
+    drop = headed["removed_events"][-1]
+    assert (drop["kind"], drop["class"], drop["outcome"], drop["stage"], drop["k"]) == (
+        "liquid-neck", "L", "made", "ring", 3)
+    assert drop["plan"] == {"mode": "ring-stage geometry", "loops": 0}
+    assert drop["loop"]["problems"] == [] and drop["loop"]["loops_before"] == 0
+    assert drop["loop"]["loops_after"] == 0
+    tr = drop["transfer"]
+    assert abs(tr["reported_unlocated"] - tr["predicted_unlocated"]) <= surgery.UNLOCATED_SLACK
+    assert tr["predicted_off_cap"] == 0 and tr["cap_nodes"] > 0
+    assert set(tr["unlocated"]) <= {surgery.INTERFACE}
+    c = drop["closures"]
+    assert c["hard"] == [] and c["F3"] <= 5.0 * headed["control"]
+    assert headed["removed_loops"] == [] and len(headed["removed_segs"]) == 1

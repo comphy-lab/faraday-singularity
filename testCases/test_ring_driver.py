@@ -350,3 +350,44 @@ def test_without_the_ring_the_piercing_stays_an_event_without_a_handler(tmp_path
     out = _events_driver(tmp_path, PiercedProblem(), recon, events=ev.EventSettings()).run(1e-9)
     assert out["stop"]["reason"] == ev.EVENT_UNHANDLED and out["stop"]["handler"] == "ring"
     assert calls == []
+
+
+def test_in_the_ring_stage_a_landed_liquid_neck_goes_to_the_liquid_cut(tmp_path, monkeypatch):
+    """In the ring stage the driver makes the liquid cut of a landed neck of the open chain
+    (``surgery.liquid_cut``, stood in for here by a refusal) as before the ring, not the resumable
+    stop without a handler of the first delivery: the request reaches the cut with the run's last
+    step and the elements per scale, and its refusal is the cut's own resumable stop
+    (``liquid-cut-refused``, with the state before it)."""
+    from faraday_singularity import surgery
+
+    calls = []
+
+    def liquid_cut(pb, events, reconnect, outdir, request, *, k, dt_prev, elements_per_scale,
+                   h_floor, driver=None, on_made=None, log=print):
+        calls.append((request["kind"], request["class"], k, pb.ring is not None))
+        precut = str(driver.keep_state(Path(outdir) / "states" / f"precut_e{k:03d}.dump",
+                                       cut_stage=ev.PRECUT_EVENT, event=dict(request, k=k)))
+        err = surgery.CutRefused("refused for the test")
+        err.precut, err.record = precut, {"outcome": "refused", "failed_at": "caps",
+                                          "error": "refused for the test"}
+        raise err
+
+    monkeypatch.setattr(surgery, "liquid_cut", liquid_cut)
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    pb = RingProblem()
+    block = ev.EventSettings.from_dict({"liquid": {"enabled": True}, "ring": {"enabled": True},
+                                        "post": {"open_neck_stop": False, "neck_floor": 1e-6}})
+    run = tmp_path / "run"
+    drv = _events_driver(run, pb, recon, events=block, state_dt=0.0, state_keep=10)
+    made_ring_cut(drv, pb, k=1)
+    request = {"reason": ev.EVENT_REQUEST, "kind": "liquid-neck", "class": "L",
+               "handler": ev.HANDLERS["L"], "chain": "open", "index": 3, "r_n": 1e-5,
+               "z_n": 4.7, "s": 1e-4, "side": "before", "direction": 1.0, "status": "head",
+               "head_volume": 3e-12}
+    orig = drv._post_cut_stop
+    drv._post_cut_stop = lambda: dict(request) if pb.ring is not None else orig()
+    out = drv.run(1e-9)
+    drv.close()
+    assert calls == [("liquid-neck", "L", 2, True)]
+    assert out["stop"]["reason"] == ev.LIQUID_CUT_REFUSED and out["stop"].get("stage") is None
+    assert Path(out["stop"]["precut"]).name == "precut_e002.dump" and out["steps"] == 0

@@ -2559,13 +2559,12 @@ class CollapseDriver:
            state after the event is kept) and its row of ``events.txt``.
 
         With the block's ``ring.enabled`` the ring's handlers (``events.RING_HANDLERS``) are made
-        too (:meth:`_meet_ring`); in the ring stage a liquid cut is not made yet (its rebuild would
-        go through pyoomph's parked plan, whose open chart cannot carry the ring's loop): a
-        resumable stop, its request marked ``stage`` ``ring``."""
+        too (:meth:`_meet_ring`). In the ring stage the liquid cut of the open chain is made as
+        before, through the ring stage's own rebuild and transfer by projection, which keep the
+        ring (``surgery.liquid_cut``; its record ``stage`` ``ring``), not through pyoomph's parked
+        plan, whose open chart cannot carry the ring's loop."""
         if request.get("handler") in RING_HANDLERS and self.events.ring.enabled:
             return self._meet_ring(m, request)
-        if self._ring() is not None and request.get("handler") == "liquid-cut":
-            return m, self._unhandled_event({**request, "stage": "ring"})
         if request.get("handler") not in IMPLEMENTED_HANDLERS:
             return m, self._unhandled_event(request)
         if len(self._made_events()) >= self.events.max_events:

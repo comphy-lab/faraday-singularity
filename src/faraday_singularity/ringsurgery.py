@@ -61,7 +61,10 @@ _define_ring_geometry``). pyoomph rebuilds a loaded mesh from a sibling of the p
 which in a new process holds neither, so a restart in the ring stage puts them back
 (:func:`restore_ring`, called by ``driver.CollapseDriver.restore`` after the cut's own
 ``surgery.restore_cut``); the chart of the loaded interface needs nothing, the problem's arclength
-chart charting a loop whatever the template.
+chart charting a loop whatever the template. A liquid cut of the open chain in the stage
+(``surgery.liquid_cut``) is rebuilt the same way, never through pyoomph's parked plan: the
+template's planned geometry is the cut chain and the ring as it is, the interface is transferred by
+projection, and the ring must come through the rebuild kept (``ring.loop_kept``).
 
 Once the ring's volume falls below ``reconnect.bubble_stop`` of the bubble's at the gas cut (the
 request ``ring-collapse``, class ``W2``, ``ring.ring_stage_events``), :func:`ring_removal` removes

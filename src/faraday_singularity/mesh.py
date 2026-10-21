@@ -180,8 +180,9 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
         self.point_snap_tolerance = 0.0  # no merging of nearby points unless a cut needs it
         # the ring stage, once the ring of a pierced bubble is cut (ringsurgery.ring_cut): every
         # rebuild meshes the ring as a hole of the liquid (_define_ring_geometry) at its frozen
-        # sizing; the geometry a ring surgery plans for the next build (chains and loops, consumed
-        # by it; no loop removes the ring). Inert until set: before the ring nothing reads them
+        # sizing; the geometry a ring surgery, or a liquid cut in the ring stage, plans for the
+        # next build (chains and loops, consumed by it; no loop removes the ring, or keeps it
+        # removed). Inert until set: before the ring nothing reads them
         self.ring_stage = False
         self.ring_sizing: RingSizing | None = None
         self.pending_ring_geometry: dict | None = None
@@ -359,7 +360,8 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
 
     def _ring_stage_curves(self) -> tuple[list[Chain], list[np.ndarray]]:
         """The chains and the loops a ring-stage build is made of: the planned geometry of a ring
-        surgery (``pending_ring_geometry``, consumed), or the current interface nodes, split into
+        surgery or of a liquid cut in the ring stage (``pending_ring_geometry``, consumed: the cut
+        chain and the ring as it is), or the current interface nodes, split into
         the chains (``reconnect.orient_chain``) and the closed loops (a segment whose first point
         is its last, within 1e-12, or that ends on neither the axis nor the wall), each loop
         checked to be ordered (``ring.validate_loop_order``) and counter-clockwise."""

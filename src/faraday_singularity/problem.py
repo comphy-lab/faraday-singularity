@@ -87,11 +87,13 @@ class RingTolerantArclength(AssignZetaCoordinatesByArclength):
     is never used for a transfer: its seam element runs backwards over the loop's range, so every
     rebuild with a loop on either mesh places the interface nodes by projection onto the old
     interface instead (``try_to_use_zeta_on_boundary`` off, set in the hook before the transfer,
-    :meth:`_before_mesh_to_mesh_interpolation`), and while a ring surgery is under way
-    (``FaradayProblem._ring_transfer``) the axis nodes are located in the old bulk, as pyoomph's
-    reconnection does for its axis. Without a loop and without a ring surgery it is pyoomph's own
-    chart, call for call: the class only names the equation differently in the problem's
-    generated-code tree, and the generated code is the same."""
+    :meth:`_before_mesh_to_mesh_interpolation`), and while a rebuild of the ring stage that changes
+    a topology is under way (``FaradayProblem._ring_transfer``: a ring surgery, or a liquid cut of
+    the open chain in the ring stage, ``surgery.liquid_cut``, with the ring or after its removal)
+    the interface is placed by that projection too and the axis nodes are located in the old bulk,
+    as pyoomph's reconnection does for its axis. Without a loop and without such a rebuild it is
+    pyoomph's own chart, call for call: the class only names the equation differently in the
+    problem's generated-code tree, and the generated code is the same."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -140,13 +142,16 @@ class RingTolerantArclength(AssignZetaCoordinatesByArclength):
     def _before_mesh_to_mesh_interpolation(self, eqtree, interpolator):
         self._loop_seen = False
         out = super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
-        if self._loop_seen:  # a loop on the old mesh or the new one: no transfer through the chart
-            interpolator.try_to_use_zeta_on_boundary = False
         try:
             problem = self.get_problem()
         except RuntimeError:  # an equation not bound to a problem
             problem = None
         transfer = getattr(problem, "_ring_transfer", None) if problem is not None else None
+        # a loop on the old mesh or the new one, or a rebuild of the ring stage under way that
+        # changes the topology of the open chain (a liquid cut there, a loop or none): no transfer
+        # through the chart, whose ranges no plan has matched across the change
+        if self._loop_seen or transfer:
+            interpolator.try_to_use_zeta_on_boundary = False
         if transfer:
             if transfer.get("axis_bulk"):
                 interpolator.bulk_locate_boundaries.add("axis")
@@ -178,7 +183,8 @@ class FaradayProblem(Problem):
         self.events: list[dict] = []
         # the ring of a pierced bubble, once its cut is made (ringsurgery.ring_cut, its record of
         # the stage, dumped with every state of it), and the transfer settings of the rebuild of a
-        # ring surgery while it is under way (RingTolerantArclength); None before the ring
+        # ring surgery, or of a liquid cut in the ring stage, while it is under way
+        # (RingTolerantArclength); None before the ring
         self.ring: dict | None = None
         self._ring_transfer: dict | None = None
         self._projecting = False  # set while the projection's auxiliary solve runs

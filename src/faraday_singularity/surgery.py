@@ -1069,6 +1069,22 @@ def _named_chains(problem) -> tuple[tuple, dict]:
     return tuple(sorted(named, key=lambda x: x[0])), segs
 
 
+def _clear_of_ring(lc, loops) -> None:
+    """Check (v) of ``events.truncate_chain`` against the ring, for a liquid cut in the ring stage
+    (``ring.cap_ring_clearance``: the stump apart from the ring, the cap outside its gas, the
+    removed head sharing no area with it), its reading added to the cap's checks (``ring``);
+    raises ``events.CapRefused`` with ``ring`` among the failed checks where one does not hold."""
+    from .events import CapRefused
+    from .ring import cap_ring_clearance
+
+    got = cap_ring_clearance(lc.points, lc.cap, lc.removed, lc.r_n, loops)
+    lc.checks["ring"] = got
+    if got["failed"]:
+        raise CapRefused(f"the cap of the liquid cut is not clear of the ring: "
+                         f"{', '.join(got['failed'])}",
+                         {**lc.checks, "failed": list(lc.checks.get("failed") or []) + ["ring"]})
+
+
 def _cap_polyline(lc) -> tuple[np.ndarray, np.ndarray]:
     """The planned cap from the neck to its tip on the axis, and the arclength along it."""
     Q = np.vstack([[lc.r_n, lc.z_n], lc.cap])
@@ -1266,6 +1282,24 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
        ``r_j_over_r_n``, ``neck_to_base_over_r_j``) before ``postcut_e<k>`` is kept and the file
        written.
 
+    In the ring stage (``problem.ring``, after the ring cut of a pierced bubble,
+    ``ringsurgery.ring_cut``; inert before it) the cut is the same but for its rebuild, since
+    pyoomph's parked plan, whose chart is open on the whole free surface, cannot carry the ring's
+    loop: the chains are the open chain alone (the ring set aside, ``FaradayProblem.
+    interface_segments``), the cap must also clear the ring (check (v) against it,
+    :func:`_clear_of_ring`; refused as any cap), no plan is built (``plan`` ``mode`` ``ring-stage
+    geometry``), and the mesh is rebuilt by the ring stage's own build from the cut chain and the
+    ring as it is (``mesh.FaradayCylinderMesh.pending_ring_geometry``), the interface transferred by
+    projection onto the old one, the ring included (``problem.RingTolerantArclength``, with
+    ``FaradayProblem._ring_transfer``), and the axis located in the old bulk with its corner within
+    ``2 r_n`` of an old one, as pyoomph's plan locates it. Besides the checks above, the ring must
+    be kept (``ring.loop_kept``, ``loop`` in the record, a failure otherwise): one loop as before
+    (none once the ring is removed), its nodes within ``ring.LOOP_NODE_SLACK`` of their count before
+    and its volume within ``ring.LOOP_NOISE_FLOORS`` of the ring's noise floor ``ring.sigma_V``
+    besides the drift of the rebuild; the nodes predicted unlocated are those of the old chains and
+    the ring; the polylines of the box's budgets hold the ring's gas where the box reaches it. The
+    record has ``stage`` ``ring``.
+
     The record (schema ``faraday-event/2``: ``trigger``, ``cap`` with its ``fill``, ``removed``,
     ``transfer``, ``projection``, ``budgets``, ``closures`` with ``F3_phi``, ``ghost``, of which
     only the file holds the ``polygon``, the region removed at its start, and ``removed_total``) is
@@ -1317,6 +1351,7 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     from .events import (CAP_RETRY_HEIGHT, EVENT_CLASSES, PRECUT_EVENT, CapRefused,
                          build_liquid_plan, event_focus_regions, event_neck, liquid_necks,
                          predict_unlocated, truncate_chain)
+    from .ring import closed, loop_kept
 
     def stage(name):
         progress["stage"] = name
@@ -1347,6 +1382,16 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
                   dt={"history": dt_prev})
     if neck is None or neck["status"] != "head":
         raise CutRefused(f"the request names no tracked neck with a single head: {wanted}")
+    # the ring stage (ringsurgery.ring_cut): the ring's loop, kept through the cut's own rebuild
+    ring_stage = getattr(pb, "ring", None) is not None
+    loops = []
+    if ring_stage:
+        record["stage"] = "ring"
+        loops = [np.column_stack([x["r"], x["z"]]) for x in pb.interface_loops()]
+        removed_ring = pb.ring.get("removed") is not None
+        if len(loops) != (0 if removed_ring else 1):
+            raise CutRefused(f"the ring stage holds {len(loops)} loops of the free surface, not "
+                             f"{0 if removed_ring else 1}")
     seg = segs[neck["chain"]]
     u_r = float(seg["u_r"][neck["index"]])
     Oh = float(getattr(pb.nd, "Oh", math.nan))
@@ -1375,8 +1420,11 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     heights = (ls.cap_height,) + ((CAP_RETRY_HEIGHT,) if ls.cap_height != CAP_RETRY_HEIGHT else ())
     for eta in heights:
         try:
-            lc = truncate_chain(named, neck, eta=eta, elements_per_scale=elements_per_scale,
-                                min_angle=s.min_cap_angle, reservoir_depth=s.reservoir_depth)
+            got = truncate_chain(named, neck, eta=eta, elements_per_scale=elements_per_scale,
+                                 min_angle=s.min_cap_angle, reservoir_depth=s.reservoir_depth)
+            if ring_stage:
+                _clear_of_ring(got, loops)
+            lc = got
             attempts.append({"eta": eta, "outcome": "ok", "checks": lc.checks})
             break
         except CapRefused as e:
@@ -1391,12 +1439,16 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     record["tip"] = lc.tip
 
     stage("plan")
-    lp = build_liquid_plan(named, lc, s.reservoir_depth)
-    record["plan"] = {"cap_zeta": list(lp.cap_zeta), "table_rows": int(len(lp.table)),
-                      "new_chains": [{"points": len(nc.points), "zeta": [float(nc.zeta[0]),
-                                                                         float(nc.zeta[-1])],
-                                      "cap_points": int(np.sum(np.asarray(nc.origin) < 0))}
-                                     for nc in lp.plan.new_chains]}
+    if ring_stage:  # no plan: the ring stage's own rebuild, whose chart is no plan's
+        lp = None
+        record["plan"] = {"mode": "ring-stage geometry", "loops": len(loops)}
+    else:
+        lp = build_liquid_plan(named, lc, s.reservoir_depth)
+        record["plan"] = {"cap_zeta": list(lp.cap_zeta), "table_rows": int(len(lp.table)),
+                          "new_chains": [{"points": len(nc.points),
+                                          "zeta": [float(nc.zeta[0]), float(nc.zeta[-1])],
+                                          "cap_points": int(np.sum(np.asarray(nc.origin) < 0))}
+                                         for nc in lp.plan.new_chains]}
 
     stage("budgets")
     R_b = max(ls.box_radius * delta, 2.0 * lc.L_rem)
@@ -1404,7 +1456,10 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     global_before = pb.cut_observables()
     box_before = box_integrals(pb, grid, {"removed": lc.removed})
     box20_before = box_integrals(pb, grid20)
-    poly_before = box_polyline_budgets([c for _, c in named], lc.z_n, R_b, s.reservoir_depth)
+    # in the ring stage the ring's gas too, where the box reaches it
+    rings_before = [Chain(closed(L), ("loop", "loop")) for L in loops]
+    poly_before = box_polyline_budgets([c for _, c in named] + rings_before, lc.z_n, R_b,
+                                       s.reservoir_depth)
     q = box_before.pop("removed")
     removed = {"V": lc.V_rem, "V_grid": q["V_grid"], "Pz": q["Pz"], "KE": q["KE"],
                "area": lc.A_rem, "cap_area": lc.A_cap, "length": lc.L_rem,
@@ -1440,20 +1495,36 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
                                     "elements_per_scale": elements_per_scale},
                       "renamed": renamed}
     old_chains = [np.column_stack([segs[name]["r"], segs[name]["z"]]) for name, _ in named]
+    old_chains += [closed(L) for L in loops]  # the ring's loop, an old surface of the transfer
     stage("park")
     remeshing = False
     try:
         template.focus = Focus(size=min(g.size for g in regions),
                                radius=max(g.radius for g in regions), grading=grading,
                                regions=regions)
-        park_plan(pb, lp.plan, lp.table, rmin=lc.r_n)
+        if ring_stage:
+            # the ring stage's own build (mesh.FaradayCylinderMesh._define_ring_geometry) of the
+            # cut chain and the ring as they are, the transfer by projection onto the old
+            # interface (problem.RingTolerantArclength) and the axis located in the old bulk, as
+            # pyoomph's plan locates it, its corner within 2 r_n of an old one
+            template.pending_ring_geometry = {
+                "chains": [Chain(np.asarray(lc.points, dtype=float).copy(),
+                                 tuple(dict(named)[lc.chain].end_types))],
+                "loops": [L.copy() for L in loops]}
+            pb._ring_transfer = {"axis_bulk": True, "reach": 2.0 * lc.r_n}
+        else:
+            park_plan(pb, lp.plan, lp.table, rmin=lc.r_n)
         stage("remesh")
         remeshing = True
         with captured_stdout() as printed:
             pb.force_remesh({template})
         pb._domains_to_remesh.clear()
     except BaseException as e:
-        clear_plan(pb)
+        if ring_stage:
+            template.pending_ring_geometry = None
+            pb._domains_to_remesh.clear()
+        else:
+            clear_plan(pb)
         if not remeshing:  # nothing has changed but the focus and the plan: put them back
             template.focus = old_focus
         if not isinstance(e, Exception):  # an interruption is no outcome of the cut
@@ -1462,6 +1533,10 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
             raise CutRefused(f"the plan could not be parked ({type(e).__name__}: {e})") from e
         raise CutFailed(f"the remesh of the liquid cut failed ({type(e).__name__}: {e})",
                         record["dumps"]["precut"]) from e
+    finally:
+        if ring_stage:
+            pb._ring_transfer = None
+            template.pending_ring_geometry = None
 
     stage("mesh-check")
     transfer = transfer_warnings("".join(printed))
@@ -1480,6 +1555,14 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     if len(spans) != len(expected) or any(abs(a - b) > 1e-9 * max(1.0, pb.nd.radius)
                                           for x, y in zip(spans, expected) for a, b in zip(x, y)):
         raise CutFailed(f"the liquid cut's mesh has the axis spans {spans}, expected {expected}")
+    new_loops = []
+    if ring_stage:  # the ring kept: its loop, its nodes and its volume (ring.loop_kept)
+        new_loops = [np.column_stack([x["r"], x["z"]]) for x in pb.interface_loops()]
+        kept = loop_kept(loops, new_loops, sigma_V=events.ring.sigma_V)
+        record["loop"] = kept
+        if kept["problems"]:
+            raise CutFailed("the liquid cut did not keep the ring: " + "; ".join(kept["problems"]),
+                            record["dumps"]["precut"])
     nodes = mesh_nodes(pb.get_mesh(INTERFACE))
     X = np.array([[n.x(0), n.x(1)] for n in nodes]).reshape(-1, 2)
     predicted = predict_unlocated(X, old_chains)
@@ -1494,7 +1577,9 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     if problems:
         raise CutFailed("the transfer of the liquid cut is not as planned: " + "; ".join(problems))
     global_transfer = pb.cut_observables()
-    poly_after = box_polyline_budgets([c for _, c in new_named], lc.z_n, R_b, s.reservoir_depth)
+    rings_after = [Chain(closed(L), ("loop", "loop")) for L in new_loops]
+    poly_after = box_polyline_budgets([c for _, c in new_named] + rings_after, lc.z_n, R_b,
+                                      s.reservoir_depth)
 
     stage("fill")
     record["cap"]["fill"] = _fill_cap(pb, lc, samples, new_segs[lc.chain],

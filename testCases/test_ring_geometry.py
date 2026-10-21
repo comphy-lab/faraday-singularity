@@ -340,3 +340,89 @@ def test_the_quadratic_elements_of_a_loop_and_the_check_of_its_order():
     assert rec["r_c"] == pytest.approx(1.0, abs=1e-12) and rec["r_min"] == pytest.approx(0.7)
     assert rec["points"] == 64 and rec["u_max"] == 2.0
     assert rec["courant"] == pytest.approx(2.0 * rec["h_min"] / 2.0, rel=1e-9)
+
+
+# --- a liquid cut in the ring stage: the ring kept, the cap clear of it ---------------------------
+
+
+def test_the_quadratic_surface_of_a_loop_bounds_its_polyline_by_its_slivers():
+    """On a circle sampled as quadratic elements (vertex, midside, vertex, every node on it), the
+    polyline's volume of revolution plus the slivers between each element's parabola and its
+    chords (``ring.loop_p2_excess``) is the torus to fourth order in the element size, where the
+    polyline alone misses it to second order; the excess does not depend on the orientation or on
+    which vertex is the seam, and is NaN for an odd count of nodes."""
+    exact = 2.0 * math.pi * 1.0 * math.pi * 0.3**2
+    errors = []
+    for n in (32, 64):
+        L = circle(n)
+        S = ring.loop_p2_excess(L)
+        poly = exact - rc.revolved_volume(L)
+        assert S > 0.0 and poly > 0.0
+        errors.append((poly / exact, (poly - S) / exact))
+        assert ring.loop_p2_excess(L[::-1]) == pytest.approx(S, rel=1e-12)
+        assert ring.loop_p2_excess(np.roll(L, -2, axis=0)) == pytest.approx(S, rel=1e-12)
+    (p1, q1), (p2, q2) = errors
+    assert p1 / p2 == pytest.approx(4.0, rel=0.05)  # the polyline: second order
+    assert abs(q1 / q2) == pytest.approx(16.0, rel=0.1) and abs(q2) < 5e-3 * p2
+    assert math.isnan(ring.loop_p2_excess(circle(63)))
+
+
+def test_a_rebuild_keeps_the_ring_or_says_why():
+    """``ring.loop_kept`` across a rebuild: the same circle resampled (its nodes elsewhere on it)
+    keeps the ring, its polyline's volume within the drift ``|S_before| + |S_after|`` and its
+    quadratic surface's within far less; a fifth more nodes, a volume changed beyond the noise
+    floors and the drift, an odd count of nodes, or a loop lost or gained does not; without a
+    ring before and after there is nothing to keep."""
+    L = circle(64)
+    t = np.linspace(0.0, 2.0 * math.pi, 64, endpoint=False)
+    moved = np.column_stack([1.0 + 0.3 * np.cos(t + 0.02 * np.sin(3 * t)),
+                             0.3 * np.sin(t + 0.02 * np.sin(3 * t))])
+    kept = ring.loop_kept([L], [moved], sigma_V=0.0)
+    assert kept["problems"] == [] and kept["loops_before"] == kept["loops_after"] == 1
+    assert kept["nodes_before"] == kept["nodes_after"] == 64
+    assert kept["drift"] == pytest.approx(abs(kept["S_before"]) + abs(kept["S_after"]))
+    assert kept["limit"] == kept["drift"] and 0.0 < abs(kept["dV"]) <= kept["drift"]
+    assert abs(kept["dV_p2"]) < 0.1 * abs(kept["dV"])
+    floored = ring.loop_kept([L], [moved], sigma_V=1e-3)
+    assert floored["limit"] == pytest.approx(ring.LOOP_NOISE_FLOORS * 1e-3 + floored["drift"])
+    more = ring.loop_kept([L], [circle(78)], sigma_V=0.0)
+    assert len(more["problems"]) == 1 and "nodes" in more["problems"][0]
+    grown = ring.loop_kept([L], [circle(64, a=0.3 * (1.0 + 1e-2))], sigma_V=0.0)
+    assert len(grown["problems"]) == 1 and "volume" in grown["problems"][0]
+    assert grown["dV"] > grown["limit"]
+    odd = ring.loop_kept([L], [circle(65)], sigma_V=1.0)
+    assert any("volume" in p for p in odd["problems"])  # its slivers are unknown: NaN, a miss
+    lost = ring.loop_kept([L], [], sigma_V=1.0)
+    assert lost["problems"] and "loops" in lost["problems"][0]
+    gained = ring.loop_kept([], [L], sigma_V=1.0)
+    assert gained["problems"] and "loops" in gained["problems"][0]
+    none = ring.loop_kept([], [], sigma_V=1.0)
+    assert none["problems"] == [] and "dV" not in none
+
+
+def test_the_cap_of_a_liquid_cut_in_the_ring_stage_must_clear_the_ring():
+    """Check (v) of ``events.truncate_chain`` against the ring (``ring.cap_ring_clearance``) for a
+    stump closed by a half sphere of radius ``r_n`` at the neck: a ring far away passes; one inside
+    the removed head shares area with it (``removed``); one across the cap leaves cap points in its
+    gas (``inside``) and touches the new chain (``gap``); one across the stump's side touches the
+    chain (``gap``); no loop, nothing to check."""
+    r_n, z_n = 0.1, 1.0
+    th = np.linspace(0.0, 0.5 * math.pi, 33)[1:]
+    cap = np.column_stack([r_n * np.cos(th), z_n + r_n * np.sin(th)])
+    side = np.column_stack([np.full(21, r_n), np.linspace(z_n, 0.5, 21)])
+    points = np.vstack([cap[::-1], side, [[1.0, 0.5]]])
+    head = np.vstack([[[r_n, z_n]], [[r_n, 1.4]], [[0.0, 1.5]], cap[::-1]])
+    far = ring.cap_ring_clearance(points, cap, head, r_n, [circle(64, c=(1.0, 0.2), a=0.05)])
+    assert far["failed"] == [] and far["gap"] > 0.0 and far["overlap"] == 0.0
+    assert far["clearance"] >= far["clearance_limit"] == pytest.approx(ev.CAP_CLEARANCE * r_n)
+    inside_head = ring.cap_ring_clearance(points, cap, head, r_n,
+                                          [circle(64, c=(0.05, 1.3), a=0.02)])
+    assert inside_head["failed"] == ["removed"] and inside_head["overlap"] > 0.0
+    across = ring.cap_ring_clearance(points, cap, head, r_n,
+                                     [circle(64, c=(0.0707, 1.0707), a=0.01)])
+    assert "inside" in across["failed"] and "gap" in across["failed"]
+    assert across["clearance"] < 0.0
+    touching = ring.cap_ring_clearance(points, cap, head, r_n,
+                                       [circle(64, c=(r_n + 0.04, 0.7), a=0.05)])
+    assert "gap" in touching["failed"]
+    assert ring.cap_ring_clearance(points, cap, head, r_n, [])["failed"] == []

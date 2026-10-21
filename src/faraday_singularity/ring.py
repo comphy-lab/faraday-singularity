@@ -39,6 +39,12 @@ This module needs no finite-element problem (numpy and shapely only):
   contacts (:func:`loop_spline_contact`), its quadratic elements (:func:`loop_edges`), what a run
   records of it (:func:`loop_record`) and the check that a loop read off a mesh is ordered
   (:func:`validate_loop_order`, after pyoomph's own test of a closed loop);
+* a liquid cut of the open chain in the ring stage (``surgery.liquid_cut``), whose rebuild is the
+  ring stage's own and keeps the ring: the cap and the removed head clear of the ring
+  (:func:`cap_ring_clearance`, check (v) of ``events.truncate_chain`` against the loop) and the
+  ring kept across the rebuild (:func:`loop_kept`: the count of its nodes, and its volume within
+  the ring's noise floor besides what resampling its quadratic surface can change its polyline's
+  volume by, :func:`loop_p2_excess`);
 * the ring stage: what a run records of a state of it (:func:`ring_stage_record`, the keys of
   ``reconnect.post_cut_record`` with the bubble's those of the ring or NaN; :func:`loop_segment`)
   and its stops and events (:func:`ring_stage_events`: the open chain read as before the ring, the
@@ -326,6 +332,102 @@ def validate_loop_order(L) -> None:
                            f"{a[1]:.9g}) to ({b[0]:.9g}, {b[1]:.9g}) is {d[worst]:.6g}, more "
                            f"than {LOOP_STEP_RATIO:g} times the shorter chord beside it "
                            f"({beside[worst]:.6g})")
+
+
+def loop_p2_excess(L) -> float:
+    """The volume of revolution between a loop's quadratic surface and its polyline: over each of
+    its quadratic elements (vertex, midside node, vertex, the seam a vertex, so that ``2N`` nodes
+    make ``N`` elements, the closing one included), the sliver between the element's parabola and
+    its two chords, a third of the triangle of its three nodes (Archimedes: the parabolic segment
+    over the chord of the two vertices is four thirds of that triangle), revolved about the axis at
+    the triangle's centroid. Positive where the elements bulge out of the polygon: the gas the
+    quadratic loop bounds is ``reconnect.revolved_volume(L)`` plus this, whatever the loop's
+    orientation. NaN for an odd count of nodes, whose elements are unknown."""
+    P = np.asarray(L, dtype=float).reshape(-1, 2)
+    n = len(P)
+    if n < 4 or n % 2:
+        return math.nan
+    v0, m, v1 = P[0::2], P[1::2], np.roll(P, -2, axis=0)[0::2]
+    tri = 0.5 * ((m[:, 0] - v0[:, 0]) * (v1[:, 1] - v0[:, 1])
+                 - (m[:, 1] - v0[:, 1]) * (v1[:, 0] - v0[:, 0]))
+    rbar = (v0[:, 0] + m[:, 0] + v1[:, 0]) / 3.0
+    sign = 1.0 if signed_area(P) >= 0.0 else -1.0
+    return sign * float(np.sum(tri * 2.0 * math.pi * rbar)) / 3.0
+
+
+# a liquid cut in the ring stage keeps the ring (loop_kept): its nodes within this share of their
+# count before the cut, its volume within this many of the ring's noise floor ring.sigma_V besides
+# what resampling one quadratic surface can change its polyline's volume by
+LOOP_NODE_SLACK = 0.1
+LOOP_NOISE_FLOORS = 5.0
+
+
+def loop_kept(before, after, *, sigma_V: float) -> dict:
+    """Whether a rebuild that is not the ring's own (a liquid cut of the open chain in the ring
+    stage, ``surgery.liquid_cut``) kept the ring: as many loops after it as before (one, or none
+    once the ring is removed); the loop's nodes within ``LOOP_NODE_SLACK`` of their count before;
+    the volume its polyline bounds changed by at most ``LOOP_NOISE_FLOORS sigma_V`` (the ring's
+    noise floor, ``ring.sigma_V``) plus the drift of the rebuild, ``|S_before| + |S_after|``
+    (:func:`loop_p2_excess`): the transfer places the new nodes on the old quadratic surface, so
+    that each polyline lies within its slivers of that surface and resampling it moves the
+    polyline's volume by at most their sum. ``before`` and ``after`` are lists of loops (``(n, 2)``
+    arrays); returns what was read, the change of the quadratic surface's own volume (``dV_p2``,
+    recorded only) and the ``problems`` found, none where the ring is kept."""
+    from .reconnect import revolved_volume
+
+    out = {"loops_before": len(before), "loops_after": len(after), "sigma_V": float(sigma_V),
+           "node_slack": LOOP_NODE_SLACK, "noise_floors": LOOP_NOISE_FLOORS, "problems": []}
+    if len(before) != len(after):
+        out["problems"].append(f"{len(after)} loops after the rebuild, {len(before)} before it")
+        return out
+    if not before:
+        return out
+    if len(before) > 1:
+        out["problems"].append(f"{len(before)} loops of the free surface, not at most one")
+        return out
+    A, B = (np.asarray(x[0], dtype=float).reshape(-1, 2) for x in (before, after))
+    V0, V1 = revolved_volume(A), revolved_volume(B)
+    S0, S1 = loop_p2_excess(A), loop_p2_excess(B)
+    drift = abs(S0) + abs(S1)
+    limit = LOOP_NOISE_FLOORS * float(sigma_V) + drift
+    out.update(nodes_before=len(A), nodes_after=len(B), V_before=V0, V_after=V1, dV=V1 - V0,
+               S_before=S0, S_after=S1, dV_p2=(V1 + S1) - (V0 + S0), drift=drift, limit=limit)
+    if not abs(len(B) - len(A)) <= LOOP_NODE_SLACK * len(A):
+        out["problems"].append(f"the ring has {len(B)} nodes after the rebuild, {len(A)} before "
+                               f"it (beyond {LOOP_NODE_SLACK:.0%})")
+    if not abs(V1 - V0) <= limit:  # NaN (an odd count) is a miss too
+        out["problems"].append(f"the ring's volume changed by {V1 - V0:.6g}, beyond {limit:.6g} "
+                               f"({LOOP_NOISE_FLOORS:g} sigma_V and the drift of the rebuild)")
+    return out
+
+
+def cap_ring_clearance(points, cap, removed, r_n: float, loops) -> dict:
+    """Check (v) of ``events.truncate_chain`` against the ring, for a liquid cut of the open chain
+    in the ring stage: the new chain (``points``) apart from every loop (``gap``, the smallest
+    distance, positive), every point of the cap at least ``events.CAP_CLEARANCE r_n`` outside the
+    ring's gas (``clearance``, ``events.liquid_clearance`` with the loop as the gas's section) and
+    the removed region (``removed``, the head's half-section) sharing no area with it
+    (``overlap``). ``failed`` lists the checks that do not hold (``gap``, ``inside``,
+    ``removed``); none without a loop."""
+    from shapely.geometry import LineString, Polygon
+
+    out = {"loops": len(loops), "gap": math.inf, "clearance": math.inf,
+           "clearance_limit": CAP_CLEARANCE * float(r_n), "overlap": 0.0, "failed": []}
+    chain = LineString(np.asarray(points, dtype=float).reshape(-1, 2))
+    head = Polygon(np.asarray(removed, dtype=float).reshape(-1, 2))
+    for L in loops:
+        C = closed(L)
+        out["gap"] = min(out["gap"], float(LineString(C).distance(chain)))
+        out["clearance"] = min(out["clearance"],
+                               float(np.min(liquid_clearance(cap, [C]))) if len(cap) else math.inf)
+        out["overlap"] += float(head.intersection(Polygon(C)).area)
+    if not out["gap"] > 0.0:
+        out["failed"].append("gap")
+    if not out["clearance"] >= out["clearance_limit"]:
+        out["failed"].append("inside")
+    if not out["overlap"] <= 0.0:
+        out["failed"].append("removed")
+    return out
 
 
 # --- the geometry of the ring cut -----------------------------------------------------------------

@@ -397,11 +397,22 @@ add a second top-level `cases/` tree.
   `surgery.restore_cut`) reads the open chain as before and the ring apart
   (`FaradayProblem.interface_loops`; `interface_segments` sets loops aside); its stops are
   `ring.ring_stage_events` (the open chain's necks, folds, heads and gas neck as
-  `events.post_cut_events` reads them, a liquid cut there a resumable stop for now with `stage`
-  `ring`; the ring's removal below `bubble_stop V_b`, W2; its approach to the axis, RA, its folds,
-  RF, its approach to the open chain, X, each a resumable stop). After the removal
-  `ring.after_removal` `stop` ends the window (`bubble-vanishing`, `ring_removed`), `continue` goes
-  on with the open chain alone; it is a key of the leg (`EventSettings.LEG_KEYS_OF_CLASSES`), every
+  `events.post_cut_events` reads them; the ring's removal below `bubble_stop V_b`, W2; its approach
+  to the axis, RA, its folds, RF, its approach to the open chain, X, each a resumable stop). A
+  landed neck of the open chain in the ring stage is cut by `surgery.liquid_cut` as before the
+  ring (record `stage` `ring`), its rebuild the ring stage's own (the template's
+  `pending_ring_geometry`: the cut chain and the ring as it is, or no loop after the removal; no
+  plan), the interface transferred by projection and the axis located in the old bulk
+  (`FaradayProblem._ring_transfer`, reach `2 r_n`, which also turns the zeta transfer off with no
+  loop), the cap clear of the ring (`ring.cap_ring_clearance`, check (v) of `truncate_chain`), the
+  ring kept across the rebuild (`ring.loop_kept`: one loop as before, its nodes within
+  `LOOP_NODE_SLACK`, its polyline's volume within `LOOP_NOISE_FLOORS ring.sigma_V` plus the drift
+  `|S_before| + |S_after|` of `ring.loop_p2_excess`; `loop` in the record, `CutFailed`
+  otherwise), the unlocated nodes predicted from the old chain and the ring, and the box's
+  polylines holding the ring's gas; a liquid cut without the ring stage takes the unchanged path
+  pinned by `test_liquid_cut_fem.py` and the pins. After the removal `ring.after_removal` `stop`
+  ends the window (`bubble-vanishing`, `ring_removed`), `continue` goes on with the open chain
+  alone; it is a key of the leg (`EventSettings.LEG_KEYS_OF_CLASSES`), every
   other ring key a class key, and a state of the ring stage is refused under a block without
   `ring.enabled` (`run_case._check_events`, `CollapseDriver._check_events_meta`). Files: `ring.txt`
   (`driver.RING_COLUMNS`), `_ring.txt` profiles, an `events.txt` row per surgery (its fill a
@@ -411,7 +422,8 @@ add a second top-level `cases/` tree.
   transfer's no-value and closure checks) and `test_ring_fem.py` (a ring meshed, stepped, rebuilt,
   restarted in new processes and removed; the cut and the removal on a synthetic pierced state,
   `testCases/ring_fem_state.py`, and each hard closure of both violated in turn, a stop
-  `event-unclosed` with `precut_e<k>`) cover it.
+  `event-unclosed` with `precut_e<k>`; F4, the liquid cut of the cavity's tip in the ring stage on
+  that state with the tip necked, with the ring and after its removal) cover it.
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the

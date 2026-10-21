@@ -14,6 +14,11 @@ bubble's. The velocity is imposed: the solenoidal flow of :func:`closing_flow` (
 ``W_JET``, the plug up at ``W_PLUG``), or a radial inflow besides, which is not solenoidal. The
 noise of a box in the ordinary rebuilds of the state (:func:`rebuild_noise`) sets the floors of
 the ring's closures, as ``post.log_box_noise`` would for a run.
+
+The state of F4 (:func:`head_chains`, :class:`PierceHeadProblem`) has the same bubble below an open
+chain whose tip is the head of a jet rising from the cavity's trough, necked and landed as in
+``test_liquid_cut_fem.py``, with the flow about that neck besides (``impose(..., z_neck=)``): the
+liquid cut of the cavity's tip in the ring stage.
 """
 
 from __future__ import annotations
@@ -88,11 +93,17 @@ def focus() -> Focus:
 class PierceMesh(FaradayCylinderMesh):
     """The first mesh is built on the chains of :func:`chains`, as a mesh after a cut."""
 
+    def first_chains(self):
+        return chains()
+
+    def first_focus(self) -> Focus:
+        return focus()
+
     def define_geometry(self):
         if not self.is_first_time():
             return super().define_geometry()
-        bubble, cavity = chains()
-        f = focus()
+        bubble, cavity = self.first_chains()
+        f = self.first_focus()
         s = self.settings
         self.mesh_mode = "tris"
         self.set_gmsh_parameter("General.NumThreads", 1)
@@ -117,10 +128,68 @@ def pierce_problem(outdir) -> PierceProblem:
     return pb
 
 
+# --- the state of F4: the cavity's tip necked above the pierced bubble ----------------------------
+
+R_NECK_OPEN = 0.09  # the open chain's neck in units of DELTA under a head of radius DELTA/2
+EPS_NECK = 8.0  # elements per neck radius at the neck
+
+
+def head_chains():
+    """The bubble of :func:`chains` and, above it, the open chain of ``test_liquid_cut_fem.
+    jet_chains``: a jet rising from the cavity's trough (at 0.9) whose head, of radius
+    ``DELTA/2``, is necked to ``R_NECK_OPEN DELTA`` (``test_events_stops.head_feature``), landed at
+    ``liquid.eps_d`` 0.2; and the neck's height."""
+    import test_liquid_cut_fem as lcf
+
+    bubble, _ = chains()
+    _, cavity, (_, z_neck) = lcf.jet_chains(DELTA, R_NECK_OPEN)
+    return bubble, cavity, z_neck
+
+
+def head_focus() -> Focus:
+    """The focus of :func:`focus` with the cavity's tip meshed as ``test_liquid_cut_fem`` meshes
+    its jets: the neck at ``r_n / EPS_NECK`` within four neck radii, the head at ``DELTA / (2
+    EPS_NECK)``; and the root of the bubble's downward jet, its thread of radius ``0.6 A_JET``
+    filleted into the roof (``test_ring_geometry.pierced_bubble``), at ``H_FINE`` (``neck_bubble``,
+    which the ring cut freezes): at the interface's own size there the elements are twice the
+    thread's radius, and the curved ones of the ring cut's mesh may turn inside out."""
+    r_n, z_neck = R_NECK_OPEN * DELTA, head_chains()[2]
+    regions = (FocusRegion("bubble_top", size=H_FINE, r=0.0, z=Z0 + GAP, radius=4 * A_JET),
+               FocusRegion("neck_bubble", size=H_FINE, r=0.6 * A_JET, z=Z0 + 4 * DELTA,
+                           radius=4 * A_JET),
+               FocusRegion("plug", size=H_FINE, r=0.0, z=Z0, radius=3 * A_JET),
+               FocusRegion("neck_open", size=r_n / EPS_NECK, r=r_n, z=z_neck, radius=4 * r_n),
+               FocusRegion("cavity_tip", size=0.5 * DELTA / EPS_NECK, r=0.0, z=z_neck,
+                           radius=0.1))
+    return Focus(size=min(g.size for g in regions), radius=0.1, grading=0.3, regions=regions)
+
+
+class PierceHeadMesh(PierceMesh):
+    """The first mesh is built on the chains of :func:`head_chains`, as a mesh after a cut."""
+
+    def first_chains(self):
+        bubble, cavity, _ = head_chains()
+        return bubble, cavity
+
+    def first_focus(self) -> Focus:
+        return head_focus()
+
+
+class PierceHeadProblem(FaradayProblem):
+    mesh_class = PierceHeadMesh
+
+
+def pierce_head_problem(outdir) -> PierceHeadProblem:
+    nd = nondimensionalise(CaseParameters.from_dict(fem.PHYSICS))
+    pb = PierceHeadProblem(nd, mesh=MeshSettings(**MESH), reconnect=RECON)
+    pb.set_output_directory(str(outdir))
+    return pb
+
+
 def gas_cut_record(pb, factor: float = V_B_FACTOR) -> dict:
     """A record of a gas cut at ``DELTA`` made just before the current state, its bubble's volume
     ``factor`` times the bubble's now, with the cut's sizing put on the template and the focus of
-    the state on it."""
+    the state on it (the focus the problem's first mesh was built under)."""
     named, _ = surgery._named_chains(pb)
     geom = rc.cut_geometry([c for _, c in named], RECON.reservoir_depth, gas_before=1.0)
     geom.bubble_volume = factor * geom.bubble_volume
@@ -131,7 +200,7 @@ def gas_cut_record(pb, factor: float = V_B_FACTOR) -> dict:
                          "curvature": 0, "grading": 0.3},
               "settings": json.loads(json.dumps(RECON.to_dict())), "focus": {"kept": None}}
     surgery.restore_cut(pb, record)
-    pb.active_mesh_template().focus = focus()
+    pb.active_mesh_template().focus = pb.active_mesh_template().first_focus()
     return record
 
 
@@ -157,12 +226,20 @@ def closing_flow(r, z, *, solenoidal: bool = True):
     return ur, uz
 
 
-def impose(pb, *, solenoidal: bool = True):
+def impose(pb, *, solenoidal: bool = True, z_neck: float | None = None):
+    """The flow of :func:`closing_flow`; with ``z_neck`` (the state of F4) also the solenoidal flow
+    of ``test_liquid_cut_fem.stream_velocity`` about the open chain's neck at that height, which
+    closes it and carries the head away from its stump."""
     m = pb.get_mesh("liquid")
     fi = m.get_nodal_field_indices()
     nodes = list(m.nodes())
-    ur, uz = closing_flow(np.array([n.x(0) for n in nodes]), np.array([n.x(1) for n in nodes]),
-                          solenoidal=solenoidal)
+    r, z = np.array([n.x(0) for n in nodes]), np.array([n.x(1) for n in nodes])
+    ur, uz = closing_flow(r, z, solenoidal=solenoidal)
+    if z_neck is not None:
+        import test_liquid_cut_fem as lcf
+
+        a, b = lcf.stream_velocity(r, z, [z_neck])
+        ur, uz = ur + a, uz + b
     for n, a, b in zip(nodes, ur, uz):
         n.set_value(fi["velocity_x"], float(a))
         n.set_value(fi["velocity_y"], float(b))

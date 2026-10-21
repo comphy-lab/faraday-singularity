@@ -16,6 +16,10 @@ commit and that of c4620f6, each in a fresh process with MKL on one thread.
   wrote the same, to the byte, so that the problem's chart of a ring
   (``problem.RingTolerantArclength``, always present) and the readers that set a loop aside change
   nothing without a ring.
+* (d) Against 6cb8013, the commit before the liquid cut in the ring stage: the finite-element run of
+  the synthetic pierced state (``ring_fem_state.py``) with ``ring.enabled``, the ring cut made by
+  the driver and the steps of the ring stage after it, no liquid cut: every output the same, to the
+  byte, so that a ring run without a liquid cut is unchanged by it.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from test_events_gasneck import BATTERY, PRELUDE, _run  # noqa: E402
 from test_events_legacy import _same_outputs  # noqa: E402
 
 RING_REFERENCE = "c4620f6"  # the commit before the ring part
+STAGE_B_REFERENCE = "6cb8013"  # the commit before the liquid cut in the ring stage
 
 PIERCING = PRELUDE + """
 from test_bookkeeping import CUT_GRADING, CutProblem, _settings
@@ -148,3 +153,55 @@ def test_a_finite_element_run_with_the_block_and_no_ring_is_c4620f6s(tmp_path):
         r = dict(spec, restart=str(tmp_path / name / "run" / "states" / "state_00000003.dump"))
         again[name] = fem_pins._run(src, tmp_path / f"{name}-restart", r)
     fem_pins._same_outputs(again["ref"], again["head"])
+
+
+RING_RUN = """
+import json, sys
+from pathlib import Path
+src, tests, out = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+sys.path.insert(0, src)
+import faraday_singularity  # the source under test, before the tests put theirs on the path
+assert Path(faraday_singularity.__file__).resolve().is_relative_to(Path(src).resolve())
+sys.path.insert(1, tests)
+import ring_fem_state as S
+from faraday_singularity import events as ev, ring, ringsurgery, surgery
+from faraday_singularity.driver import CollapseDriver, CollapseSettings
+assert all(Path(m.__file__).resolve().is_relative_to(Path(src).resolve())
+           for m in (ev, ring, ringsurgery, surgery, S.surgery))
+block = ev.EventSettings.from_dict({"ring": {"enabled": True, "sigma_V": 1e-6, "sigma_Pz": 1e-6,
+                                             "sigma_KE": 1e-6}})
+with S.pierce_problem(Path("pb")) as pb:
+    pb.initialise()
+    S.gas_cut_record(pb)
+    S.impose(pb)
+    drv = CollapseDriver(pb, CollapseSettings(t_end=10.0, dt_max=0.01, state_dt=0.0, state_keep=50,
+                                              max_steps=4), out, reconnect=S.RECON, events=block)
+    drv.reset_after_cut(pb.cut)
+    result = drv.run(1e-8)
+    drv.close()
+(out / "result.json").write_text(json.dumps(result, default=float, sort_keys=True))
+"""
+
+
+def _drop_wall_column(path: Path):
+    """``events.txt`` without its wall-time column, which no two runs share (as
+    ``test_events_fem._same_outputs`` reads ``collapse.txt``)."""
+    head, *rows = path.read_text().splitlines()
+    cols = head[2:].split("\t")
+    k = cols.index("wall")
+    path.write_text("\n".join(["# " + "\t".join(cols[:k] + cols[k + 1:])]
+                              + ["\t".join(r.split("\t")[:k] + r.split("\t")[k + 1:])
+                                 for r in rows]) + "\n")
+
+
+def test_a_ring_run_without_a_liquid_cut_is_6cb8013s(tmp_path):
+    ref = _reference_src(tmp_path, STAGE_B_REFERENCE)
+    runs = {name: _run(RING_RUN, src, tmp_path / name) for name, src in
+            (("ref", ref), ("head", ROOT / "src"))}
+    for run in runs.values():
+        _drop_wall_column(run / "events.txt")
+    names = fem_pins._same_outputs(runs["ref"], runs["head"])
+    result = json.loads((runs["head"] / "result.json").read_text())
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 4, result["stop"]
+    assert result["events"]["made"] == 1 and result["events"]["ring"]["cut"] == 1
+    assert {"ring.txt", "events.txt", "budget.txt", "events/event_001.json"} <= set(names)

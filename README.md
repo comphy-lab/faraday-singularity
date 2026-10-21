@@ -611,11 +611,18 @@ limit floored at a multiple of the ring's own noise floors (`ring.sigma_V`, `sig
 node is left without a value off the corner set or the closure holds no node. The ring's mesh is
 frozen at the cut: nowhere coarser than `max(h_cut, ring.size)` (`size`, null), the bubble's finer
 regions kept as copies (`ring_<name>`) and the column's region (`ring_cut`) at their sizes. In the
-ring stage the open chain is read as before (its necks, folds, heads and gas neck; a liquid cut
-there is a resumable stop for now, its request marked `stage` `ring`), and the ring's own events are
-resumable stops: its approach to the axis (`ring-axis`, class `RA`, below `max(ring.axis_ratio r_w,
-3 h_col)`), the closing of one of its folds (`ring-fold`, `RF`) and its approach to the open chain
-(`chain-contact`, `X`). Once its volume falls below `bubble_stop` of the bubble's at the gas cut
+ring stage the open chain is read as before (its necks, folds, heads and gas neck), and a landed
+neck there is cut as before the ring (`surgery.liquid_cut`, the record's `stage` `ring`), but
+through the ring stage's own rebuild and a transfer by projection onto the old interface, not
+through pyoomph's plan, whose chart cannot carry the ring's loop: the cap must also clear the ring,
+the ring must come through the rebuild kept (one loop, its nodes within a tenth of their count
+before, the volume of its polyline within five times `ring.sigma_V` besides what resampling its
+quadratic surface can change that volume by; `loop` in the record, a failure otherwise), and the
+polylines of the cut's box hold the ring's gas where the box reaches it; after the ring's removal
+the same rebuild has no loop. The ring's own events are resumable stops: its approach to the axis
+(`ring-axis`, class `RA`, below `max(ring.axis_ratio r_w, 3 h_col)`), the closing of one of its
+folds (`ring-fold`, `RF`) and its approach to the open chain (`chain-contact`, `X`).
+Once its volume falls below `bubble_stop` of the bubble's at the gas cut
 (`ring-collapse`, class `W2`) it is removed (`ringsurgery.ring_removal`) by the same sequence and
 closures (Q1-Q6), the removal logged; `ring.after_removal` `stop` (the default) then ends the window
 (`bubble-vanishing`, with `window_end` and `ring_removed`), `continue` goes on with the open chain
