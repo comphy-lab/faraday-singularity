@@ -424,6 +424,38 @@ add a second top-level `cases/` tree.
   `testCases/ring_fem_state.py`, and each hard closure of both violated in turn, a stop
   `event-unclosed` with `precut_e<k>`; F4, the liquid cut of the cavity's tip in the ring stage on
   that state with the tip necked, with the ring and after its removal) cover it.
+- The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
+  into the block and its hash only where it differs from its defaults, every key a key of the leg,
+  its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest
+  of the free surface under simplifying assumptions, every feature kept in the domain: the core
+  (`jetcore.core_mask`: the open chain's nodes within `max(core_radius L, apex_extent R_apex)` of
+  the jet's base, `L = max(r_j, delta)`, not above the jet's tracked liquid neck, and the walls
+  beyond the base within `wall_radius L`; the whole open chain without a base) is stepped at
+  `reconnect.courant` and the far nodes at `far_courant` (`jetcore.courant_split`; by default the
+  same number, the step unchanged to the bit); the far regions are floored at `far_floor`, the
+  tracked necks' and the pre-pierce regions exempt (`jetcore.region_class`,
+  `CollapseDriver._far_sizing`), the far kinks recentred with `far_kinks` `recentre`
+  (`jetcore.far_kink_regions`: at the floor, below it only past `far_yield_turn`, halving per
+  rebuild, event `far-yield`), refined at `far_refine_ratio`, the ring's kinks at the column's size
+  with `ring_kink_floor`, the edge-turn profiles from the core with `edge_turn_snapshots` `core`;
+  `prep_gap` refines the bubble's bottom and the downward jet's tip before the piercing
+  (`jetcore.prep_regions`) so that the ring cut admits `prep_rho s_t`; `profile_dt` adds profiles
+  (reason `window`); `box_gate` stops the run (`box-gate`, on `states/gate_<step>.dump`, the state
+  before the rebuild) where an ordinary rebuild changes the liquid volume or axial momentum of the
+  box about the core's base by more than `box_gate_sigmas` times `liquid.sigma_V`, `sigma_Pz`;
+  `jetcore.txt` a row per step (`jetcore.COLUMNS`), `limits.jetcore` in each leg. The `pinch`
+  part (`events.PinchSettings`, keys of the class `liquid`, `EventSettings.CLASS_OF_PART`) lands a
+  tracked neck only when it closes (`events.closing_neck`, from the driver's per-neck history,
+  `neck_history` in the dumps, `events.match_neck`), the request carrying the trigger and the liquid
+  cut's admission reading it again, and with `far_head` meets an event without a handler on a far
+  head by the liquid cut of its neck (`events.far_head_request`, kind `far-head`, class `F-head`).
+  A key whose behaviour the driver does not make is refused (`events.PENDING_KEYS`).
+  `testCases/test_jetcore.py` (stand-ins), `test_jetcore_fem.py` (the far floor and kinks on the
+  synthetic headed state, the pre-pierce refinement on the pierced state, the far-head cut) and
+  `test_jetcore_identity.py` (without the parts every run of 4a6c999 to the byte; with `jetcore`
+  at its defaults the same solution, `jetcore.txt` added) cover it. After a cut the stops of a state
+  are evaluated once (`CollapseDriver._stop_key`), and the runner's `--step-timing` writes
+  `step_timing.txt` (`driver.STEP_TIMING_COLUMNS`); neither changes a value.
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the

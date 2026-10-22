@@ -640,6 +640,49 @@ momentum and the noise of the rebuild still enter them, as at a liquid cut), the
 record of the stage (`ring`) and `run_status.json` the events of the ring (`events.ring`: the event
 of the cut, that of the removal and its time).
 
+The block's `jetcore` part (off by default, and written into the block and its hash only where it
+differs from its defaults; every key a key of the leg, its sizing keys among `events.SIZING_KEYS`)
+sets a resolution policy for the run after the cut that resolves the upward jet as before and
+meshes and steps the rest of the free surface under simplifying assumptions, every feature kept in
+the domain (`jetcore.py`). The core is the part of the open chain about the base of the upward jet,
+the apex of the groove around it: its nodes within `max(core_radius L, apex_extent R_apex)` of the
+base (`L = max(r_j, delta)`; `core_radius`, 2), but not above the jet's tracked liquid neck, and the
+walls beyond the base within `wall_radius L` (10); without a base of a jet the whole open chain.
+Every other node of the free surface is far. The step's Courant limit is split, `reconnect.courant`
+on the core and `far_courant` on the far nodes (by default the same number, which leaves the step
+unchanged to the bit). The far regions' targets are floored at `far_floor` (absolute, null for none;
+the regions of the tracked necks exempt, so that a neck is followed to its landing); with
+`far_kinks` `recentre` the guard's far kinks have a region of their own per chain, recentred on the
+worst element at each request (four chords wide, no growth), at the floor, and below it only while
+the element turns by more than `far_yield_turn` degrees (75), halving at each rebuild down to the
+run's `h_floor` (event `far-yield`); the far regions are refined beyond `far_refine_ratio` times
+their targets (null for the collapse's `refine_ratio`); with `ring_kink_floor` the ring's kinks are
+no finer than its column; with `edge_turn_snapshots` `core` only an element of the core that bends
+beyond `reconnect.edge_turn_refine` writes a profile at every step. With `prep_gap` (null for none),
+once the bubble is shorter than `prep_gap delta`, its bottom and the downward jet's tip are refined
+(`pierce_bottom`, `pierce_tip`, of radius `s_t`, the jet's shoulder) at `prep_rho s_t / 2.25`, so
+that the ring cut admits a splice radius of `prep_rho s_t` (0.125) with a margin of 1.5 on its
+check; their nodes are stepped at the core's Courant number. `profile_dt` writes a profile at least
+that often after the cut (reason `window`). With `box_gate` an ordinary rebuild (the rule's or one
+for distortion) may change the liquid volume and axial momentum of the box of radius
+`liquid.box_radius delta` about the core's base by at most `box_gate_sigmas` (5) times the
+calibrated floors `liquid.sigma_V` and `liquid.sigma_Pz`; beyond either the run stops (`box-gate`)
+on the state before the rebuild, dumped as `states/gate_<step>.dump`, from which a continuation
+resumes. `jetcore.txt` records per step what set the step, the split Courant limit (with the node
+of each class that sets its part) and the core, and each leg the resolved keys. The block's `pinch`
+part (off by default, written only where it differs from its defaults; its keys are keys of the
+class `liquid`) decides when a tracked neck with a head is cut: with `enabled` only once it closes,
+`r_n <= r_c delta` (`r_c`, 0.2) with a quadratic fit of `r_n(t)` over the trailing `window
+r_n^(3/2)` (0.05, at least `min_samples`, 8) closing at a constant or growing rate and a time to
+the pinch at that rate, `(2/3) r_n / |dr_n/dt|`, at most `kappa r_n^(3/2)` (3), read from the
+history of each tracked neck that the driver keeps across its steps and in its dumps
+(`neck_history`), neither `liquid.eps_d` nor `liquid.eps_max` landing a neck; with `far_head` an
+event without a handler (a gas neck, a closing groove) whose site lies on the head of a tracked neck
+in the far region is met by the liquid cut of that neck (kind `far-head`, class `F-head`), with the
+cut's hard closures of the volume and the momentum removed. At their defaults neither part changes
+a value; whether a given set of keys leaves the upward jet unchanged is a question for replays
+against runs without the parts.
+
 `postProcess/event_table.py` tabulates the events of such runs, one row per event and one per run
 and tip (`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event, made or the one
 a run stopped on, with its outcome and the handler of its class, in units of the cut radius and of
@@ -686,6 +729,10 @@ refused before any output. oomph-lib gives up on a step below it, and also after
 whose next candidate, four times the step, would fall below it, so that at the steps a small cut
 radius needs the default would end the run on a converged step. Before the cut it keeps the default,
 on which the classification of a failure before a cut relies.
+
+After a cut the stops of a state are evaluated once per state, and the runner's `--step-timing`
+flag (no key of the case) writes `step_timing.txt`, the wall time of the parts of each step; neither
+changes a value written.
 
 `simulationCases/reconnect_prototype.py` is a development tool beside this: it cuts a landing state
 at `--delta` or `--delta-ratio` times its neck radius, with options that override the case's

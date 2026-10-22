@@ -25,6 +25,7 @@
 * The far-head cut (``events.far_head_request``, the driver's ``_far_head``) and the core box
   gate (``CollapseDriver._gate_before``, ``_gate_after``: within its floors the dump before the
   rebuild deleted, beyond them the run stopped on it).
+* The profile cadence ``jetcore.profile_dt`` (reason ``window``).
 """
 
 from __future__ import annotations
@@ -950,3 +951,42 @@ def test_the_box_gate_stops_on_the_state_before_a_rebuild_beyond_its_floors(tmp_
     assert "events_settings" in meta and not list((tmp_path / "states").glob("prebuild*"))
     out2, _ = _gate_run(tmp_path / "wide", monkeypatch, dV=0.0, dPz=1e-8, box_gate_sigmas=20.0)
     assert out2["stop"]["reason"] == "max-steps"
+
+
+# --- C8: the profile cadence ----------------------------------------------------------------------
+
+
+def _profiles(outdir: Path) -> list[dict]:
+    """The header of each profile of the open chain a run wrote, in its order."""
+    out = []
+    for p in sorted((outdir / "profiles").glob("profile_*.txt")):
+        if "_bubble" in p.name or "_ring" in p.name or "lastgood" in p.name:
+            continue
+        out.append(json.loads(p.read_text().splitlines()[0][2:]))
+    return out
+
+
+def test_profile_dt_writes_a_profile_at_least_that_often_after_the_cut(tmp_path):
+    """With ``jetcore.profile_dt`` a stand-in run after the cut writes a profile (reason
+    ``window``) wherever none was written for ``profile_dt``, so that no two profiles of its steps
+    lie further apart than ``profile_dt`` and one step; without it, none of reason ``window``."""
+    from test_bookkeeping import CutProblem
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3, dt_growth=1.0)
+    kw = dict(max_steps=6, snapshot_dt=10.0, snapshot_decades=10.0, growth=1.0)
+    runs = {}
+    for name, block in (("plain", _block()), ("window", _block(profile_dt=4e-6))):
+        drv = _events_driver(tmp_path / name, CutProblem(), recon, block, **kw)
+        drv.run(1e-9)
+        drv.close()
+        runs[name] = _profiles(tmp_path / name)
+    assert not any(h["reason"] == "window" for h in runs["plain"])
+    window = [h for h in runs["window"] if h["reason"] == "window"]
+    assert len(window) >= 2
+    times = [h["time"] for h in runs["window"] if h["reason"] != "stop"]
+    rows = np.loadtxt(tmp_path / "window" / "chains.txt", ndmin=2)
+    cols = (tmp_path / "window" / "chains.txt").read_text().splitlines()[0][2:].split("\t")
+    dt_max = float(rows[:, cols.index("dt")].max())
+    gaps = np.diff(times)
+    assert (gaps <= 4e-6 + dt_max * (1.0 + 1e-9)).all(), gaps
+    assert ev.PENDING_KEYS == {}

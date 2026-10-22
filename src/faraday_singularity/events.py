@@ -118,7 +118,7 @@ JETCORE_KINKS = ("grow", "recentre")
 JETCORE_SNAPSHOTS = ("any", "core")
 # the keys of the parts jetcore and pinch whose behaviour the driver does not make yet: refused away
 # from their defaults, so that no case sets a key that does nothing
-PENDING_KEYS = {"jetcore": ("profile_dt",)}
+PENDING_KEYS: dict = {}
 # the samples (t, r_n) of each tracked neck the driver keeps, the latest (closing_neck)
 NECK_HISTORY_SAMPLES = 512
 

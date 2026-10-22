@@ -309,7 +309,8 @@ follows the part's keys (:meth:`CollapseDriver._feature_regions`: each region's 
 ``recentre`` the guard's far kinks in regions of their own, ``jetcore.far_kink_regions``, each
 yield below the floor an event ``far-yield``; the far refine ratio; the ring's kinks at the
 column's size; the profiles of an element that bends from the core's elements only, with
-``edge_turn_snapshots`` ``core``); before the piercing, with ``prep_gap``, the bubble's bottom and
+``edge_turn_snapshots`` ``core``; with ``profile_dt`` a profile at least that often, reason
+``window``); before the piercing, with ``prep_gap``, the bubble's bottom and
 the downward jet's tip are refined (``jetcore.prep_regions``, ``pierce_bottom``, ``pierce_tip``)
 so that the ring cut admits the splice radius ``prep_rho s_t``, their nodes stepped at the core's
 Courant number; ``jetcore.txt`` holds a row per step (``jetcore.COLUMNS``: what
@@ -2317,7 +2318,11 @@ class CollapseDriver:
                        comments="# ")
 
     def _maybe_snapshot(self, m: dict, forced: str | None = None):
+        """A profile where one is due: ``forced`` (its reason), every ``snapshot_dt`` (``time``),
+        when the local scale has changed by ``snapshot_decades`` (``scale``), and after the cut with
+        ``jetcore.profile_dt`` at least every ``profile_dt`` since the last profile (``window``)."""
         st = self.state
+        jet = self._jetcore()
         if forced is not None:
             self._snapshot(m, forced)
         elif self._t() - st.last_snapshot_t >= self.s.snapshot_dt:
@@ -2325,6 +2330,9 @@ class CollapseDriver:
         elif (math.isfinite(st.last_snapshot_ell) and m["ell"] > 0
               and abs(math.log10(m["ell"] / st.last_snapshot_ell)) >= self.s.snapshot_decades):
             self._snapshot(m, "scale")
+        elif jet is not None and jet.profile_dt is not None \
+                and self._t() - st.last_snapshot_t >= jet.profile_dt:
+            self._snapshot(m, "window")
 
     def _maybe_remesh(self, m: dict) -> bool:
         s, st = self.s, self.state
