@@ -101,3 +101,23 @@ def test_a_restart_that_keeps_the_gas_block_is_admitted(tmp_path):
     lineage = run_case.restart_record(state, child, path)
     assert lineage["parent_record"]["derived_keys"] == ["case_id", "collapse.landing",
                                                        "collapse.neck_stop"]
+
+
+def test_the_driver_takes_the_gas_only_with_its_problem_and_before_a_cut(tmp_path):
+    import types
+
+    from faraday_singularity.driver import CollapseDriver, CollapseSettings
+    from faraday_singularity.neckgas.coupler import GasSettings
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    gas = GasSettings.from_dict(GAS)
+    settings = CollapseSettings(t_end=1.0, dt_max=0.1)
+    with pytest.raises(ValueError, match="needs a problem made with gas"):
+        CollapseDriver(types.SimpleNamespace(gas=False), settings, tmp_path / "a", gas=gas)
+    with pytest.raises(ValueError, match="after a cut with the gas is not made yet"):
+        CollapseDriver(types.SimpleNamespace(gas=True), settings, tmp_path / "b", gas=gas,
+                       reconnect=ReconnectSettings(delta=1e-3))
+    drv = CollapseDriver(types.SimpleNamespace(gas=True), settings, tmp_path / "c", gas=gas)
+    assert drv.gas.status == "dormant" and (tmp_path / "c" / "gas.txt").read_text().startswith(
+        "# step\ttime")
+    drv.close()

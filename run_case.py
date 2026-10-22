@@ -676,9 +676,9 @@ def main() -> int:
         print(json.dumps({"valid": True, "case_id": case["case_id"], "restart": parent_record,
                           "restart_mode": restart_mode}))
         return 0
-    if gas is not None:
-        raise SystemExit(f"{args.case}: collapse.{GAS_BLOCK} is read and checked, but this commit "
-                         "does not yet couple the gas to the liquid")
+    if gas is not None and restart_mode in (CUT, POST_CUT):
+        raise SystemExit(f"{args.case}: collapse.{GAS_BLOCK}: a cut or a run after a cut with the "
+                         "gas is not made yet")
     args.outdir.mkdir(parents=True, exist_ok=True)
     recorded_provenance = provenance(args.case)
     runner_path = Path(sys.argv[0]).resolve()
@@ -752,6 +752,8 @@ def main() -> int:
     cut_error = None
     try:
         extra = {"reconnect": reconnect} if reconnect is not None else {}
+        if gas is not None:  # the gas's normal traction on the free surface
+            extra["gas"] = True
         problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, mesh_output=args.mesh_output,
                                  **extra)
         problem.set_output_directory(str(args.outdir))
@@ -772,7 +774,8 @@ def main() -> int:
                                            if restart_mode in (CUT, POST_CUT) else {}),
                                         **({"events": events, "leg_info": {"commit": commit}}
                                            if events is not None else {}),
-                                        **({"step_timing": True} if args.step_timing else {}))
+                                        **({"step_timing": True} if args.step_timing else {}),
+                                        **({"gas": gas} if gas is not None else {}))
                 try:
                     if args.restart is not None:
                         from pyoomph.output.states import copy_state_file

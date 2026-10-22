@@ -307,6 +307,23 @@ far nodes, the same number by default, which leaves the step as it was); ``jetco
 row per step (``jetcore.COLUMNS``: what set the step, the split limit, the core) and every leg the
 resolved keys (``limits.jetcore``).
 
+With a ``collapse.gas`` block (``gas``, ``neckgas.coupler``; the problem made with ``gas``) a
+quasi-one-dimensional compressible gas in the collapsing neck is advanced over every step, before
+the cut only. It is dormant until the neck has closed to the block's ``r_on`` (event
+``gas-activated``), then starts from the pair of chains of the next step (event ``gas-started``).
+Every later step: just before the solve the chain the step starts from is checked to be a duct of
+the gas and synced with the gas's cell volumes, and, with ``two-way`` coupling, the traction
+``(p_g - p0)/(sigma k)`` of the gas is set at every node of the free surface and held over the
+step (staggered: the liquid's step sees the gas of its start); just after the solve, on the stepped
+chain and before any rebuild, the gas is advanced over the step and its rows are written to
+``gas.txt`` (``neckgas.coupler.COLUMNS``, a row per variant per step); the step is at most the
+block's ``omega_dt/omega`` with the traction applied (``one-way`` coupling computes the traction
+but applies none, and leaves the step and so the trajectory as without the gas). The profiles of
+the gas go to ``gas_profiles/`` beside every interface profile, and the run stops resumably on the
+gas's stops (``gas-geometry``, ``gas-budget``, ``gas-stall``, ``gas-thread``, ``gas-continuum``,
+:data:`GAS_STOPS`), keeping the state as ``states/stop_<step>.dump``. Without the block nothing
+changes.
+
 After a cut the stops of a state are evaluated once (:meth:`CollapseDriver._post_cut_stop`, keyed
 by the state, :meth:`CollapseDriver._stop_key`): the check at the loop's top of the state the step
 has just checked gives the same answer without evaluating it again. With ``step_timing`` (the
@@ -338,6 +355,10 @@ from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, E
                      events_done, fold_stop_after_cut, ghost_place, ghost_recontacts,
                      liquid_necks, minimum_dt_after_cut)
 from .mesh import Focus, FocusRegion
+from .neckgas.coupler import COLUMNS as GAS_COLUMNS
+from .neckgas.coupler import STOPS as GAS_STOPS
+from .neckgas.coupler import GasSettings, NeckGas
+from .neckgas.geometry import GasGeometryError
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
                         bubble_end, courant_limit, cut_size_field, edge_reading, feature_regions,
@@ -715,7 +736,7 @@ class CollapseDriver:
                  keep_stop_state: bool = False, landing=(),
                  reconnect: ReconnectSettings | None = None,
                  events: EventSettings | None = None, leg_info: dict | None = None,
-                 step_timing: bool = False):
+                 step_timing: bool = False, gas: GasSettings | None = None):
         self.pb = problem
         self.s = settings
         self.keep_stop_state = keep_stop_state
@@ -811,6 +832,20 @@ class CollapseDriver:
             self._timing.write("# " + "\t".join(STEP_TIMING_COLUMNS) + "\n")
         (self.outdir / "collapse_settings.json").write_text(
             json.dumps(asdict(settings), indent=2) + "\n")
+        # with a collapse.gas block: the gas in the neck (neckgas.coupler), gas.txt and its profiles
+        self.gas: NeckGas | None = None
+        self._gas_rows = None
+        self._gas_stop: dict | None = None
+        if gas is not None:
+            if not getattr(problem, "gas", False):
+                raise ValueError("collapse.gas needs a problem made with gas (FaradayProblem(gas="
+                                 "True)), whose free surface carries the gas traction")
+            if reconnect is not None:
+                raise ValueError("collapse.gas: a run after a cut with the gas is not made yet")
+            self.gas = NeckGas(gas)
+            self._gas_rows = open(self.outdir / "gas.txt", "w", buffering=1)
+            self._gas_rows.write("# " + "\t".join(GAS_COLUMNS) + "\n")
+            (self.outdir / "gas_profiles").mkdir(exist_ok=True)
 
     def _tick(self, part: str | None = None):
         """With step timing: the wall time since the last tick added to ``part`` of the current
@@ -841,7 +876,7 @@ class CollapseDriver:
         if self._chains is not None:
             self._chains.close()
         for f in (self._event_rows, self._drops, self._budget, self._noise, self._ring_rows,
-                  self._timing, self._jetcore_rows):
+                  self._timing, self._jetcore_rows, self._gas_rows):
             if f is not None:
                 f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
@@ -2093,6 +2128,7 @@ class CollapseDriver:
                        header=json.dumps(dict(header, chain="bubble")) + "\nr z u_r u_z",
                        comments="# ")
         self._write_ring_profile(path, header)
+        self._write_gas_profile(st.snapshots, header)
         st.snapshots += 1
         st.last_snapshot_t = m["time"]
         st.last_snapshot_ell = m["ell"]
@@ -3263,6 +3299,68 @@ class CollapseDriver:
                 "missed": [{"delta": e["delta"], "reason": e["reason"]} for e in events
                            if e["event"] == "landing-missed"]}
 
+    # --- the gas in the neck (collapse.gas) ------------------------------------------------------
+
+    def _gas_before_step(self, m: dict, t: float) -> dict | None:
+        """Before the step from ``t``: the gas's test of activation while dormant, its sync with
+        the chain the step starts from (``m["profile"]``, the current mesh's) while active, and,
+        with the traction applied, the traction at every node of the free surface. Returns the
+        ``gas-geometry`` stop of a chain that is no duct of the gas."""
+        gas, st = self.gas, self.state
+        if gas.status not in ("dormant", "active"):
+            return None
+        r, z, ur, uz = m["profile"]
+        try:
+            info = gas.before_step(t, (r, z, ur, uz), step=st.step,
+                                   dt_prev=st.dt_prev if st.dt_prev is not None else math.nan)
+        except GasGeometryError as exc:
+            return {**exc.info, "trigger": exc.info.get("reason"), "reason": "gas-geometry",
+                    "time": t, "stage": "before-step"}
+        if info.get("activated"):
+            self._event("gas-activated", m, r_n=info["r_n"], z_n=info["z_n"], z_lo=info["z_lo"],
+                        r_on=gas.s.r_on)
+        if gas.applied:
+            self.pb.set_gas_traction(lambda rr, zz: gas.traction(zz))
+        return None
+
+    def _gas_after_step(self):
+        """After a converged step, before any rebuild: the gas advanced over it on the stepped
+        chain, its rows written, its stop kept for the stop checks of the step."""
+        gas, st = self.gas, self.state
+        if gas.status not in ("pending", "active"):
+            return
+        starting = gas.status == "pending"
+        rows = gas.after_step(self._t(), self.pb.interface_arrays(), step=st.step)
+        for row in rows:
+            self._gas_rows.write("\t".join(_table_cell(row.get(c)) for c in GAS_COLUMNS) + "\n")
+        if starting and gas.active:
+            self._events.write(json.dumps({"event": "gas-started", "time": gas.t_on,
+                                           "step": st.step, "t_on": gas.t_on,
+                                           "step_on": gas.step_on, "N": len(gas.zf) - 1,
+                                           "z_lo": gas.z_lo, "z_hi": gas.s.z_hi},
+                                          default=float) + "\n")
+        if gas.stop is not None and self._gas_stop is None:
+            self._gas_stop = dict(gas.stop)
+
+    def _write_gas_profile(self, index: int, header: dict):
+        """Beside the interface profile ``index``: the gas of each variant on its cells
+        (``gas_profiles/gas_<index>.npz``, uncompressed), once the gas has started."""
+        if getattr(self, "gas", None) is None or not self.gas.active:
+            return
+        arrays = {f"{name}_{k}": v for name, prof in self.gas.profiles().items()
+                  for k, v in prof.items()}
+        head = dict(header, z_lo=self.gas.z_lo, z_hi=self.gas.s.z_hi, gas_time=self.gas.t,
+                    neck=list(self.gas.neck) if self.gas.neck else None,
+                    variants=[v.spec.name for v in self.gas.variants])
+        np.savez(self.outdir / "gas_profiles" / f"gas_{index:06d}.npz",
+                 header=np.array(json.dumps(head, default=float)), **arrays)
+
+    def _gas_summary(self) -> dict:
+        gas = self.gas
+        return {"status": gas.status, "coupling": gas.s.coupling, "t_on": gas.t_on,
+                "step_on": gas.step_on, "markers": dict(gas.markers), "regrids": len(gas.regrids),
+                "stop": gas.stop, "settings_sha256": gas.s.sha256()}
+
     # --- main loop ----------------------------------------------------------------------------
 
     def _geometry_stop(self, m):
@@ -3286,8 +3384,9 @@ class CollapseDriver:
 
     def _stop(self, m):
         """The stop the measured state calls for, if any: a geometry stop (after a cut, those of
-        both chains too) before the jet stop."""
-        return self._geometry_stop(m) or self._post_cut_stop() or self._jet_stop(m)
+        both chains too) before the jet stop, and with the gas its stops last."""
+        return self._geometry_stop(m) or self._post_cut_stop() or self._jet_stop(m) or \
+            getattr(self, "_gas_stop", None)
 
     def _jet_stop(self, m):
         """Stop once the born jet is unambiguous: at least ``post_birth_steps`` accepted steps after
@@ -3370,9 +3469,16 @@ class CollapseDriver:
                 dt = min(dt, s.growth * st.dt_prev)
             if self._jetcore_rows is not None and r is not None:  # what set the step, read only
                 self._dt_limiter = self._dt_limiter_of(dt, m, t, focus_courant)
+            if self.gas is not None:  # the gas spring on the liquid wall, with the traction applied
+                dt = min(dt, self.gas.dt_limit())
             if dt < self._dt_min():
                 stop = {"reason": "dt-floor", "dt": dt}
                 break
+            if self.gas is not None:  # the chain the step starts from, and the traction it holds
+                found = self._gas_before_step(m, t)
+                if found is not None:
+                    stop = found
+                    break
             st.ell_prev, st.t_prev = m["ell"], t
             self._tick("top")
             wall0 = time.time()
@@ -3413,6 +3519,8 @@ class CollapseDriver:
             st.dt_prev = dt
             inside = pb.remesh_count - rebuilds  # rebuilds pyoomph made inside the step
             self._stepped_rc = pb.remesh_count
+            if self.gas is not None:  # the gas over the step, on the stepped chain
+                self._gas_after_step()
             flags = self._distortion_flags()
             if not defer:  # pyoomph rebuilt inside the solve wherever distortion asked
                 self._pyoomph_remeshes += inside
@@ -3514,6 +3622,10 @@ class CollapseDriver:
             if stop.get("window_end"):  # with the events block only
                 self._event("window-end", m, reason=stop["reason"])
             stop["end_state"] = stop["precut"] if unclosed else str(self._save_end_state())
+        if self.gas is not None and stop.get("reason") in GAS_STOPS:
+            # a resumable stop of the gas: the state it stopped on (an ordinary restart state)
+            stop["kept_state"] = str(self.keep_state(
+                self.outdir / "states" / f"stop_{st.step:08d}.dump", stop=stop))
         if self.keep_stop_state and stop.get("trigger") == "neck-radius":
             # the measured state of an accepted step: a landing state for a reconnection
             stop["kept_state"] = str(self.keep_state(
@@ -3529,6 +3641,8 @@ class CollapseDriver:
                **self.distortion_counts()}
         if self.landing:
             out["landing"] = self._landing_summary()
+        if self.gas is not None:  # only with the block: other results keep their keys
+            out["gas"] = self._gas_summary()
         if r is not None:
             t_cut, t_p = self._cut_times()
             out["cut"] = {"t_cut": t_cut, "t_p": t_p, "tau_end": r.tau_end, **self._taus(self._t()),
