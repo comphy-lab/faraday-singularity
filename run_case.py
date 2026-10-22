@@ -95,7 +95,9 @@ the events block and is no key of the driver's settings (``collapse_settings.jso
 key: a restart, a cut and a continuation carry the parent's block unchanged, and one that adds,
 drops or changes it is refused as a different case. A dump of an active gas has its state beside
 it (``<dump>.gas.npz``), which the restart record hashes (``gas_sha256``) and the restart copies
-and restores with it.
+and restores with it. A landing state of an active gas records the partition of the gas at the neck
+(``gas_handover``), and a cut from it writes that partition at the cut's neck to
+``gas_cut.json`` and retires the gas: after the cut the bubble keeps the passive pressure.
 An unknown key of the ``collapse`` block is refused with a message before any output, as is an
 invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
 or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
@@ -681,9 +683,6 @@ def main() -> int:
         print(json.dumps({"valid": True, "case_id": case["case_id"], "restart": parent_record,
                           "restart_mode": restart_mode}))
         return 0
-    if gas is not None and restart_mode in (CUT, POST_CUT):
-        raise SystemExit(f"{args.case}: collapse.{GAS_BLOCK}: a cut or a run after a cut with the "
-                         "gas is not made yet")
     args.outdir.mkdir(parents=True, exist_ok=True)
     recorded_provenance = provenance(args.case)
     runner_path = Path(sys.argv[0]).resolve()

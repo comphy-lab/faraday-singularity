@@ -61,11 +61,17 @@ sys.argv = sys.argv[:1]
 nd = nondimensionalise(CaseParameters.from_dict(spec["physics"]))
 settings = CollapseSettings(t_end=10.0, dt_max=0.01, **spec["collapse"])
 gas = GasSettings.from_dict(spec["gas"])
-pb = NeckProblem(nd, mesh=MeshSettings(**spec["mesh"]), gas=True)
+recon = None
+if spec.get("cut") is not None:
+    from faraday_singularity.reconnect import ReconnectSettings
+    recon = ReconnectSettings(**spec["cut"])
+cut = {"reconnect": recon} if recon is not None else {}
+pb = NeckProblem(nd, mesh=MeshSettings(**spec["mesh"]), gas=True, **cut)
 pb.set_output_directory(str(out))
 with pb:
     pb.initialise()
-    driver = CollapseDriver(pb, settings, out, gas=gas, landing=tuple(spec["landing"]))
+    driver = CollapseDriver(pb, settings, out, gas=gas,
+                            landing=() if recon is not None else tuple(spec["landing"]), **cut)
     if spec.get("restart") is None:
         impose_closing_flow(pb)
     else:
@@ -74,6 +80,12 @@ with pb:
         gas_file = state.with_suffix(".gas.npz")
         driver.restore(json.loads(state.with_suffix(".json").read_text()),
                        gas_file=gas_file if gas_file.is_file() else None)
+        if recon is not None:  # a cut of the landing state, as a cut restart makes it
+            from faraday_singularity import surgery
+            surgery.cut(pb, recon, out, driver=driver, log=lambda *_: None)
+            result_r, result_z, result_T = pb.gas_traction()
+            (out / "traction_after_cut.json").write_text(json.dumps(
+                {"max_abs": float(np.max(np.abs(result_T)))}))
     pb.start_diagnostics(out / "diagnostics.txt")
     result = driver.run(1e-8)
     driver.close()
@@ -231,3 +243,34 @@ def test_a_restart_refuses_a_gas_file_of_other_bytes_or_none(base):
     copy.with_suffix(".gas.npz").unlink()
     proc = _run(base / "missing-run", dict(SPEC, restart=str(copy)), check=False)
     assert proc.returncode != 0 and "is needed to continue it" in proc.stderr, proc.stderr[-2000:]
+
+
+def test_a_cut_from_a_gas_landing_state_hands_the_gas_over_and_retires_it(base):
+    run = base / "base" / "run"
+    landing = run / "states" / "landing_0.0153.dump"
+    meta = json.loads(landing.with_suffix(".json").read_text())
+    kept = meta["gas_handover"]["A"]
+    assert kept["m_b"] > 0 and kept["V_b"] > 0 and kept["m_b"] + kept["m_above"] > kept["m_b"]
+    spec = dict(SPEC, restart=str(landing), cut={"delta": 0.0153, "dt0": 1e-5, "tip_size": 0.25,
+                                                 "bridge_size": 0.25, "focus_size": 0.25})
+    spec["collapse"] = dict(SPEC["collapse"], max_steps=8)
+    cwd = base / "cut"
+    _run(cwd, spec)
+    out = cwd / "run"
+    rec = json.loads((out / "gas_cut.json").read_text())
+    assert rec["gas_status"] == "active" and rec["delta"] == 0.0153
+    h = rec["handover"]["A"]
+    # the state of the landing, partitioned at the cut's neck: the same gas, the same split
+    assert h["m_b"] + h["m_above"] == pytest.approx(kept["m_b"] + kept["m_above"], rel=1e-12)
+    assert h["m_b"] == pytest.approx(kept["m_b"], rel=0.05)
+    assert h["p_b_mix"] > 0 and set(h["C_kappa"]) == {"1", "1.4"}
+    assert json.loads((out / "traction_after_cut.json").read_text())["max_abs"] == 0.0
+    kinds = [json.loads(x)["event"] for x in (out / "events.jsonl").read_text().splitlines()]
+    assert "gas-retired" in kinds and kinds.index("gas-retired") < kinds.index("cut")
+    assert not (out / "gas.txt").read_text().splitlines()[1:]  # no row after the cut
+    for p in (out / "states").glob("state_*.dump"):
+        m = json.loads(p.with_suffix(".json").read_text())
+        assert m["gas"]["status"] == "retired" and m["gas"]["file"] is None
+        assert not p.with_suffix(".gas.npz").exists()
+    result = json.loads((out / "result.json").read_text())
+    assert result["gas"]["status"] == "retired" and result["steps"] > meta["step"]

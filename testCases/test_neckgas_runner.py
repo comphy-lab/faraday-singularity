@@ -103,7 +103,7 @@ def test_a_restart_that_keeps_the_gas_block_is_admitted(tmp_path):
                                                        "collapse.neck_stop"]
 
 
-def test_the_driver_takes_the_gas_only_with_its_problem_and_before_a_cut(tmp_path):
+def test_the_driver_takes_the_gas_only_with_its_problem(tmp_path):
     import types
 
     from faraday_singularity.driver import CollapseDriver, CollapseSettings
@@ -114,10 +114,13 @@ def test_the_driver_takes_the_gas_only_with_its_problem_and_before_a_cut(tmp_pat
     settings = CollapseSettings(t_end=1.0, dt_max=0.1)
     with pytest.raises(ValueError, match="needs a problem made with gas"):
         CollapseDriver(types.SimpleNamespace(gas=False), settings, tmp_path / "a", gas=gas)
-    with pytest.raises(ValueError, match="after a cut with the gas is not made yet"):
-        CollapseDriver(types.SimpleNamespace(gas=True), settings, tmp_path / "b", gas=gas,
-                       reconnect=ReconnectSettings(delta=1e-3))
     drv = CollapseDriver(types.SimpleNamespace(gas=True), settings, tmp_path / "c", gas=gas)
     assert drv.gas.status == "dormant" and (tmp_path / "c" / "gas.txt").read_text().startswith(
         "# step\ttime")
+    drv.close()
+    # a driver after a cut takes the block too: the gas restored from a landing state is retired
+    # at the cut (reset_after_cut), and one restored after the cut is retired already
+    drv = CollapseDriver(types.SimpleNamespace(gas=True), settings, tmp_path / "d", gas=gas,
+                         reconnect=ReconnectSettings(delta=1e-3))
+    assert drv.gas.status == "dormant"
     drv.close()

@@ -841,8 +841,6 @@ class CollapseDriver:
             if not getattr(problem, "gas", False):
                 raise ValueError("collapse.gas needs a problem made with gas (FaradayProblem(gas="
                                  "True)), whose free surface carries the gas traction")
-            if reconnect is not None:
-                raise ValueError("collapse.gas: a run after a cut with the gas is not made yet")
             self.gas = NeckGas(gas)
             self._gas_rows = open(self.outdir / "gas.txt", "w", buffering=1)
             self._gas_rows.write("# " + "\t".join(GAS_COLUMNS) + "\n")
@@ -2641,6 +2639,8 @@ class CollapseDriver:
         collapse and the cycle is not counted twice; the next step is the cut's ``dt0``."""
         if self.reconnect is None:
             raise RuntimeError("a driver that continues after a cut needs the reconnect settings")
+        if getattr(self, "gas", None) is not None and self.gas.status != "retired":
+            self._retire_gas(record)
         st = self.state
         dt0 = float(record["settings"]["dt0"])
         st.ell_prev = st.t_prev = math.nan
@@ -3281,8 +3281,12 @@ class CollapseDriver:
                             max_landing_ratio=MAX_LANDING_RATIO)
                 continue
             pinch = self.pinch_time()
+            extra = {}
+            if getattr(self, "gas", None) is not None and self.gas.active:
+                # the gas below the neck, as the entrained bubble would take it at this cut
+                extra["gas_handover"] = self.gas.handover(z_n=m["z_neck"])
             path = self.keep_state(self.outdir / "states" / f"landing_{delta:.6g}.dump",
-                                   landing=info, pinch=pinch)
+                                   landing=info, pinch=pinch, **extra)
             self._event("landing", m, **info, path=str(path), t_p=pinch["t_p"],
                         alpha_p=pinch["alpha"])
 
@@ -3405,6 +3409,25 @@ class CollapseDriver:
                                  "dumped with")
         elif rec.get("status") == "retired":
             self.gas.retire()
+
+    def _retire_gas(self, record: dict):
+        """At the cut (:meth:`reset_after_cut`): the hand-over of the gas below the cut's neck
+        (``gas_cut.json``: the partition of each variant at ``z_neck``, ``neckgas.coupler.
+        handover``, with the cut's radius, neck and time), then the gas retired and its traction
+        set to zero: the bubble keeps the passive constant pressure and the cavity vents to the
+        atmosphere (event ``gas-retired``)."""
+        gas = self.gas
+        out = {"t_cut": record.get("t_cut"), "delta": record.get("delta"),
+               "r_neck": record.get("r_neck"), "z_neck": record.get("z_neck"),
+               "gas_status": gas.status, "gas_time": gas.t, "t_on": gas.t_on,
+               "settings_sha256": gas.s.sha256(),
+               "handover": gas.handover(z_n=record.get("z_neck")) if gas.active else {}}
+        (self.outdir / "gas_cut.json").write_text(json.dumps(out, indent=1, default=float) + "\n")
+        gas.retire()
+        self.pb.set_gas_traction(0.0)
+        self._events.write(json.dumps({"event": "gas-retired", "time": self._t(),
+                                       "step": self.state.step, "status_before": out[
+                                           "gas_status"]}, default=float) + "\n")
 
     def _gas_summary(self) -> dict:
         gas = self.gas
