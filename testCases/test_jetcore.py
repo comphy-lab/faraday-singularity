@@ -4,6 +4,10 @@
   keyed by ``_stop_key``): the check at the loop's top of the state the step has just checked is
   not made again, and each caller is given its own copy; the step timing of the runner's
   ``--step-timing`` (``step_timing.txt``) reads clocks only and changes no other output.
+* The parts ``jetcore`` and ``pinch`` of the events block: left out of the block and its hash at
+  their defaults, validated, the keys of jetcore of the leg (its sizing keys among
+  ``events.SIZING_KEYS``) and those of pinch of the class ``liquid``; a key whose behaviour the
+  driver does not make yet is refused (``events.PENDING_KEYS``).
 """
 
 from __future__ import annotations
@@ -159,3 +163,120 @@ def test_the_driver_keyword_opens_the_step_timing_and_the_runner_passes_it_on_it
     proc = subprocess.run([sys.executable, str(ROOT / "simulationCases/run_faraday.py"), "--help"],
                           capture_output=True, text=True, timeout=120, check=False)
     assert proc.returncode == 0 and "--step-timing" in proc.stdout
+
+
+# --- C2: the optional parts jetcore and pinch of the events block ---------------------------------
+
+
+@pytest.fixture
+def made(monkeypatch):
+    """Every key of jetcore and pinch admitted, as once the driver makes them all."""
+    monkeypatch.setattr(ev, "PENDING_KEYS", {})
+
+
+def test_the_parts_at_their_defaults_leave_every_block_and_its_hash_as_it_was():
+    """``jetcore`` and ``pinch`` at their defaults are left out of the block, its hash and its
+    record, and a record without them reads as their defaults."""
+    for block in ({}, LIQUID, {"ring": {"enabled": True}}):
+        s = ev.EventSettings.from_dict(block)
+        assert "jetcore" not in s.to_dict() and "pinch" not in s.to_dict()
+        assert s == ev.EventSettings.from_dict({**block, "jetcore": {}, "pinch": {}})
+        assert s.sha256() == ev.EventSettings.from_dict(
+            {**block, "jetcore": {"enabled": False}}).sha256()
+        assert s.changed_keys(s.to_dict()) == []
+    assert ev.EventSettings.OPTIONAL_PARTS == ("ring", "jetcore", "pinch")
+
+
+def test_keys_not_made_yet_are_refused():
+    """A key of either part whose behaviour the driver does not make yet is refused away from its
+    default (``events.PENDING_KEYS``)."""
+    pending = ev.PENDING_KEYS
+    for name, part in (("jetcore", ev.JetCoreSettings), ("pinch", ev.PinchSettings)):
+        for key in pending.get(name, ()):
+            if key == "enabled":
+                with pytest.raises(ValueError, match="not made yet"):
+                    part(enabled=True)
+
+
+def test_the_parts_away_from_their_defaults_are_written_and_hashed(made):
+    jet = {"enabled": True, "far_floor": 1.5625e-5, "far_courant": 0.8, "far_kinks": "recentre",
+           "far_refine_ratio": 2.0, "prep_gap": 4.0, "profile_dt": 2.5e-7}
+    s = ev.EventSettings.from_dict({**LIQUID, "jetcore": jet,
+                                    "pinch": {"enabled": True, "r_c": 0.1}})
+    d = s.to_dict()
+    assert d["jetcore"]["far_floor"] == 1.5625e-5 and d["pinch"]["r_c"] == 0.1
+    assert ev.EventSettings.from_dict(json.loads(json.dumps(d))) == s
+    assert s.sha256() != ev.EventSettings.from_dict(LIQUID).sha256()
+    assert set(s.changed_keys(ev.EventSettings.from_dict(LIQUID).to_dict())) == {
+        *(f"jetcore.{k}" for k in jet), "pinch.enabled", "pinch.r_c"}
+
+
+@pytest.mark.parametrize("bad", [
+    {"jetcore": {"far_floor": 1e-5}},  # a key without enabled
+    {"jetcore": {"enabled": True, "core_radius": 0.0}},
+    {"jetcore": {"enabled": True, "wall_radius": 1.0}},
+    {"jetcore": {"enabled": True, "far_courant": -1.0}},
+    {"jetcore": {"enabled": True, "far_refine_ratio": 1.0}},
+    {"jetcore": {"enabled": True, "far_yield_turn": 180.0}},
+    {"jetcore": {"enabled": True, "prep_rho": 0.9}},
+    {"jetcore": {"enabled": True, "far_kinks": "shrink"}},
+    {"jetcore": {"enabled": True, "edge_turn_snapshots": "far"}},
+    {"jetcore": {"enabled": True, "box_gate": True}},  # no calibrated floors
+    {"jetcore": {"enabled": True, "prep_gap": 1.0}, "ring": {"enabled": True, "gap": 1.0}},
+    {"jetcore": {"enabled": True, "speed": 2}},
+    {"pinch": {"enabled": True}, "liquid": {"enabled": False}},
+    {"pinch": {"far_head": True}},  # without jetcore
+    {"pinch": {"min_samples": 2}},
+    {"pinch": {"r_c": 0.0}},
+    {"pinch": {"enabled": 1}},
+])
+def test_the_parts_refuse_what_they_cannot_take(made, bad):
+    block = json.loads(json.dumps(LIQUID))
+    for name, part in bad.items():
+        block[name] = {**block.get(name, {}), **part}
+    with pytest.raises(ValueError):
+        ev.EventSettings.from_dict(block)
+
+
+def test_the_gate_takes_the_calibrated_floors(made):
+    block = {"liquid": {**LIQUID["liquid"], "sigma_V": 1e-13, "sigma_Pz": 3e-10},
+             "post": LIQUID["post"], "jetcore": {"enabled": True, "box_gate": True}}
+    assert ev.EventSettings.from_dict(block).jetcore.box_gate
+
+
+def test_jetcore_keys_are_of_the_leg_and_pinch_keys_of_the_class_liquid(made):
+    """Every key of jetcore changes at any restart; a key of pinch is refused once a liquid event
+    has been made, but from the state before an event; the sizing keys of jetcore make a dumped
+    fresh mesh stepped (``events.SIZING_KEYS``)."""
+    old = ev.EventSettings.from_dict(LIQUID).to_dict()
+    new = ev.EventSettings.from_dict({**LIQUID, "jetcore": {"enabled": True, "far_floor": 1e-5},
+                                      "pinch": {"enabled": True}})
+    done = {"liquid": 1, "gap": 0, "ring": 0}
+    assert new.refused_changes(old, done, None) == ["pinch.enabled"]
+    assert new.refused_changes(old, done, 3) == []
+    assert new.refused_changes(old, {"liquid": 0}, None) == []
+    only_jet = ev.EventSettings.from_dict({**LIQUID, "jetcore": {"enabled": True,
+                                                                 "far_courant": 0.8}})
+    assert only_jet.refused_changes(old, done, None) == []
+    assert ev.EventSettings.class_of("pinch.r_c") == "liquid"
+    assert ev.EventSettings.class_of("jetcore.far_floor") is None
+    assert ev.EventSettings.class_of("ring.after_removal") is None
+    assert ev.EventSettings.class_of("ring.rho") == "ring"
+    sizing = set(new.changed_keys(old)) & set(ev.SIZING_KEYS)
+    assert sizing == {"jetcore.enabled", "jetcore.far_floor"}
+    assert not set(only_jet.changed_keys(ev.EventSettings.from_dict(
+        {**LIQUID, "jetcore": {"enabled": True}}).to_dict())) & set(ev.SIZING_KEYS)
+
+
+def test_the_runner_admits_a_jetcore_change_and_refuses_a_pinch_change_after_a_liquid_event(made):
+    import run_case
+
+    old = ev.EventSettings.from_dict(LIQUID).to_dict()
+    meta = {"events_settings": old, "events": [{"k": 1, "kind": "liquid-neck"}]}
+    run_case._check_events(meta, ev.EventSettings.from_dict(
+        {**LIQUID, "jetcore": {"enabled": True, "far_floor": 1e-5}}))
+    with pytest.raises(SystemExit, match="pinch.enabled"):
+        run_case._check_events(meta, ev.EventSettings.from_dict({**LIQUID,
+                                                                 "pinch": {"enabled": True}}))
+    run_case._check_events({**meta, "cut_stage": ev.PRECUT_EVENT, "event": {"k": 2}},
+                           ev.EventSettings.from_dict({**LIQUID, "pinch": {"enabled": True}}))

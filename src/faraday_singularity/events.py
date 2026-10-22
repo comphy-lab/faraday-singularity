@@ -27,16 +27,22 @@ The block has four parts and a few keys of its own:
   bubble's volume at the gas cut (``ringsurgery.ring_removal``); off by default, when the piercing
   stays an event without a handler, and written into the block only where it differs from its
   defaults, so that every block recorded before it existed, and its hash, is unchanged;
+* ``jetcore`` (:class:`JetCoreSettings`): the resolution policy that resolves the upward jet (the
+  core, ``jetcore.py``) as before and meshes and steps the rest of the free surface (the far
+  region) under simplifying assumptions; ``pinch`` (:class:`PinchSettings`): when a tracked neck
+  with a head is cut. Both are off by default and written into the block only where they differ
+  from their defaults, as ``ring`` is;
 * of its own: the most events a run makes (``max_events``) and the test of a cascade of events at
   one tip (``cascade_min_interval``, ``cascade_ratio``, ``cascade_count``).
 
 Which keys a restart may change: the keys of ``liquid``, ``gap`` and ``ring`` are the keys of their
-class of events (:meth:`EventSettings.class_keys`), fixed once an event of the class has been made
+class of events (:meth:`EventSettings.class_keys`), and those of ``pinch`` keys of the class
+``liquid`` (:data:`EventSettings.CLASS_OF_PART`), fixed once an event of the class has been made
 (for ``ring``, the cut of the piercing or the ring's removal), except in a restart from the state
 before an event (``precut_e<k>``), from which they apply anew; every other key is a key of the leg,
-which any restart may change (:meth:`EventSettings.refused_changes`), ``ring.after_removal`` among
-them (:data:`EventSettings.LEG_KEYS_OF_CLASSES`). Lengths and times are in the solver's units
-(length ``1/k``, capillary time).
+which any restart may change (:meth:`EventSettings.refused_changes`), ``ring.after_removal`` and
+every key of ``jetcore`` among them (:data:`EventSettings.LEG_KEYS_OF_CLASSES`). Lengths and times
+are in the solver's units (length ``1/k``, capillary time).
 
 With the block the stops of a state after the cut are those of :func:`post_cut_events`, in three
 ranks: a state that is not valid stops the run; the bubble emptying ends the window; every change of
@@ -102,7 +108,21 @@ PRECUT_EVENT = "precut-event"
 # mesh of the old sizes again); the rule of its rebuilds remeshes it at the new sizes instead
 SIZING_KEYS = ("post.h_floor", "post.neck_floor", "post.neck_elements_per_scale",
                "post.bubble_bottom_sizing", "post.bubble_bottom_size", "ring.size",
-               "ring.cut_elements")
+               "ring.cut_elements", "jetcore.enabled", "jetcore.core_radius",
+               "jetcore.wall_radius", "jetcore.far_floor", "jetcore.far_kinks",
+               "jetcore.far_yield_turn", "jetcore.ring_kink_floor", "jetcore.prep_gap",
+               "jetcore.prep_rho")
+# the far kinks of jetcore (JetCoreSettings.far_kinks): grown as the core's, or recentred
+JETCORE_KINKS = ("grow", "recentre")
+# the elements of the open chain whose turn writes a profile at every step (edge_turn_snapshots)
+JETCORE_SNAPSHOTS = ("any", "core")
+# the keys of the parts jetcore and pinch whose behaviour the driver does not make yet: refused away
+# from their defaults, so that no case sets a key that does nothing
+PENDING_KEYS = {"jetcore": ("enabled", "core_radius", "wall_radius", "far_courant", "far_floor",
+                            "far_kinks", "far_yield_turn", "far_refine_ratio", "ring_kink_floor",
+                            "edge_turn_snapshots", "prep_gap", "prep_rho", "profile_dt",
+                            "box_gate", "box_gate_sigmas"),
+                "pinch": ("enabled", "r_c", "window", "min_samples", "kappa", "far_head")}
 
 
 def _number(value) -> bool:
@@ -353,6 +373,142 @@ class RingEventSettings:
                              "or null")
 
 
+def _pending(part) -> None:
+    """Refuse the keys of ``part`` (a :class:`JetCoreSettings` or :class:`PinchSettings`) that
+    differ from their defaults but whose behaviour the driver does not make yet
+    (:data:`PENDING_KEYS`)."""
+    name = "jetcore" if isinstance(part, JetCoreSettings) else "pinch"
+    default = {f.name: f.default for f in fields(part)}
+    pending = [k for k in PENDING_KEYS.get(name, ()) if getattr(part, k) != default[k]]
+    if pending:
+        raise ValueError(f"collapse.{EVENTS_BLOCK}.{name}: not made yet by this driver: "
+                         + ", ".join(pending))
+
+
+@dataclass(frozen=True)
+class JetCoreSettings:
+    """``jetcore``: the resolution policy of the run after the cut that resolves the upward liquid
+    jet as finely as before and meshes and steps the rest of the free surface under simplifying
+    assumptions, every feature kept in the domain (``jetcore.py``). Off by default, and written into
+    the block only where it differs from its defaults (:meth:`EventSettings.to_dict`); with
+    ``enabled`` false no other key may differ from its default. Every key is a key of the leg.
+
+    The core K is the part of the open chain about the base of the upward jet (the apex ``A`` of the
+    groove around it, the point the observables use): its nodes within ``R_K = max(core_radius L,
+    reconnect.apex_extent R_apex)`` of ``A``, ``L = max(r_j, delta)``, but not above the jet's
+    tracked liquid neck, and the walls beyond the apex within ``wall_radius L`` of it; without a
+    base of the jet the whole open chain. The far region is every other node of the free surface.
+
+    * ``far_courant``: the Courant number of the far nodes, the core's ``reconnect.courant``; null
+      for that number, which leaves the step as it was.
+    * ``far_floor``: the smallest element size of a far feature, absolute (``h_F``; null none): the
+      target of every far region at least ``far_floor``, the tracked necks' regions exempt.
+    * ``far_kinks``: ``grow`` keeps the guard's kink regions as in the core; ``recentre`` gives the
+      far elements of each chain a region of their own (``kink_<chain>_far``), recentred on its
+      worst element at each request with a radius of four chords, at ``max(chord/4, far_floor)``,
+      and below the floor only while the turn exceeds ``far_yield_turn`` degrees, halving at each
+      rebuild down to the run's ``h_floor`` (a ``far-yield``).
+    * ``far_refine_ratio``: the refine ratio of the far regions (null: the collapse's).
+    * ``ring_kink_floor``: the ring's kink regions no finer than the column's element size.
+    * ``edge_turn_snapshots``: ``any`` writes a profile at every step while any element turns by
+      more than ``reconnect.edge_turn_refine``, ``core`` only while one of the core does.
+    * ``prep_gap``: once the bubble is shorter than ``prep_gap delta`` (null: never), its bottom and
+      the downward jet's tip are refined (``pierce_bottom``, ``pierce_tip``, radius ``s_t`` the
+      jet's shoulder) at ``prep_rho s_t / 2.25``, so that the ring cut admits a splice radius of
+      ``prep_rho s_t`` with a margin of 1.5 on its check; exempt from ``far_floor``, stepped at the
+      core's Courant number.
+    * ``profile_dt``: a profile at least every ``profile_dt`` of time after the cut (reason
+      ``window``; null none).
+    * ``box_gate``: every ordinary rebuild may change the liquid volume and axial momentum of the
+      box of radius ``liquid.box_radius delta`` about the core by at most ``box_gate_sigmas`` times
+      ``liquid.sigma_V`` and ``liquid.sigma_Pz``; otherwise the run stops resumably with the state
+      before the rebuild.
+
+    A key of :data:`PENDING_KEYS` is refused away from its default until the driver makes it."""
+    enabled: bool = False
+    core_radius: float = 2.0
+    wall_radius: float = 10.0
+    far_courant: float | None = None
+    far_floor: float | None = None
+    far_kinks: str = "grow"
+    far_yield_turn: float = 75.0
+    far_refine_ratio: float | None = None
+    ring_kink_floor: bool = False
+    edge_turn_snapshots: str = "any"
+    prep_gap: float | None = None
+    prep_rho: float = 0.125
+    profile_dt: float | None = None
+    box_gate: bool = False
+    box_gate_sigmas: float = 5.0
+
+    def __post_init__(self):
+        for name in ("enabled", "ring_kink_floor", "box_gate"):
+            _flag("jetcore", name, getattr(self, name))
+        for name in ("core_radius", "wall_radius", "box_gate_sigmas"):
+            _positive("jetcore", name, getattr(self, name))
+        for name in ("far_courant", "far_floor", "prep_gap", "profile_dt"):
+            _positive("jetcore", name, getattr(self, name), optional=True)
+        if not self.wall_radius >= self.core_radius:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore.wall_radius must be at least "
+                             "core_radius")
+        if self.far_refine_ratio is not None and not (_number(self.far_refine_ratio)
+                                                      and self.far_refine_ratio > 1.0):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore.far_refine_ratio must exceed one, "
+                             "or be null")
+        if not (_number(self.far_yield_turn) and 0.0 < self.far_yield_turn < 180.0):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore.far_yield_turn must lie in (0, 180) "
+                             "degrees")
+        if not (_number(self.prep_rho) and 0.0 < self.prep_rho <= RING_RHO_MAX):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore.prep_rho must lie in (0, "
+                             f"{RING_RHO_MAX:g}]")
+        for name, allowed in (("far_kinks", JETCORE_KINKS),
+                              ("edge_turn_snapshots", JETCORE_SNAPSHOTS)):
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore.{name} must be one of "
+                                 f"{allowed}")
+        if not self.enabled:
+            changed = [f.name for f in fields(self) if f.name != "enabled"
+                       and getattr(self, f.name) != f.default]
+            if changed:
+                raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore: {', '.join(changed)} need "
+                                 "jetcore.enabled")
+        _pending(self)
+
+
+@dataclass(frozen=True)
+class PinchSettings:
+    """``pinch``: when a tracked neck with a head (``liquid``) is cut. Off by default, and written
+    into the block only where it differs from its defaults; its keys are keys of the class
+    ``liquid`` (:data:`EventSettings.CLASS_OF_PART`), fixed once a liquid event has been made.
+
+    With ``enabled`` a tracked neck with a head lands only when it closes (``events.closing_neck``,
+    from its history over the steps): ``r_n <= r_c delta``; a quadratic fit of ``r_n(t)`` over the
+    trailing ``window r_n^(3/2)`` of time, at least ``min_samples`` samples, with a negative slope
+    at its end and a curvature not positive; and the time to its pinch at that rate, ``(2/3) r_n /
+    |dr_n/dt|``, at most ``kappa r_n^(3/2)``. Neither ``liquid.eps_d`` nor ``liquid.eps_max`` then
+    lands a neck: a fold that reaches the head of a neck that does not close is a groove. With
+    ``far_head`` an event without a handler whose site lies on the head of a tracked neck in the
+    far region (``jetcore``; the gas neck at the rim of the downward jet's head, say) is met by the
+    liquid cut of that neck instead (kind ``far-head``, class ``F-head``), its budgets the cut's."""
+    enabled: bool = False
+    r_c: float = 0.2
+    window: float = 0.05
+    min_samples: int = 8
+    kappa: float = 3.0
+    far_head: bool = False
+
+    def __post_init__(self):
+        for name in ("enabled", "far_head"):
+            _flag("pinch", name, getattr(self, name))
+        for name in ("r_c", "window", "kappa"):
+            _positive("pinch", name, getattr(self, name))
+        m = self.min_samples
+        if isinstance(m, bool) or not isinstance(m, int) or m < 3:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.pinch.min_samples must be an integer of at "
+                             "least three (a quadratic fit)")
+        _pending(self)
+
+
 def event_dump_policy(value) -> tuple[int, int] | None:
     """``post.keep_event_dumps`` as ``(N, M)`` for ``first<N>-last<M>``, None for ``all``. Raises
     ``ValueError`` for any other value."""
@@ -403,27 +559,33 @@ class EventSettings:
     (:class:`CascadeMonitor`: ``cascade_min_interval`` in ``delta^2``, ``cascade_ratio``,
     ``cascade_count``).
 
-    The part ``ring`` (:class:`RingEventSettings`) is written into the block (:meth:`to_dict`, and
-    so into its hash, every leg and every dump) only where it differs from its defaults: a block
-    without it, as every block recorded before it existed, is the same to the byte, and a record
-    without it reads as the defaults (:meth:`_completed`)."""
+    The parts ``ring`` (:class:`RingEventSettings`), ``jetcore`` (:class:`JetCoreSettings`) and
+    ``pinch`` (:class:`PinchSettings`) are written into the block (:meth:`to_dict`, and so into its
+    hash, every leg and every dump) only where they differ from their defaults: a block without
+    them, as every block recorded before they existed, is the same to the byte, and a record without
+    them reads as the defaults (:meth:`_completed`)."""
     liquid: LiquidEventSettings = field(default_factory=LiquidEventSettings)
     gap: GapSettings = field(default_factory=GapSettings)
     post: PostCutSettings = field(default_factory=PostCutSettings)
     ring: RingEventSettings = field(default_factory=RingEventSettings)
+    jetcore: JetCoreSettings = field(default_factory=JetCoreSettings)
+    pinch: PinchSettings = field(default_factory=PinchSettings)
     max_events: int = 1000
     cascade_min_interval: float = 0.25
     cascade_ratio: float = 0.7
     cascade_count: int = 3
 
     PARTS = {"liquid": LiquidEventSettings, "gap": GapSettings, "post": PostCutSettings,
-             "ring": RingEventSettings}
+             "ring": RingEventSettings, "jetcore": JetCoreSettings, "pinch": PinchSettings}
     CLASSES = ("liquid", "gap", "ring")  # the parts whose keys are the keys of a class of events
+    # the class of events whose keys a part's keys are: its own for a part of CLASSES, and those of
+    # pinch (when a neck is cut) the class liquid's; the parts not here are of the leg
+    CLASS_OF_PART = {"liquid": "liquid", "gap": "gap", "ring": "ring", "pinch": "liquid"}
     # keys of a part of a class that are keys of the leg all the same: what the run does after the
     # ring's removal, which a continuation from the state the window ended on may change
     LEG_KEYS_OF_CLASSES = ("ring.after_removal",)
     # the parts written into the block only where they differ from their defaults (to_dict)
-    OPTIONAL_PARTS = ("ring",)
+    OPTIONAL_PARTS = ("ring", "jetcore", "pinch")
     KEYS = ("max_events", "cascade_min_interval", "cascade_ratio", "cascade_count")  # of the leg
 
     def __post_init__(self):
@@ -438,6 +600,19 @@ class EventSettings:
             raise ValueError(f"collapse.{EVENTS_BLOCK}: liquid events need post.neck_floor (the "
                              "region of a neck is otherwise floored at the cut's focus size, "
                              "which cannot follow a neck to its landing below the cut radius)")
+        if (self.pinch.enabled or self.pinch.far_head) and not self.liquid.enabled:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}: pinch needs liquid.enabled (its necks are "
+                             "the tracked ones)")
+        if self.pinch.far_head and not self.jetcore.enabled:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}: pinch.far_head needs jetcore.enabled (a "
+                             "far head lies outside its core)")
+        if self.jetcore.box_gate and not (self.liquid.sigma_V > 0.0 and self.liquid.sigma_Pz > 0.0):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}: jetcore.box_gate needs the calibrated "
+                             "noise floors liquid.sigma_V and liquid.sigma_Pz")
+        if self.jetcore.prep_gap is not None and self.ring.enabled and \
+                not self.jetcore.prep_gap > self.ring.gap:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}: jetcore.prep_gap must exceed ring.gap (the "
+                             "refinement before the piercing comes before its trigger)")
         for name in ("max_events", "cascade_count"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -481,10 +656,20 @@ class EventSettings:
         return hashlib.sha256(json.dumps(self.to_dict(), sort_keys=True).encode()).hexdigest()
 
     def class_keys(self, kind: str) -> dict:
-        """The keys of a class of events (``liquid``, ``gap`` or ``ring``)."""
+        """The keys of a class of events (``liquid``, ``gap`` or ``ring``), those of its own part;
+        the keys of the class of a part beside it (``pinch``, of the class ``liquid``) are
+        :meth:`class_of`'s."""
         if kind not in self.CLASSES:
             raise ValueError(f"no class of events {kind!r}; the classes are {self.CLASSES}")
         return asdict(getattr(self, kind))
+
+    @classmethod
+    def class_of(cls, key: str) -> str | None:
+        """The class of events whose key the dotted ``key`` is (:data:`CLASS_OF_PART`), None for a
+        key of the leg (``LEG_KEYS_OF_CLASSES`` among them)."""
+        if key in cls.LEG_KEYS_OF_CLASSES:
+            return None
+        return cls.CLASS_OF_PART.get(key.split(".", 1)[0])
 
     @classmethod
     def _completed(cls, recorded: dict) -> dict:
@@ -523,13 +708,13 @@ class EventSettings:
         existed, which may take any block) that a restart may not make: those of the keys of a class
         of which ``done`` counts an event already made, unless the restart is from the state before
         an event, ``precut_e<recut_from>``, from which the class keys apply anew (events before it
-        stay as made). The keys of the leg (``post``, the block's own, ``KEYS``, and those of
-        ``LEG_KEYS_OF_CLASSES``) may change at any restart."""
+        stay as made). The keys of the leg (``post``, ``jetcore``, the block's own, ``KEYS``, and
+        those of ``LEG_KEYS_OF_CLASSES``) may change at any restart; those of ``pinch`` are of the
+        class ``liquid`` (:meth:`class_of`)."""
         if recorded is None or recut_from is not None:
             return []
         return [k for k in self.changed_keys(recorded)
-                if k.split(".", 1)[0] in self.CLASSES and k not in self.LEG_KEYS_OF_CLASSES
-                and done.get(k.split(".", 1)[0], 0) > 0]
+                if self.class_of(k) is not None and done.get(self.class_of(k), 0) > 0]
 
 
 def events_done(records) -> dict[str, int]:

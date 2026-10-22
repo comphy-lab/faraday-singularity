@@ -605,8 +605,8 @@ RING_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "ring_volume", "ring_volum
                 "ring_fold_limit", "ring_axis_limit", "ring_open_gap", "edge_turn_ring",
                 "edge_midside_ring", "V_filled", "Pz_filled", "KE_filled")
 # step_timing.txt, with the driver's step_timing (a flag of the runner, no key of a case): a row
-# per accepted step, the wall time of the parts of its iteration of the loop (seconds, perf_counter):
-# the stops at the loop's top and the choice of the step, the solve, the measurement after it (with
+# per accepted step, the wall time of the parts of its iteration of the loop (seconds of
+# perf_counter): the stops at the loop's top and the choice of the step, the solve, the measurement after it (with
 # a rebuild for distortion), the bookkeeping and rows, the stops after the step, the snapshot, the
 # remesh check, the commit after the cut and the dump; the total of the iteration
 STEP_TIMING_COLUMNS = ("step", "time", "dt", "top", "solve", "measure", "rows", "stops", "snapshot",
@@ -987,8 +987,8 @@ class CollapseDriver:
         """The stops before a second change of topology, on both chains (post-cut mode), with the
         guard of the interface on its quadratic elements; on a freshly built mesh also the check of
         its curved elements (:meth:`_jacobian_stop`): a rebuild is accepted only if every element
-        is valid. Evaluated once per state (:meth:`_stop_key`), each caller given its own copy, which
-        it may change."""
+        is valid. Evaluated once per state (:meth:`_stop_key`), each caller given its own copy,
+        which it may change."""
         if self._cut_record() is None:
             return None
         key = self._stop_key()
@@ -2568,7 +2568,8 @@ class CollapseDriver:
             if meta.get("cut_stage") == PRECUT_EVENT:
                 k = (meta.get("event") or {}).get("k")
                 leg["from_event_state"] = k
-                if any(c.split(".", 1)[0] in EventSettings.CLASSES for c in leg["changed"]):
+                if any(EventSettings.CLASS_OF_PART.get(c.split(".", 1)[0]) is not None
+                       for c in leg["changed"]):
                     leg["event_keys_changed_at"] = k
         st.legs.append(leg)
         self._event("leg", m, **{k: v for k, v in leg.items() if k not in ("time", "step")})
