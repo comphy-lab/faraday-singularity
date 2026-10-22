@@ -303,9 +303,15 @@ L, apex_extent R_apex)`` of the base, ``L = max(r_j, delta)``, not above the jet
 the walls beyond the base within ``wall_radius L``; the whole open chain without a base), every
 other node of the free surface the far region, and the Courant limit of the step is split between
 them (``jetcore.courant_split``: ``reconnect.courant`` on the core, ``jetcore.far_courant`` on the
-far nodes, the same number by default, which leaves the step as it was); ``jetcore.txt`` holds a
-row per step (``jetcore.COLUMNS``: what set the step, the split limit, the core) and every leg the
-resolved keys (``limits.jetcore``).
+far nodes, the same number by default, which leaves the step as it was); the far region's sizing
+follows the part's keys (:meth:`CollapseDriver._feature_regions`: each region's class,
+``jetcore.region_class``; the far targets floored at ``far_floor``; with ``far_kinks``
+``recentre`` the guard's far kinks in regions of their own, ``jetcore.far_kink_regions``, each
+yield below the floor an event ``far-yield``; the far refine ratio; the ring's kinks at the
+column's size; the profiles of an element that bends from the core's elements only, with
+``edge_turn_snapshots`` ``core``); ``jetcore.txt`` holds a row per step (``jetcore.COLUMNS``: what
+set the step, the split limit, the core, the far regions) and every leg the resolved keys
+(``limits.jetcore``).
 
 After a cut the stops of a state are evaluated once (:meth:`CollapseDriver._post_cut_stop`, keyed
 by the state, :meth:`CollapseDriver._stop_key`): the check at the loop's top of the state the step
@@ -702,6 +708,8 @@ class _State:
     kinks: dict = field(default_factory=dict)
     # after a cut with the events block: the legs of the run, a restart or the cut each starting one
     legs: list = field(default_factory=list)
+    # with jetcore: the yields of far kinks below the far floor made so far (jetcore.far_kink_regions)
+    far_yields: int = 0
 
 
 def _in_ulps(dt: float, t: float) -> float | None:
@@ -1419,16 +1427,22 @@ class CollapseDriver:
         h_floor = self._h_floor()
         refine = interface_guard(pc["edges"], self.reconnect, fresh=self._fresh_mesh(),
                                  h_floor=h_floor, refine_ratio=s.refine_ratio)["refine"]
-        kinks = kink_regions(st.kinks, pc["edges"], refine, t=self._t(), h_floor=h_floor,
-                             hold=lambda L: s.coarsen_hold * local_time(L, U))
+        focus = self.pb.active_mesh_template().focus
+        jet, core = self._jetcore(), pc.get("core")
+        if jet is not None and core is not None and jet.far_kinks == "recentre":
+            kinks = self._split_kinks(refine, pc, core, U, focus)
+        else:
+            kinks = kink_regions(st.kinks, pc["edges"], refine, t=self._t(), h_floor=h_floor,
+                                 hold=lambda L: s.coarsen_hold * local_time(L, U))
         regions += [{"name": g["name"], "target": g["target"], "r": g["r"], "z": g["z"],
                      "radius": g["radius"], "ell": math.inf, "floor": h_floor,
                      "released": g["released"]} for g in kinks.values()]
-        focus = self.pb.active_mesh_template().focus
         axis_tips = [float(c["z"][k]) for c in segs for k, end in ((0, 0), (-1, 1))
                      if c["end_types"][end] == AXIS]
         frozen = self._frozen_ring_regions()
         regions += frozen
+        if jet is not None and core is not None:
+            self._far_sizing(regions, segs, core)
         for g in regions:
             current = focus.region(g["name"]) if focus is not None else None
             g["size"] = current.size if current is not None else math.nan
@@ -1451,6 +1465,65 @@ class CollapseDriver:
             g["h_max"], g["h_min"] = region_spacing(spaced, g, axis_tips, cut.get("sizing"), own,
                                                     finer)
         return regions, kinks
+
+    def _split_kinks(self, refine: dict, pc: dict, core: dict, U: float, focus) -> dict:
+        """With ``jetcore.far_kinks`` ``recentre``: the guard's kink regions split between the core
+        and the far region (``jetcore.split_refine``): the core's by the rule without the part
+        (``reconnect.kink_regions``, keyed by chain), their radius at most ``R_K``; the far
+        region's in a region of their own per chain (``jetcore.far_kink_regions``, keyed
+        ``<chain>_far``), at the far floor (and, with ``ring_kink_floor``, the ring's no finer than
+        the column), yielding below it only past ``far_yield_turn``."""
+        from .jetcore import far_kink_regions, split_refine
+
+        s, st, jet = self.s, self.state, self._jetcore()
+        h_floor = self._h_floor()
+
+        def hold(L):
+            return s.coarsen_hold * local_time(L, U)
+
+        near, far = split_refine(refine, pc["edges"], core)
+        kinks = kink_regions({k: v for k, v in st.kinks.items() if not v.get("far")},
+                             pc["edges"], near, t=self._t(), h_floor=h_floor, hold=hold)
+        if not core["whole"] and math.isfinite(core["R_K"]):
+            for g in kinks.values():
+                g["radius"] = min(g["radius"], core["R_K"])
+        sizes = {g.name: g.size for g in (focus.regions if focus is not None else ())}
+        h_col = self._column_size()
+        floors = {"ring": h_col} if jet.ring_kink_floor and math.isfinite(h_col) else {}
+        kinks.update(far_kink_regions({k: v for k, v in st.kinks.items() if v.get("far")},
+                                      pc["edges"], far, t=self._t(), hold=hold,
+                                      h_far=jet.far_floor, h_floor=h_floor,
+                                      yield_turn=jet.far_yield_turn, sizes=sizes, floors=floors))
+        return kinks
+
+    def _column_size(self) -> float:
+        """The element size of the ring's column (the record of the ring stage's ``h_col``); NaN
+        before the ring and once it is removed."""
+        ring = self._ring()
+        if ring is None or ring.get("removed") is not None:
+            return math.nan
+        return float((ring.get("sizing") or {}).get("h_col", math.nan))
+
+    def _far_sizing(self, regions: list[dict], segs: list, core: dict):
+        """With ``jetcore``: the class of each region (``jetcore.region_class``, ``class``) and the
+        far region's targets: at least ``far_floor`` (``floored``), but for the far kinks, which
+        floor and yield on their own (``jetcore.far_kink_regions``); with ``ring_kink_floor`` the
+        ring's kinks at least the column's size."""
+        from .jetcore import FAR, region_class
+
+        jet = self._jetcore()
+        opens = [c for c in segs if c["open"]]
+        P = np.column_stack([opens[0]["r"], opens[0]["z"]]) if opens else None
+        h_col = self._column_size()
+        for g in regions:
+            g["class"] = region_class(g, core, P)
+            if g["class"] != FAR or g["name"].endswith("_far"):
+                continue
+            if jet.far_floor is not None and g["target"] < jet.far_floor:
+                g["target"], g["floored"] = jet.far_floor, True
+            if jet.ring_kink_floor and g["name"] == "kink_ring" and math.isfinite(h_col) \
+                    and g["target"] < h_col:
+                g["target"], g["floored"] = h_col, True
 
     def _frozen_ring_regions(self) -> list[dict]:
         """The ring's regions frozen at its cut (the problem's record of the stage, ``sizing``:
@@ -1498,6 +1571,11 @@ class CollapseDriver:
             if g["released"] and (current is None or current.size >= g["h_before"] * (1 - 1e-9)):
                 continue
             kinks[chain] = dict(g)
+            new = int(g.get("yields", 0)) - int((st.kinks.get(chain) or {}).get("yields", 0))
+            if g.get("far") and new > 0:  # with jetcore's far kinks: a yield below the floor
+                st.far_yields += new
+                self._event("far-yield", m, name=g["name"], chain=g["chain"], turn=g["turn"],
+                            target=g["target"], yields=g["yields"], r=g["r"], z=g["z"])
         st.kinks = kinks
 
     def _regions_focus(self, regions: list[dict], *, keep: bool) -> Focus:
@@ -1537,7 +1615,8 @@ class CollapseDriver:
             new = focus.region(g["name"]) if focus is not None else None
             out.append({k: g[k] for k in ("name", "target", "size", "h_max", "h_min", "r", "z",
                                           "radius")}
-                       | ({"new_size": new.size} if new is not None else {}))
+                       | ({"new_size": new.size} if new is not None else {})
+                       | ({"class": g["class"]} if "class" in g else {}))
         return out
 
     def _write_chain_row(self, m: dict, dt: float):
@@ -1580,9 +1659,9 @@ class CollapseDriver:
         if self._ring_rows is not None:  # in the ring stage only
             self._write_ring_row(dt)
         if self._jetcore_rows is not None:  # with jetcore only
-            self._write_jetcore_row(dt)
+            self._write_jetcore_row(m, dt)
 
-    def _write_jetcore_row(self, dt: float):
+    def _write_jetcore_row(self, m: dict, dt: float):
         """The row of ``jetcore.txt`` of a step after the cut (``jetcore.COLUMNS``): the step just
         taken and what set it (:meth:`_dt_limiter_of`), and, as ``chains.txt`` has its limits, the
         split Courant limit and the core of the state it ended on."""
@@ -1597,7 +1676,10 @@ class CollapseDriver:
                   "binds": split.get("binds"), "far_courant": split.get("far_courant"),
                   **{k: core.get(k) for k in ("L", "R_K", "A_r", "A_z", "z_cap")},
                   "core_nodes": (split.get("core") or {}).get("nodes"),
-                  "far_nodes": (split.get("far") or {}).get("nodes")}
+                  "far_nodes": (split.get("far") or {}).get("nodes"),
+                  "far_regions": sum(1 for g in m.get("regions") or () if g.get("class") == "far"),
+                  "far_floored": sum(1 for g in m.get("regions") or () if g.get("floored")),
+                  "far_yields": self.state.far_yields}
         for cls in ("core", "far"):
             b = split.get(cls) or {}
             values.update({f"h_{cls}": b.get("h"), f"U_{cls}": b.get("U"), f"r_{cls}": b.get("r"),
@@ -2182,8 +2264,11 @@ class CollapseDriver:
         coarsening after a refining rebuild is that of the rule before the cut."""
         s, st = self.s, self.state
         regions = m["regions"]
-        refine = [g for g in regions
-                  if math.isfinite(g["h_max"]) and g["h_max"] > s.refine_ratio * g["target"]]
+        jet = self._jetcore()
+        far_ratio = (jet.far_refine_ratio if jet is not None and jet.far_refine_ratio is not None
+                     else s.refine_ratio)
+        refine = [g for g in regions if math.isfinite(g["h_max"]) and g["h_max"] > (
+            far_ratio if g.get("class") == "far" else s.refine_ratio) * g["target"]]
         coarsen = [g for g in regions
                    if math.isfinite(g["h_min"]) and g["h_min"] < s.coarsen_ratio * g["target"]]
         if refine:
@@ -2406,6 +2491,8 @@ class CollapseDriver:
                             mesh_fresh=self._fresh_mesh())
                 if self._ring() is not None:  # the ring stage: its record, restored with it
                     meta["ring"] = self._ring()
+                if self._jetcore() is not None:  # with jetcore only: other dumps keep their keys
+                    meta["far_yields"] = st.far_yields
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -2567,6 +2654,7 @@ class CollapseDriver:
             st.apex_history = {str(k): [float(x) for x in v]
                                for k, v in (meta.get("apex_history") or {}).items()}
             st.kinks = {str(k): dict(v) for k, v in (meta.get("kinks") or {}).items()}
+            st.far_yields = int(meta.get("far_yields", 0))
             if self.events is not None:
                 self.pb.events = [dict(x) for x in meta.get("events") or []]
                 st.legs = [dict(x) for x in meta.get("legs") or []]
@@ -2965,6 +3053,7 @@ class CollapseDriver:
         st.ell_prev = st.t_prev = math.nan
         st.apex_history.pop(record.get("tip"), None)
         st.kinks.pop(record.get("chain"), None)
+        st.kinks.pop(f"{record.get('chain')}_far", None)  # jetcore's far kink of the chain
         self._checks_pending = False
         self._stop_cache = None
         m = self.measure()
@@ -3019,6 +3108,7 @@ class CollapseDriver:
         for tip in BUBBLE_TIP_SIGNS:
             st.apex_history.pop(tip, None)
         st.kinks.pop("bubble", None)
+        st.kinks.pop("bubble_far", None)  # jetcore's far kink of the bubble
         if kind == "ring-cut":
             for e in self._made_events():
                 g = e.get("ghost")
@@ -3588,9 +3678,21 @@ class CollapseDriver:
         return [] if reading is None else [reading]
 
     def _edge_turn_max(self) -> float:
-        """The largest turn of the tangent across a quadratic element of either chain (degrees)."""
-        turns = [rd["turn"] for rd in self._post_cut_state()["edges"].values()
-                 if math.isfinite(rd["turn"])]
+        """The largest turn of the tangent across a quadratic element of either chain (degrees);
+        with ``jetcore.edge_turn_snapshots`` ``core``, of the core's elements only (those of the
+        open chain whose midside node is a core node, ``jetcore.core_mask``)."""
+        pc = self._post_cut_state()
+        jet, core = self._jetcore(), pc.get("core")
+        if jet is not None and core is not None and jet.edge_turn_snapshots == "core":
+            e = (pc["edges"].get("open") or {}).get("edges")
+            if e is None:
+                return 0.0
+            mask = np.asarray(core["mask"], dtype=bool)
+            mid = np.clip(np.asarray(e["index"], dtype=int), 0, len(mask) - 1)
+            turns = np.asarray(e["turn"], dtype=float)[mask[mid]]
+            turns = turns[np.isfinite(turns)]
+            return float(turns.max()) if len(turns) else 0.0
+        turns = [rd["turn"] for rd in pc["edges"].values() if math.isfinite(rd["turn"])]
         return max(turns, default=0.0)
 
     def _write_lastgood(self, m: dict, exc: BaseException):

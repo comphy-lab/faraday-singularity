@@ -15,6 +15,16 @@ The step's Courant limit (``reconnect.courant_limit``: a step moves no node by m
 ``courant`` of its element) is split (:func:`courant_split`): ``min(courant min_K h/|u|,
 far_courant min_F h/|u|)``. With ``far_courant`` equal to ``courant`` it is the limit of every node,
 to the bit (a positive factor commutes with the minimum of doubles).
+
+The far region is meshed under simplifying assumptions, every feature kept in the domain
+(:func:`region_class`, :func:`split_refine`, :func:`far_kink_regions`; the driver's
+``CollapseDriver._feature_regions``): every far region's target at least ``far_floor``; the guard's
+far kinks (an element of the far region whose tangent turns by more than ``edge_turn_refine``) in a
+region of their own per chain, recentred on the worst element at each request instead of grown,
+at the floor, below it only while the turn exceeds ``far_yield_turn`` (a yield, halving per
+rebuild); the far regions refined beyond ``far_refine_ratio`` of their targets; the ring's kinks no
+finer than the column. The tracked necks' regions are exempt, so that a neck is followed to its
+landing.
 """
 
 from __future__ import annotations
@@ -32,7 +42,7 @@ import numpy as np
 COLUMNS = ("step", "time", "tau", "tau_p", "dt", "limiter", "dt_courant", "dt_core", "dt_far",
            "binds", "far_courant", "h_core", "U_core", "r_core", "z_core", "chain_core", "h_far",
            "U_far", "r_far", "z_far", "chain_far", "L", "R_K", "A_r", "A_z", "z_cap",
-           "core_nodes", "far_nodes")
+           "core_nodes", "far_nodes", "far_regions", "far_floored", "far_yields")
 
 
 def upward_neck(points, end_types, apex_index: int, track_depth: float) -> dict | None:
@@ -128,3 +138,112 @@ def courant_split(segs, masks, *, core: float, far: float) -> dict:
     return {"dt": min(dt_core, dt_far), "dt_core": dt_core, "dt_far": dt_far,
             "binds": "core" if dt_core <= dt_far else "far", "core": best["core"],
             "far": best["far"], "core_courant": core, "far_courant": far}
+
+
+# --- the far region's sizing ----------------------------------------------------------------------
+
+# the classes of the regions of a rebuild after the cut with jetcore (region_class): the core's,
+# resolved as without the part; the far region's, floored and refined at the far ratio; a tracked
+# neck's, exempt from the floor (its region follows the neck to its landing); the pre-pierce
+# refinement's, exempt too; the ring's frozen regions, sized at the ring cut
+CORE, FAR, NECK, PREP, FROZEN = "core", "far", "neck", "prep", "frozen"
+# the regions of the open chain by name: the jet's base is core whatever its place
+OPEN_REGIONS = ("cavity_tip", "cavity_tip_cut", "kink_open")
+
+
+def nearest_node(points, r: float, z: float) -> int:
+    """The node of ``points`` nearest ``(r, z)``."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    return int(np.argmin(np.hypot(P[:, 0] - r, P[:, 1] - z)))
+
+
+def region_class(region: dict, core: dict, open_points) -> str:
+    """The class of a region of a rebuild after the cut (``CORE``, ``FAR``, ``NECK``, ``PREP`` or
+    ``FROZEN``): the ring's frozen regions frozen; the pre-pierce regions (``pierce_*``) and the
+    tracked necks' (``neck_*``) exempt; the base of the upward jet (``jet_base_cavity_tip``) core;
+    a region of the open chain's tip or a kink of the open chain (``OPEN_REGIONS``, the core's own
+    kinks ``kink_open``) core where the node of the open chain nearest its centre is a core node
+    (``core["mask"]``); every other region (the bubble's, the ring's kinks, a far kink,
+    ``kink_<chain>_far``) far."""
+    name = region["name"]
+    if region.get("frozen"):
+        return FROZEN
+    if name.startswith("pierce_"):
+        return PREP
+    if name.startswith("neck_"):
+        return NECK
+    if name == "jet_base_cavity_tip":
+        return CORE
+    if name in OPEN_REGIONS and open_points is not None and len(open_points):
+        k = nearest_node(open_points, float(region["r"]), float(region["z"]))
+        return CORE if bool(np.asarray(core["mask"])[k]) else FAR
+    return FAR
+
+
+def split_refine(refine: dict, readings: dict, core: dict) -> tuple[dict, dict]:
+    """The guard's elements to refine (``reconnect.interface_guard``'s ``refine``, per chain) split
+    into the core's and the far region's: an element of the open chain is the core's where its
+    midside node is a core node; every element of another chain (the bubble, the ring) is far."""
+    near, far = {}, {}
+    mask = np.asarray(core["mask"], dtype=bool)
+    for chain, idx in refine.items():
+        idx = np.asarray(idx, dtype=int)
+        if chain == "open":
+            mid = np.asarray(readings[chain]["edges"]["index"], dtype=int)[idx]
+            inside = mask[np.clip(mid, 0, len(mask) - 1)]
+            if inside.any():
+                near[chain] = idx[inside]
+            if (~inside).any():
+                far[chain] = idx[~inside]
+        else:
+            far[chain] = idx
+    return near, far
+
+
+def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, hold,
+                     h_far: float, h_floor: float, yield_turn: float, sizes: dict,
+                     floors: dict | None = None) -> dict:
+    """The far kink regions (``kink_<chain>_far``, keyed ``<chain>_far``) after a reading, from
+    those of the last accepted step (``previous``): where the guard asks for a far element of a
+    chain to be refined (``refine``, its far part, :func:`split_refine`), one region about the worst
+    of them, recentred on it at every request with a radius of four of its chords (no growth), at
+    ``max(chord/4, h_far, floors[chain])`` (``floors``: the ring's column size, say); while that
+    element turns by more than ``yield_turn`` degrees the region yields below the floor, halving its
+    last target down to ``h_floor`` each time the current mesh has met it (``sizes``: the size of
+    each region in the current mesh), each halving a yield (``yields``, ``yield_t``). A region whose
+    chain asks for none for ``hold(h_before)`` of time is released, its target back to the chord it
+    met, as a core kink is (``reconnect.kink_regions``)."""
+    out = {name: dict(v) for name, v in previous.items()}
+    floors = floors or {}
+    for chain, idx in refine.items():
+        idx = np.asarray(idx, dtype=int)
+        if not len(idx):
+            continue
+        e = readings[chain]["edges"]
+        k = int(idx[np.argmax(e["turn"][idx])])
+        L, turn = float(e["L"][k]), float(e["turn"][k])
+        r, z = float(e["mid"][k, 0]), float(e["mid"][k, 1])
+        key, name = f"{chain}_far", f"kink_{chain}_far"
+        floor = max(h_far if h_far is not None else 0.0, floors.get(chain, 0.0), h_floor)
+        target = max(0.25 * L, floor)
+        g = out.get(key)
+        yields, yield_t = (g.get("yields", 0), g.get("yield_t")) if g is not None else (0, None)
+        if g is not None and not g["released"] and turn > yield_turn:
+            last = float(g["target"])
+            size = sizes.get(name)
+            if size is not None and size <= last * (1.0 + 1e-9) and last > h_floor:
+                target = max(0.5 * last, h_floor)  # the mesh has met the last target: halve it
+                yields, yield_t = yields + 1, t
+            else:
+                target = min(target, last)  # not met yet: kept
+        out[key] = {"name": name, "chain": chain, "r": r, "z": z, "radius": 4.0 * L,
+                    "target": target, "h_before": max(L, g["h_before"]) if g is not None
+                    and not g["released"] else L, "t_set": t, "released": False,
+                    "turn": turn, "yields": yields, "yield_t": yield_t, "far": True}
+    for key, g in out.items():
+        chain = g["chain"]
+        if chain in refine and len(refine[chain]) or g["released"]:
+            continue
+        if t >= g["t_set"] + hold(g["h_before"]):
+            g.update(released=True, target=g["h_before"])
+    return out

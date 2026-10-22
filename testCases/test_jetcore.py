@@ -12,11 +12,16 @@
   neck, the walls) and the split Courant limit (``jetcore.courant_split``), the limit of every node
   to the bit at one Courant number; stand-in runs with jetcore at its defaults take the same steps
   and write ``jetcore.txt``, and with a far Courant number of its own the far nodes take longer.
+* The far region's sizing: the regions' classes (``jetcore.region_class``) and the guard's kinks
+  split by the core (``jetcore.split_refine``), the far kinks recentred, floored and yielding
+  below the floor only past the turn (``jetcore.far_kink_regions``), the far targets floored with
+  the core's unchanged, the edge-turn profiles of the core.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -426,3 +431,147 @@ def test_a_far_courant_number_of_its_own_lets_the_far_nodes_take_longer_steps(tm
     leg = next(e for e in legs if e["event"] == "leg")
     assert leg["limits"]["jetcore"] == {"core_courant": 0.4, "far_courant": 0.8,
                                         "core_radius": 2.0, "wall_radius": 10.0}
+
+
+# --- C4: the far region's sizing ------------------------------------------------------------------
+
+
+def _readings(turns, L, mids):
+    """A reading of a chain's quadratic elements (``reconnect.edge_reading``'s ``edges``) with the
+    given turns, chords and midside nodes."""
+    turns = np.asarray(turns, dtype=float)
+    return {"edges": {"turn": turns, "L": np.full(len(turns), float(L)),
+                      "mid": np.asarray(mids, dtype=float), "f": np.full(len(turns), 0.5),
+                      "index": 2 * np.arange(len(turns)) + 1}}
+
+
+def test_a_far_kink_is_recentred_floored_and_yields_below_the_floor_only_past_the_turn():
+    """The far kink of a chain: about its worst far element at each request, four chords wide (no
+    growth), at ``max(chord/4, far_floor)``; past ``far_yield_turn`` it halves its last target
+    once the mesh has met it (a yield), never below ``h_floor``; released after its hold."""
+    from faraday_singularity.jetcore import far_kink_regions
+
+    h_F, h_floor = 1e-4, 1e-6
+    kw = dict(hold=lambda L: 1.0, h_far=h_F, h_floor=h_floor, yield_turn=75.0)
+    rd = {"bubble": _readings([40.0, 50.0, 10.0], 2e-4, [[0.1, 1.0], [0.2, 1.0], [0.3, 1.0]])}
+    g = far_kink_regions({}, rd, {"bubble": np.array([0, 1])}, t=0.0, sizes={}, **kw)
+    k = g["bubble_far"]
+    assert (k["name"], k["r"], k["radius"], k["target"]) == ("kink_bubble_far", 0.2, 8e-4, h_F)
+    assert k["yields"] == 0 and k["far"]
+    # the worst element moves: the region follows it, no wider
+    rd2 = {"bubble": _readings([60.0, 10.0, 10.0], 2e-4, [[0.5, 1.0], [0.2, 1.0], [0.3, 1.0]])}
+    g2 = far_kink_regions(g, rd2, {"bubble": np.array([0])}, t=0.1, sizes={}, **kw)
+    assert g2["bubble_far"]["r"] == 0.5 and g2["bubble_far"]["radius"] == 8e-4
+    # past the turn: halved only once the mesh has the last target
+    hot = {"bubble": _readings([80.0], 2e-4, [[0.5, 1.0]])}
+    y0 = far_kink_regions(g2, hot, {"bubble": np.array([0])}, t=0.2,
+                          sizes={"kink_bubble_far": 2 * h_F}, **kw)["bubble_far"]
+    assert y0["target"] == h_F and y0["yields"] == 0
+    y1 = far_kink_regions({"bubble_far": y0}, hot, {"bubble": np.array([0])}, t=0.3,
+                          sizes={"kink_bubble_far": h_F}, **kw)["bubble_far"]
+    assert y1["target"] == 0.5 * h_F and y1["yields"] == 1 and y1["yield_t"] == 0.3
+    y2 = far_kink_regions({"bubble_far": y1}, hot, {"bubble": np.array([0])}, t=0.4,
+                          sizes={"kink_bubble_far": h_F}, **kw)["bubble_far"]
+    assert y2["target"] == 0.5 * h_F and y2["yields"] == 1  # not met yet: kept
+    low = dict(y1, target=1.5 * h_floor)
+    y3 = far_kink_regions({"bubble_far": low}, hot, {"bubble": np.array([0])}, t=0.5,
+                          sizes={"kink_bubble_far": 1.5 * h_floor}, **kw)["bubble_far"]
+    assert y3["target"] == h_floor
+    # a floor of the chain's own (the ring's column) and the release
+    ring = far_kink_regions({}, {"ring": _readings([40.0], 2e-4, [[0.1, 0.5]])},
+                            {"ring": np.array([0])}, t=0.0, sizes={}, floors={"ring": 3e-4},
+                            **kw)
+    assert ring["ring_far"]["target"] == 3e-4
+    gone = far_kink_regions(ring, {}, {}, t=2.0, sizes={}, **kw)["ring_far"]
+    assert gone["released"] and gone["target"] == gone["h_before"] == 2e-4
+
+
+def test_the_regions_and_kinks_are_split_by_the_core():
+    from faraday_singularity.jetcore import CORE, FAR, NECK, PREP, region_class, split_refine
+
+    P = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11)])
+    core = {"mask": np.arange(11) >= 5}
+    for name, r, cls in (("jet_base_cavity_tip", 0.0, CORE), ("cavity_tip", 0.0, FAR),
+                         ("cavity_tip", 0.8, CORE), ("kink_open", 0.6, CORE),
+                         ("kink_open", 0.1, FAR), ("neck_open", 0.1, NECK),
+                         ("pierce_tip", 0.0, PREP), ("bubble_top", 0.9, FAR),
+                         ("kink_bubble_far", 0.9, FAR), ("kink_ring", 0.9, FAR)):
+        assert region_class({"name": name, "r": r, "z": 0.0}, core, P) == cls, name
+    assert region_class({"name": "ring_cut", "r": 0, "z": 0, "frozen": True}, core, P) == "frozen"
+    readings = {"open": {"edges": {"index": np.array([1, 3, 5, 7, 9])}}, "bubble": {}}
+    near, far = split_refine({"open": np.array([0, 3, 4]), "bubble": np.array([2])}, readings,
+                             core)
+    assert list(near["open"]) == [3, 4] and list(far["open"]) == [0]
+    assert list(far["bubble"]) == [2] and "bubble" not in near
+
+
+def test_the_far_targets_are_floored_and_refined_at_the_far_ratio(tmp_path):
+    """A stand-in run after the cut (the open chain without a jet, wholly core; the bubble far):
+    with ``far_floor`` above the bubble's targets they are floored (class ``far``, ``floored``),
+    the open chain's regions as without it; the remesh events record each region's class."""
+    from test_bookkeeping import CutProblem
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-9, courant=0.4, focus_courant=False)
+    got = {}
+    for name, block in (("plain", _block()), ("floor", _block(far_floor=2e-4)),
+                        ("ratio", _block(far_floor=2e-4, far_refine_ratio=50.0))):
+        drv = _events_driver(tmp_path / name, CutProblem(), recon, block, max_steps=2)
+        m = drv.measure()
+        got[name] = {g["name"]: g for g in m["regions"]}
+        drv.close()
+    plain, floor = got["plain"], got["floor"]
+    assert set(plain) == set(floor)
+    for name, g in floor.items():
+        if g["class"] == "core":
+            assert g["target"] == plain[name]["target"], name
+        elif g["class"] == "far":
+            assert g["target"] == max(plain[name]["target"], 2e-4), name
+            assert g.get("floored", False) == (plain[name]["target"] < 2e-4), name
+    assert any(g.get("floored") for g in floor.values())
+    assert {g["class"] for g in floor.values()} >= {"core", "far"}
+
+
+def test_without_recentred_kinks_or_a_floor_the_kinks_are_the_rules_and_the_snapshots_may_be_cores(
+        tmp_path):
+    """jetcore at its defaults keeps the guard's kink regions as without it; with
+    ``edge_turn_snapshots`` ``core`` the turn that writes a profile at every step is read on the
+    core's elements only."""
+    from test_bookkeeping import CutProblem
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-9)
+    drv = _events_driver(tmp_path / "a", CutProblem(), recon,
+                         _block(edge_turn_snapshots="core"), max_steps=1)
+    pc = drv._post_cut_state()
+    every = max(rd["turn"] for rd in pc["edges"].values() if np.isfinite(rd["turn"]))
+    e = pc["edges"]["open"]["edges"]
+    mask = pc["core"]["mask"]
+    assert drv._edge_turn_max() == pytest.approx(float(np.nanmax(e["turn"][mask[e["index"]]])))
+    assert drv._edge_turn_max() <= every
+    drv.close()
+
+
+def test_a_far_region_at_the_floor_asks_for_no_rebuild_and_one_above_it_at_the_far_ratio(
+        tmp_path):
+    """The rule's test of a far region (``class`` far) against ``far_refine_ratio``: at the floor,
+    its longest element at the floor, no rebuild; coarser than the far ratio times its target, a
+    rebuild; between the core's ratio and the far ratio, none."""
+    from test_bookkeeping import CutProblem
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-9)
+    drv = _events_driver(tmp_path, CutProblem(), recon, _block(far_floor=2e-4,
+                                                               far_refine_ratio=2.0))
+    asked = []
+
+    def rule(h_max, cls="far"):
+        g = {"name": "kink_bubble_far", "target": 2e-4, "h_max": h_max, "h_min": math.nan,
+             "class": cls, "r": 0.0, "z": 4.5, "radius": 1e-3, "size": 2e-4}
+        drv.pb.force_remesh = lambda: asked.append(h_max)
+        drv.state.last_remesh_step = drv.state.refine_blocked_until = -10
+        return drv._maybe_remesh_features({"regions": [g], "time": drv._t(), "ell": 1e-3,
+                                           "U": 1.0, "h_near": 1e-3, "r_j": 0.0, "z_axis": 4.69,
+                                           "axis_curvature": 0.0})
+
+    assert rule(2e-4) is False and rule(3.5e-4) is False  # at the floor; within the far ratio
+    assert rule(3.5e-4, cls="core") is not False  # the core's ratio, 1.5
+    assert rule(4.5e-4) is not False and asked == [3.5e-4, 4.5e-4]
+    drv.close()

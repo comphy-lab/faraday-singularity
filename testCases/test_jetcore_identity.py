@@ -110,13 +110,19 @@ def test_a_ring_run_is_4a6c999s(tmp_path):
 # --- with jetcore at its defaults: the same solution, jetcore.txt besides -------------------------
 
 
+REGION_KEYS = {"name", "target", "size", "h_max", "h_min"}  # a region of a remesh event
+
+
 def _without_jetcore(x):
     """A record without what the part ``jetcore`` adds to it by design: its settings (the block
-    holds the part, ``jetcore`` wherever it is), the hash of the block and the resolved keys of
-    each leg (``limits.jetcore``)."""
+    holds the part, ``jetcore`` wherever it is), the hash of the block, the resolved keys of each
+    leg (``limits.jetcore``), the class of each region of a remesh event (``class``) and the far
+    yields a dump counts (``far_yields``)."""
     if isinstance(x, dict):
+        region = REGION_KEYS <= set(x)
         return {k: _without_jetcore(v) for k, v in x.items()
-                if k not in ("jetcore", "settings_sha256", "wall_seconds")}
+                if k not in ("jetcore", "settings_sha256", "wall_seconds", "far_yields")
+                and not (region and k == "class")}
     if isinstance(x, list):
         return [_without_jetcore(v) for v in x]
     return x
