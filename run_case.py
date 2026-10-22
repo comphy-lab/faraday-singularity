@@ -88,6 +88,12 @@ state is the one before an event (``precut_e<k>``), from which they apply anew
 and ``run_status.json`` the events the run made and the end of its window (``events``,
 ``window_end``, from the driver's result), or, for a run that failed in the cut of a liquid neck it
 made, that event (``event``).
+The ``collapse.gas`` block (``neckgas.coupler.GasSettings``) adds a quasi-one-dimensional
+compressible gas in the collapsing neck whose pressure acts on the free surface. It is read before
+the events block and is no key of the driver's settings (``collapse_settings.json`` is unchanged);
+``parameters.json`` and the manifest record it (``gas``) only where it is present. It is no derived
+key: a restart, a cut and a continuation carry the parent's block unchanged, and one that adds,
+drops or changes it is refused as a different case.
 An unknown key of the ``collapse`` block is refused with a message before any output, as is an
 invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
 or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
@@ -140,6 +146,8 @@ from faraday_singularity.events import (EVENT_SCHEMA, EVENTS_BLOCK, PRECUT_EVENT
                                         EventSettings, events_done, minimum_dt_after_cut,
                                         split_events_block)
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
+from faraday_singularity.neckgas.coupler import (GAS_BLOCK, GasSettings,  # noqa: E402
+                                                 split_gas_block)
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import create_run_manifest, pyoomph_revision  # noqa: E402
 from faraday_singularity.reconnect import (CONTINUATION_KEYS, ReconnectSettings,  # noqa: E402
@@ -585,12 +593,17 @@ def main() -> int:
     settings = None
     reconnect = None
     events = None
+    gas = None
     keep_stop_state = False
     landing = ()
     if collapse:
         try:
-            # the events block first: it is no key of the cut nor of the driver
-            block, events_block = split_events_block(case["collapse"])
+            # the gas block first, then the events block: neither is a key of the cut nor of the
+            # driver's settings (CollapseSettings, whose record is written as it is)
+            block, gas_block = split_gas_block(case["collapse"])
+            if gas_block is not None:
+                gas = GasSettings.from_dict(gas_block)
+            block, events_block = split_events_block(block)
             block, recon_block, keep_stop_state, landing = split_collapse_block(block)
             if recon_block is not None:
                 reconnect = ReconnectSettings.from_dict(recon_block)
@@ -663,6 +676,9 @@ def main() -> int:
         print(json.dumps({"valid": True, "case_id": case["case_id"], "restart": parent_record,
                           "restart_mode": restart_mode}))
         return 0
+    if gas is not None:
+        raise SystemExit(f"{args.case}: collapse.{GAS_BLOCK} is read and checked, but this commit "
+                         "does not yet couple the gas to the liquid")
     args.outdir.mkdir(parents=True, exist_ok=True)
     recorded_provenance = provenance(args.case)
     runner_path = Path(sys.argv[0]).resolve()
@@ -693,6 +709,8 @@ def main() -> int:
         manifest["reconnect"] = reconnect.to_dict()
     if events is not None:
         manifest["reconnect_events"] = events.to_dict()
+    if gas is not None:  # only with the block: other manifests keep their keys
+        manifest[GAS_BLOCK] = gas.to_dict()
     create_run_manifest(args.outdir, manifest)
     with (args.outdir / "progress.jsonl").open("a") as stream:
         stream.write(json.dumps({"event": "start", "wall_time": time.time()}) + "\n")
@@ -716,6 +734,8 @@ def main() -> int:
         info["reconnect"] = reconnect.to_dict()
     if events is not None:
         info["reconnect_events"] = events.to_dict()
+    if gas is not None:
+        info[GAS_BLOCK] = gas.to_dict()
     if keep_stop_state:
         info["keep_stop_state"] = True
     if landing:
