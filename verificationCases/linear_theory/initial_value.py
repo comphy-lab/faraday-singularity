@@ -106,6 +106,14 @@ def descriptor(Oh, Bo, d, bottom, N):
 
 def reduced_ode(Oh, Bo, d, bottom, N):
     """Eliminate the velocity constraints and the pressure: ``y = [c; Z]``, ``y' = (A0 + g A1) y``."""
+    A0, A1, _ = reduced_ode_forced(Oh, Bo, d, bottom, N)
+    return A0, A1
+
+
+def reduced_ode_forced(Oh, Bo, d, bottom, N):
+    """:func:`reduced_ode` with a normal stress ``T(t) J0(r)`` on the surface (a gas overpressure,
+    positive pushing into the liquid: the normal-stress condition becomes
+    ``P0 - 2 Oh W_z(0) - (1 + Bo + g) Z = T``): ``y' = (A0 + g A1) y + b T(t)``."""
     M, L0, _, kind, (_, _, _, _, n) = descriptor(Oh, Bo, d, bottom, N)
     vcols = np.arange(0, 2 * n)
     pcols = np.arange(2 * n, 3 * n)
@@ -126,7 +134,9 @@ def reduced_ode(Oh, Bo, d, bottom, N):
     A0[:k, k] = R @ p0col * (1.0 + Bo)
     A1[:k, k] = R @ p0col
     A0[k, :k] = Y[n + 0]
-    return A0, A1
+    b = np.zeros(k + 1)
+    b[:k] = R @ p0col
+    return A0, A1, b
 
 
 def normal_modes(Oh, Bo, d, bottom, N):
@@ -180,4 +190,39 @@ def response_bdf2(dt: float, steps: int, *, Oh, Bo, d, bottom="free-slip", Gamma
             y[1] = np.linalg.solve(eye - dt * A, y[0])
         else:
             y[n + 1] = np.linalg.solve(3.0 * eye - 2.0 * dt * A, 4.0 * y[n] - y[n - 1])
+    return dt * np.arange(steps + 1), y[:, -1]
+
+
+def forced_response(t, *, Oh, Bo, d, forcing, bottom="free-slip", N=48, rtol=1e-10,
+                    atol=1e-16) -> np.ndarray:
+    """``Z(t)`` of the layer at rest and flat at ``t = 0`` under the normal stress
+    ``forcing(t) J0(r)`` on its surface (:func:`reduced_ode_forced`), ``Gamma = 0``."""
+    t = np.asarray(t, dtype=float)
+    A0, _, b = reduced_ode_forced(Oh, Bo, d, bottom, N)
+    sol = solve_ivp(lambda tt, y: A0 @ y + b * forcing(tt), (0.0, float(t[-1])),
+                    np.zeros(A0.shape[0]), method="Radau", jac=lambda tt, y: A0, t_eval=t,
+                    rtol=rtol, atol=atol)
+    if not sol.success:
+        raise RuntimeError(f"linear forced integration failed: {sol.message}")
+    return sol.y[-1]
+
+
+def forced_response_bdf2(dt: float, steps: int, *, Oh, Bo, d, forcing, bottom="free-slip",
+                         N=48, lag: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """``Z`` at ``t_n = n dt`` from rest and flat under the normal stress ``forcing(t) J0(r)``,
+    stepped as the simulations step (one implicit Euler step, then constant-step BDF2) with the
+    forcing of step ``n -> n+1`` taken at ``t_{n+1-lag}``: ``lag = 1`` is a stress set from the
+    state at the start of each step and held over it (the staggered coupling), ``lag = 0`` the
+    stress at the end of the step, as an implicit term would be."""
+    A0, _, b = reduced_ode_forced(Oh, Bo, d, bottom, N)
+    m = A0.shape[0]
+    eye = np.eye(m)
+    y = np.zeros((steps + 1, m))
+    for n in range(steps):
+        f = b * forcing((n + 1 - lag) * dt)
+        if n == 0:
+            y[1] = np.linalg.solve(eye - dt * A0, y[0] + dt * f)
+        else:
+            y[n + 1] = np.linalg.solve(3.0 * eye - 2.0 * dt * A0, 4.0 * y[n] - y[n - 1]
+                                       + 2.0 * dt * f)
     return dt * np.arange(steps + 1), y[:, -1]
