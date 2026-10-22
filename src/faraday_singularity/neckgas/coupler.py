@@ -907,6 +907,47 @@ class NeckGas:
                 v.sol = None
 
 
+GAS_FILE_SUFFIX = ".gas.npz"  # the gas's side file of a dump, beside it (<dump>.gas.npz)
+
+
+def write_state_file(path, arrays: dict, meta: dict):
+    """The gas's state at ``path``: an uncompressed ``.npz`` of ``arrays`` and the JSON ``meta``
+    (``meta.json``), with fixed member dates, so that the same state gives the same bytes."""
+    import zipfile
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        for name in sorted(arrays):
+            info = zipfile.ZipInfo(name + ".npy", date_time=(1980, 1, 1, 0, 0, 0))
+            with zf.open(info, "w", force_zip64=True) as fh:
+                np.lib.format.write_array(fh, np.ascontiguousarray(arrays[name]),
+                                          allow_pickle=False)
+        info = zipfile.ZipInfo("meta.json", date_time=(1980, 1, 1, 0, 0, 0))
+        zf.writestr(info, json.dumps(meta, sort_keys=True, default=_plain_json))
+
+
+def read_state_file(path) -> tuple[dict, dict]:
+    """``(arrays, meta)`` of a file of :func:`write_state_file`."""
+    import zipfile
+
+    arrays = {}
+    with zipfile.ZipFile(path) as zf:
+        meta = json.loads(zf.read("meta.json"))
+        for name in zf.namelist():
+            if name.endswith(".npy"):
+                with zf.open(name) as fh:
+                    arrays[name[:-4]] = np.lib.format.read_array(fh, allow_pickle=False)
+    return arrays, meta
+
+
+def chain_sha256(chain) -> str:
+    """The hash of a chain's ``r, z, u_r, u_z`` (float64), to check that a restart restored the
+    free surface a dump was written on."""
+    h = hashlib.sha256()
+    for x in chain:
+        h.update(np.ascontiguousarray(np.asarray(x, dtype=np.float64)).tobytes())
+    return h.hexdigest()
+
+
 def _plain_json(x):
     if isinstance(x, (np.integer,)):
         return int(x)

@@ -155,3 +155,26 @@ def test_an_active_two_way_gas_acts_on_the_liquid(runs):
     assert head["variants"] == ["A"] and g["A_p"].shape == g["A_zc"].shape
     status = json.loads((b / "run_status.json").read_text())["collapse"]["gas"]
     assert status["status"] == "active" and status["coupling"] == "two-way"
+
+
+def test_the_dumps_carry_the_gas_and_the_runner_restarts_from_one(runs, tmp_path):
+    b = runs["twoway"]
+    dumps = sorted((b / "states").glob("state_*.dump"))
+    files = sorted((b / "states").glob("*.gas.npz"))
+    assert len(dumps) == 3 and [f.name.replace(".gas.npz", ".dump") for f in files] == \
+        [d.name for d in dumps]  # the rotation deletes a dump's gas file with it
+    meta = json.loads(dumps[0].with_suffix(".json").read_text())
+    assert meta["gas"]["status"] == "active" and meta["gas"]["file"] == files[0].name
+    manifest = json.loads((b / "run-manifest.json").read_text())
+    assert manifest["gas"]["coupling"] == "two-way"
+    manifest["component_commit"] = "a" * 40  # a tree under development may be dirty
+    (b / "run-manifest.json").write_text(json.dumps(manifest))
+    out = run(tmp_path, "again", case_with(dict(GAS)), "--restart-from",
+              str(dumps[0]))
+    record = json.loads((out / "run-manifest.json").read_text())["restart_from"]
+    import hashlib
+    assert record["gas_sha256"] == hashlib.sha256(files[0].read_bytes()).hexdigest()
+    assert (out / "restart" / files[0].name).is_file()
+    rows = gas_rows(out)
+    assert rows and int(rows[0]["step"]) == json.loads(dumps[0].with_suffix(".json").read_text())[
+        "step"] + 1

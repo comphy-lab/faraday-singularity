@@ -357,7 +357,8 @@ from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, E
 from .mesh import Focus, FocusRegion
 from .neckgas.coupler import COLUMNS as GAS_COLUMNS
 from .neckgas.coupler import STOPS as GAS_STOPS
-from .neckgas.coupler import GasSettings, NeckGas
+from .neckgas.coupler import (GAS_FILE_SUFFIX, GasSettings, NeckGas, chain_sha256,
+                              read_state_file, write_state_file)
 from .neckgas.geometry import GasGeometryError
 from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MARGIN, JET_TIPS,
                         LANDING_RATIO, MAX_LANDING_RATIO, Chain, CutGeometry, ReconnectSettings,
@@ -2442,6 +2443,8 @@ class CollapseDriver:
                             mesh_fresh=self._fresh_mesh())
                 if self._ring() is not None:  # the ring stage: its record, restored with it
                     meta["ring"] = self._ring()
+        if getattr(self, "gas", None) is not None:  # only with the block: other dumps keep keys
+            meta["gas"] = self._write_gas_state(path)
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -2480,7 +2483,7 @@ class CollapseDriver:
         st.last_state_t = self._t()
         while len(st.states) > self.s.state_keep:
             old = st.states.pop(0)
-            for f in (old, old.with_suffix(".json")):
+            for f in (old, old.with_suffix(".json"), old.with_suffix(GAS_FILE_SUFFIX)):
                 f.unlink(missing_ok=True)
         self._prune_meshes()  # with the events block only
 
@@ -2542,9 +2545,12 @@ class CollapseDriver:
         self._meshes_pruned += removed
         return removed
 
-    def restore(self, meta: dict):
-        """Resume the driver bookkeeping from a state dump's metadata."""
+    def restore(self, meta: dict, gas_file=None):
+        """Resume the driver bookkeeping from a state dump's metadata; with the gas, its state from
+        the dump's side file ``gas_file`` (``<dump>.gas.npz``, which a dump of an active gas has)."""
         st = self.state
+        if getattr(self, "gas", None) is not None:
+            self._restore_gas(meta, gas_file)
         if meta.get("cut") is not None:
             self._check_events_meta(meta)
         for k in self._STATE_FIELDS:
@@ -3354,6 +3360,51 @@ class CollapseDriver:
                     variants=[v.spec.name for v in self.gas.variants])
         np.savez(self.outdir / "gas_profiles" / f"gas_{index:06d}.npz",
                  header=np.array(json.dumps(head, default=float)), **arrays)
+
+    def _write_gas_state(self, path: Path) -> dict:
+        """The gas's record in a dump's metadata and, once it is pending or active, its state in
+        the side file beside the dump (``<dump>.gas.npz``, :func:`neckgas.coupler.
+        write_state_file`): the status, the start, the hash of the block, of the file and of the
+        chain of the mesh dumped."""
+        gas = self.gas
+        rec = {"status": gas.status, "active": gas.active, "t_on": gas.t_on,
+               "step_on": gas.step_on, "settings_sha256": gas.s.sha256(), "file": None,
+               "sha256": None}
+        if gas.status in ("pending", "active"):
+            import hashlib
+
+            arrays, gmeta = gas.state_dict()
+            f = path.with_suffix(GAS_FILE_SUFFIX)
+            write_state_file(f, arrays, gmeta)
+            rec.update(file=f.name, sha256=hashlib.sha256(f.read_bytes()).hexdigest(),
+                       chain_sha256=chain_sha256(self.pb.interface_arrays()))
+        return rec
+
+    def _restore_gas(self, meta: dict, gas_file):
+        """The gas of a dump (:meth:`_write_gas_state`): refused under another block, without its
+        side file, with a side file of other bytes or on a free surface other than the one
+        dumped; a dormant gas stays dormant. The stop a gas had made is evaluated anew."""
+        import hashlib
+
+        rec = meta.get("gas")
+        if rec is None:
+            raise ValueError("the state was written without collapse.gas; a run with the gas "
+                             "continues only a state written with it")
+        if rec.get("settings_sha256") != self.gas.s.sha256():
+            raise ValueError("the state was written under another collapse.gas block")
+        if rec.get("file"):
+            if gas_file is None or not Path(gas_file).is_file():
+                raise ValueError(f"the state's gas file {rec['file']} is needed to continue it")
+            if hashlib.sha256(Path(gas_file).read_bytes()).hexdigest() != rec["sha256"]:
+                raise ValueError("the state's gas file does not match its record")
+            arrays, gmeta = read_state_file(gas_file)
+            self.gas.load_state_dict(arrays, gmeta)
+            self.gas.stop = None
+            if chain_sha256(self.pb.interface_arrays()) != rec.get("chain_sha256"):
+                raise ValueError("the restored free surface is not the one the gas state was "
+                                 "dumped with")
+        elif rec.get("status") == "retired":
+            self.gas.retire()
 
     def _gas_summary(self) -> dict:
         gas = self.gas

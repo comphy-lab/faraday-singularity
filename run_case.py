@@ -93,7 +93,9 @@ compressible gas in the collapsing neck whose pressure acts on the free surface.
 the events block and is no key of the driver's settings (``collapse_settings.json`` is unchanged);
 ``parameters.json`` and the manifest record it (``gas``) only where it is present. It is no derived
 key: a restart, a cut and a continuation carry the parent's block unchanged, and one that adds,
-drops or changes it is refused as a different case.
+drops or changes it is refused as a different case. A dump of an active gas has its state beside
+it (``<dump>.gas.npz``), which the restart record hashes (``gas_sha256``) and the restart copies
+and restores with it.
 An unknown key of the ``collapse`` block is refused with a message before any output, as is an
 invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
 or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
@@ -306,6 +308,9 @@ def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = F
                              "format": parent_format, "component_commit": parent_commit}}
     if not legacy and derived is not None:  # a restart of the same case records what it did
         out["parent_record"].update(case_sha256=parent_case_hash, derived_keys=derived)
+    gas = state.with_suffix(".gas.npz")  # the gas's side file of a dump with collapse.gas
+    if gas.is_file():
+        out["gas_sha256"] = hashlib.sha256(gas.read_bytes()).hexdigest()
     return out
 
 
@@ -787,8 +792,16 @@ def main() -> int:
                         if hashlib.sha256(args.restart.with_suffix(".json").read_bytes()).hexdigest() != parent_record["metadata_sha256"]:
                             raise RuntimeError("restart metadata changed after admission")
                         copy_state_file(str(args.restart), str(local))
+                        gas_file = {}
+                        source_gas = args.restart.with_suffix(".gas.npz")
+                        if "gas_sha256" in parent_record:  # its side file, copied with it
+                            if hashlib.sha256(source_gas.read_bytes()).hexdigest() != \
+                                    parent_record["gas_sha256"]:
+                                raise RuntimeError("restart gas state changed after admission")
+                            shutil.copyfile(source_gas, local.with_suffix(".gas.npz"))
+                            gas_file = {"gas_file": local.with_suffix(".gas.npz")}
                         problem.load_state(str(local))
-                        driver.restore(restart_meta)
+                        driver.restore(restart_meta, **gas_file)
                     if restart_mode == CUT:
                         from faraday_singularity.surgery import CutFailed, CutRefused, cut
 
