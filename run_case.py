@@ -555,6 +555,9 @@ def main() -> int:
     restarts.add_argument("--legacy-restart-from", type=Path,
                          help="explicitly import a legacy state with verified saved parameters")
     ap.add_argument("--check", action="store_true", help="validate without creating output")
+    ap.add_argument("--step-timing", action="store_true",
+                    help="collapse cases: write step_timing.txt, the wall time of the parts of "
+                         "each step (no key of the case; it changes no value)")
     args, _ = ap.parse_known_args()
 
     case = load_case(args.case)
@@ -748,7 +751,8 @@ def main() -> int:
                                         **({"reconnect": reconnect}
                                            if restart_mode in (CUT, POST_CUT) else {}),
                                         **({"events": events, "leg_info": {"commit": commit}}
-                                           if events is not None else {}))
+                                           if events is not None else {}),
+                                        **({"step_timing": True} if args.step_timing else {}))
                 try:
                     if args.restart is not None:
                         from pyoomph.output.states import copy_state_file

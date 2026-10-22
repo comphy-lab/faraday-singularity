@@ -296,11 +296,18 @@ Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore`
 (``surgery.restore_cut``), only into a driver whose reconnect settings are those of the cut but for
 ``tau_end`` (``reconnect.CONTINUATION_KEYS``), which a continuation may raise; the run then
 continues in the post-cut mode.
+
+After a cut the stops of a state are evaluated once (:meth:`CollapseDriver._post_cut_stop`, keyed
+by the state, :meth:`CollapseDriver._stop_key`): the check at the loop's top of the state the step
+has just checked gives the same answer without evaluating it again. With ``step_timing`` (the
+runner's ``--step-timing``, no key of a case) ``step_timing.txt`` holds the wall time of the parts
+of each step (:data:`STEP_TIMING_COLUMNS`). Neither changes a value written.
 """
 
 from __future__ import annotations
 
 import contextlib
+import copy
 import glob
 import json
 import math
@@ -597,6 +604,13 @@ RING_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "ring_volume", "ring_volum
                 "ring_h_min", "ring_h_max", "ring_u_max", "ring_courant", "ring_fold_gap",
                 "ring_fold_limit", "ring_axis_limit", "ring_open_gap", "edge_turn_ring",
                 "edge_midside_ring", "V_filled", "Pz_filled", "KE_filled")
+# step_timing.txt, with the driver's step_timing (a flag of the runner, no key of a case): a row
+# per accepted step, the wall time of the parts of its iteration of the loop (seconds, perf_counter):
+# the stops at the loop's top and the choice of the step, the solve, the measurement after it (with
+# a rebuild for distortion), the bookkeeping and rows, the stops after the step, the snapshot, the
+# remesh check, the commit after the cut and the dump; the total of the iteration
+STEP_TIMING_COLUMNS = ("step", "time", "dt", "top", "solve", "measure", "rows", "stops", "snapshot",
+                       "remesh", "commit", "dump", "total")
 
 
 def _table_cell(v) -> str:
@@ -690,7 +704,8 @@ class CollapseDriver:
     def __init__(self, problem, settings: CollapseSettings, outdir: Path, *,
                  keep_stop_state: bool = False, landing=(),
                  reconnect: ReconnectSettings | None = None,
-                 events: EventSettings | None = None, leg_info: dict | None = None):
+                 events: EventSettings | None = None, leg_info: dict | None = None,
+                 step_timing: bool = False):
         self.pb = problem
         self.s = settings
         self.keep_stop_state = keep_stop_state
@@ -711,6 +726,9 @@ class CollapseDriver:
             minimum_dt_after_cut(events.post, settings.dt_min if events.post.dt_min is None
                                  else events.post.dt_min)
         self._post_cut_cache: tuple | None = None
+        # after a cut: the stops of the last state checked (_post_cut_stop), by its key, so that the
+        # check of the same state at the loop's top after the step's own is not made again
+        self._stop_cache: tuple | None = None
         # the measured state has had its stop checks but not yet its snapshot and remesh checks
         self._checks_pending = False
         # rebuilds asked for by element distortion in this run: the driver's, once a focus is set,
@@ -765,15 +783,46 @@ class CollapseDriver:
                                      "max_abs": dict.fromkeys(BOX_NOISE_KEYS, 0.0),
                                      "sum_sq": dict.fromkeys(BOX_NOISE_KEYS, 0.0),
                                      "count": dict.fromkeys(BOX_NOISE_KEYS, 0)}
+        # with step_timing (a flag of the runner): step_timing.txt, the wall time of the parts of
+        # each step (STEP_TIMING_COLUMNS); it reads clocks only and changes no value
+        self._timing = None
+        self._ticks: dict = {}
+        if step_timing:
+            self._timing = open(self.outdir / "step_timing.txt", "w", buffering=1)
+            self._timing.write("# " + "\t".join(STEP_TIMING_COLUMNS) + "\n")
         (self.outdir / "collapse_settings.json").write_text(
             json.dumps(asdict(settings), indent=2) + "\n")
+
+    def _tick(self, part: str | None = None):
+        """With step timing: the wall time since the last tick added to ``part`` of the current
+        step (none at the first tick of a step); nothing without it."""
+        if self._timing is None:
+            return
+        now = time.perf_counter()
+        last = self._ticks.pop("_last", None)
+        if part is not None and last is not None:
+            self._ticks[part] = self._ticks.get(part, 0.0) + now - last
+        self._ticks["_last"] = now
+
+    def _write_timing(self, dt: float):
+        """With step timing: the row of ``step_timing.txt`` of the step just ended."""
+        if self._timing is None:
+            return
+        self._tick("dump")
+        parts = {k: v for k, v in self._ticks.items() if k != "_last"}
+        row = {"step": self.state.step, "time": self._t(), "dt": dt, **parts,
+               "total": sum(parts.values())}
+        self._timing.write("\t".join(_table_cell(row.get(c, 0.0)) for c in STEP_TIMING_COLUMNS)
+                           + "\n")
+        self._ticks = {"_last": self._ticks["_last"]}
 
     def close(self):
         self._table.close()
         self._events.close()
         if self._chains is not None:
             self._chains.close()
-        for f in (self._event_rows, self._drops, self._budget, self._noise, self._ring_rows):
+        for f in (self._event_rows, self._drops, self._budget, self._noise, self._ring_rows,
+                  self._timing):
             if f is not None:
                 f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
@@ -924,11 +973,33 @@ class CollapseDriver:
         """Whether the mesh was built since the last accepted step (the cut's, or a rebuild's)."""
         return self._stepped_rc is None or self.pb.remesh_count != self._stepped_rc
 
+    def _stop_key(self) -> tuple:
+        """The key of a state for its stops after the cut (:meth:`_post_cut_stop`): its time, its
+        rebuild and step, whether a step has run on its mesh, the events made and the stage of the
+        ring. The stops are pure functions of the state so keyed: the check at the loop's top of
+        the state the step's own check read gives its answer again."""
+        ring = self._ring()
+        return (self._t(), self.pb.remesh_count, self.state.step, self._stepped_rc,
+                len(self._made_events()), ring is not None,
+                ring is not None and ring.get("removed") is not None)
+
     def _post_cut_stop(self) -> dict | None:
         """The stops before a second change of topology, on both chains (post-cut mode), with the
         guard of the interface on its quadratic elements; on a freshly built mesh also the check of
         its curved elements (:meth:`_jacobian_stop`): a rebuild is accepted only if every element
-        is valid."""
+        is valid. Evaluated once per state (:meth:`_stop_key`), each caller given its own copy, which
+        it may change."""
+        if self._cut_record() is None:
+            return None
+        key = self._stop_key()
+        if self._stop_cache is not None and self._stop_cache[0] == key:
+            return copy.deepcopy(self._stop_cache[1])
+        stop = self._post_cut_stop_uncached()
+        self._stop_cache = (key, copy.deepcopy(stop))
+        return stop
+
+    def _post_cut_stop_uncached(self) -> dict | None:
+        """:meth:`_post_cut_stop`, evaluated."""
         cut = self._cut_record()
         if cut is None:
             return None
@@ -2383,7 +2454,7 @@ class CollapseDriver:
 
                     self.pb.ring = json.loads(json.dumps(meta["ring"]))
                     restore_ring(self.pb, self.pb.ring)
-                    self._post_cut_cache = None
+                    self._post_cut_cache = self._stop_cache = None
                     self._open_ring_rows()
         ep = self.episodes
         resume = {"resume_at": RESUME_REMESH_CHECK} if self._checks_pending else {}
@@ -2422,6 +2493,7 @@ class CollapseDriver:
         st.tip_born = {}
         st.apex_history, st.kinks = {}, {}
         self._checks_pending = False  # the cut rebuilt the mesh; the next step follows at once
+        self._stop_cache = None
         m = self.measure()
         geometry = record.get("geometry", {})
         self._event("cut", m, cycle=st.cycle, delta=record["delta"], rmin=record.get("rmin"),
@@ -2770,6 +2842,7 @@ class CollapseDriver:
         st.apex_history.pop(record.get("tip"), None)
         st.kinks.pop(record.get("chain"), None)
         self._checks_pending = False
+        self._stop_cache = None
         m = self.measure()
         k, removed = record.get("k"), record.get("removed") or {}
         trig = record.get("trigger") or {}
@@ -2828,7 +2901,8 @@ class CollapseDriver:
                 if isinstance(g, dict) and g.get("far_tip") in BUBBLE_TIP_SIGNS:
                     g.update(far_tip=None, status_note="far tip gone (ring)")
         self._checks_pending = False
-        self._post_cut_cache = None  # the stage begins or ends at the same step and rebuild
+        # the stage begins or ends at the same step and rebuild
+        self._post_cut_cache = self._stop_cache = None
         self._open_ring_rows()
         m = self.measure()
         k = record.get("k")
@@ -3136,6 +3210,7 @@ class CollapseDriver:
             m, _ = self._remesh_checks(m)
         if r is not None:
             self._arm_post_cut_nets()
+        self._tick()  # step timing only
         while True:
             found = self._stop(m)
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
@@ -3173,6 +3248,7 @@ class CollapseDriver:
                 stop = {"reason": "dt-floor", "dt": dt}
                 break
             st.ell_prev, st.t_prev = m["ell"], t
+            self._tick("top")
             wall0 = time.time()
             # temporal_error engages pyoomph's adaptive stepping: without an error estimator every
             # converged step is accepted, while a failed Newton solve is rejected and halved
@@ -3205,6 +3281,7 @@ class CollapseDriver:
                     # makes only after the step: the failure came on the mesh they flagged
                     stop["distortion_flagged_substeps"] = len(flagged)
                 break
+            self._tick("solve")
             st.step += 1
             dt = self._t() - t
             st.dt_prev = dt
@@ -3221,6 +3298,7 @@ class CollapseDriver:
             m = self._distortion_remesh(flags) if defer and flags else self.measure()
             if defer and inside and r is not None:
                 self._event("remesh", m, reason="inverted-element", rebuilds=inside)
+            self._tick("measure")
             self._checks_pending = True  # until the remesh check of this step
             self._track(m)
             self._write_row(m, dt, time.time() - wall0, self._singular(m))
@@ -3258,21 +3336,25 @@ class CollapseDriver:
             # with this step's bookkeeping, as every dump; kept before the snapshot and remesh
             # checks of the step, which a restart from it makes first (resume_at)
             self._keep_landings(m)
+            self._tick("rows")
             found = self._stop(m)
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
                 m, found = self._meet_event(m, found)
                 if found is None:  # made: its rebuild stands for the one a stop cancelled
                     self._distortion_skipped = 0
+                    self._tick("stops")
                     continue
             if found is not None:
                 if self._distortion_skipped:  # the rebuild of this step, cancelled by this stop
                     found["distortion_rebuild_skipped"] = self._distortion_skipped
                 stop = found
                 break
+            self._tick("stops")
             if r is not None and self._edge_turn_max() > r.edge_turn_refine:
                 self._snapshot(m, "edge-turn")  # every step while an element bends this much
             else:
                 self._maybe_snapshot(m)
+            self._tick("snapshot")
             m, found = self._remesh_checks(m)
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
                 m, found = self._meet_event(m, found)
@@ -3281,9 +3363,12 @@ class CollapseDriver:
             if found is not None:
                 stop = found
                 break
+            self._tick("remesh")
             self._commit_post_cut(m)
+            self._tick("commit")
             if self._t() - st.last_state_t >= self._state_interval():
                 self.save_state()
+            self._write_timing(dt)
         # with the events block, a cut whose hard budgets do not close leaves the problem holding
         # a cut that is not accepted: nothing more is read from it, and the run ends on the state
         # before the event, which the cut kept
