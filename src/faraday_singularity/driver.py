@@ -297,6 +297,16 @@ Dumps written after a cut carry its record, which :meth:`CollapseDriver.restore`
 ``tau_end`` (``reconnect.CONTINUATION_KEYS``), which a continuation may raise; the run then
 continues in the post-cut mode.
 
+With the block's ``jetcore.enabled`` (``events.JetCoreSettings``, ``jetcore.py``) the open chain's
+nodes about the base of the upward jet are its core (``jetcore.core_mask``: within ``max(core_radius
+L, apex_extent R_apex)`` of the base, ``L = max(r_j, delta)``, not above the jet's tracked neck, and
+the walls beyond the base within ``wall_radius L``; the whole open chain without a base), every
+other node of the free surface the far region, and the Courant limit of the step is split between
+them (``jetcore.courant_split``: ``reconnect.courant`` on the core, ``jetcore.far_courant`` on the
+far nodes, the same number by default, which leaves the step as it was); ``jetcore.txt`` holds a
+row per step (``jetcore.COLUMNS``: what set the step, the split limit, the core) and every leg the
+resolved keys (``limits.jetcore``).
+
 After a cut the stops of a state are evaluated once (:meth:`CollapseDriver._post_cut_stop`, keyed
 by the state, :meth:`CollapseDriver._stop_key`): the check at the loop's top of the state the step
 has just checked gives the same answer without evaluating it again. With ``step_timing`` (the
@@ -606,9 +616,9 @@ RING_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "ring_volume", "ring_volum
                 "edge_midside_ring", "V_filled", "Pz_filled", "KE_filled")
 # step_timing.txt, with the driver's step_timing (a flag of the runner, no key of a case): a row
 # per accepted step, the wall time of the parts of its iteration of the loop (seconds of
-# perf_counter): the stops at the loop's top and the choice of the step, the solve, the measurement after it (with
-# a rebuild for distortion), the bookkeeping and rows, the stops after the step, the snapshot, the
-# remesh check, the commit after the cut and the dump; the total of the iteration
+# perf_counter): the stops at the loop's top and the choice of the step, the solve, the
+# measurement after it (with a rebuild for distortion), the bookkeeping and rows, the stops after
+# the step, the snapshot, the remesh check, the commit after the cut and the dump; the total
 STEP_TIMING_COLUMNS = ("step", "time", "dt", "top", "solve", "measure", "rows", "stops", "snapshot",
                        "remesh", "commit", "dump", "total")
 
@@ -783,6 +793,15 @@ class CollapseDriver:
                                      "max_abs": dict.fromkeys(BOX_NOISE_KEYS, 0.0),
                                      "sum_sq": dict.fromkeys(BOX_NOISE_KEYS, 0.0),
                                      "count": dict.fromkeys(BOX_NOISE_KEYS, 0)}
+        # with the block's jetcore.enabled: jetcore.txt, a row per step after the cut (jetcore.py),
+        # and what set the step the row records (_dt_limiter)
+        self._jetcore_rows = None
+        self._dt_limiter = "start"
+        if events is not None and events.jetcore.enabled:
+            from .jetcore import COLUMNS as JETCORE_COLUMNS
+
+            self._jetcore_rows = open(self.outdir / "jetcore.txt", "w", buffering=1)
+            self._jetcore_rows.write("# " + "\t".join(JETCORE_COLUMNS) + "\n")
         # with step_timing (a flag of the runner): step_timing.txt, the wall time of the parts of
         # each step (STEP_TIMING_COLUMNS); it reads clocks only and changes no value
         self._timing = None
@@ -822,7 +841,7 @@ class CollapseDriver:
         if self._chains is not None:
             self._chains.close()
         for f in (self._event_rows, self._drops, self._budget, self._noise, self._ring_rows,
-                  self._timing):
+                  self._timing, self._jetcore_rows):
             if f is not None:
                 f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
@@ -881,12 +900,60 @@ class CollapseDriver:
         # the capillary time of the sharpest tip on the axis and of the sharpest jet base
         R = min([x for x in (rec.get("R_tip_min", math.nan), R_apex_min) if math.isfinite(x)],
                 default=math.nan)
+        core = self._core_state(segs, apexes, [])
         state = {"segs": segs, "record": rec, "courant": cl, "tips": tips, "apexes": apexes,
-                 "edges": edges, "R_apex_min": R_apex_min,
-                 "dt_courant": self.reconnect.courant * cl["h_over_u"],
+                 "edges": edges, "R_apex_min": R_apex_min, "core": core,
+                 "dt_courant": self._dt_courant(cl, core),
                  "dt_capillary": self.s.capillary * R**1.5 if math.isfinite(R) else math.inf}
         self._post_cut_cache = (key, state)
         return state
+
+    def _jetcore(self):
+        """The events block's ``jetcore`` part where it is enabled, after a cut; None otherwise
+        (every rule of the run then as without the part)."""
+        if self.events is None or not self.events.jetcore.enabled or self._cut_record() is None:
+            return None
+        return self.events.jetcore
+
+    def _far_courant(self) -> float:
+        """The Courant number of the far nodes: ``jetcore.far_courant``, or the core's
+        ``reconnect.courant``."""
+        jet = self._jetcore()
+        if jet is None or jet.far_courant is None:
+            return self.reconnect.courant
+        return jet.far_courant
+
+    def _core_state(self, segs: list, apexes: dict, loops: list) -> dict | None:
+        """With ``jetcore``: the core of the open chain (``jetcore.core_mask``, about the base of
+        its jet, ``apexes``' ``cavity_tip``) and the Courant limit split between the core and the
+        far nodes of the chains and the loops (``split``, ``jetcore.courant_split``); None without
+        the part or without an open chain."""
+        jet = self._jetcore()
+        opens = [c for c in segs if c["open"]]
+        if jet is None or not opens:
+            return None
+        from .jetcore import core_mask, courant_split
+        from .ring import loop_segment
+
+        o = opens[0]
+        core = core_mask(np.column_stack([o["r"], o["z"]]), o["end_types"],
+                         apexes.get("cavity_tip"), delta=self.reconnect.delta,
+                         core_radius=jet.core_radius, wall_radius=jet.wall_radius,
+                         apex_extent=self.reconnect.apex_extent,
+                         track_depth=self.events.liquid.track_depth)
+        chains = list(segs) + [loop_segment(x) for x in loops]
+        masks = [core["mask"] if c is o else None for c in chains]
+        core["split"] = courant_split(chains, masks, core=self.reconnect.courant,
+                                      far=self._far_courant())
+        return core
+
+    def _dt_courant(self, cl: dict, core: dict | None) -> float:
+        """The Courant limit of the step after the cut: ``reconnect.courant`` times the smallest
+        ``h/|u|`` of every node (``cl``, ``reconnect.courant_limit``), or, with a far Courant number
+        of its own, the split limit of the core (``core``, :meth:`_core_state`)."""
+        if core is None or core["split"]["far_courant"] == self.reconnect.courant:
+            return self.reconnect.courant * cl["h_over_u"]
+        return core["split"]["dt"]
 
     def _ring(self) -> dict | None:
         """The problem's record of the ring stage (``FaradayProblem.ring``), after the ring cut of
@@ -925,9 +992,10 @@ class CollapseDriver:
         ring_record = (loop_record(np.column_stack([loops[0]["r"], loops[0]["z"]]),
                                    np.column_stack([loops[0]["u_r"], loops[0]["u_z"]]))
                        if len(loops) == 1 else None)
+        core = self._core_state(segs, apexes, loops)
         return {"segs": segs, "record": rec, "courant": cl, "tips": {}, "apexes": apexes,
-                "edges": edges, "R_apex_min": R_apex_min,
-                "dt_courant": self.reconnect.courant * cl["h_over_u"],
+                "edges": edges, "R_apex_min": R_apex_min, "core": core,
+                "dt_courant": self._dt_courant(cl, core),
                 "dt_capillary": self.s.capillary * R**1.5 if math.isfinite(R) else math.inf,
                 "loops": loops, "ring_record": ring_record}
 
@@ -1275,9 +1343,15 @@ class CollapseDriver:
                    "rise_tol": self._rise_tol(), "fold_stop": self._fold_stop(),
                    "neck_limit": self._neck_limit()}
         times = {"dt_min": self._dt_min(), "minimum_dt": self._minimum_dt()}
-        return {"delta": delta, **lengths, **times,
-                "in_delta": {**{k: v / delta for k, v in lengths.items()},
-                             **{k: v / delta**2 for k, v in times.items()}}}
+        out = {"delta": delta, **lengths, **times,
+               "in_delta": {**{k: v / delta for k, v in lengths.items()},
+                            **{k: v / delta**2 for k, v in times.items()}}}
+        jet = self._jetcore()
+        if jet is not None:  # with jetcore only: other legs keep their keys
+            out["jetcore"] = {"core_courant": self.reconnect.courant,
+                              "far_courant": self._far_courant(),
+                              "core_radius": jet.core_radius, "wall_radius": jet.wall_radius}
+        return out
 
     def _neck_limit(self) -> float:
         """The open chain's neck stop, ``max(neck_stop, neck_stop_elements h_floor)``, with the
@@ -1505,6 +1579,55 @@ class CollapseDriver:
             self._write_budget_row(values)
         if self._ring_rows is not None:  # in the ring stage only
             self._write_ring_row(dt)
+        if self._jetcore_rows is not None:  # with jetcore only
+            self._write_jetcore_row(dt)
+
+    def _write_jetcore_row(self, dt: float):
+        """The row of ``jetcore.txt`` of a step after the cut (``jetcore.COLUMNS``): the step just
+        taken and what set it (:meth:`_dt_limiter_of`), and, as ``chains.txt`` has its limits, the
+        split Courant limit and the core of the state it ended on."""
+        from .jetcore import COLUMNS
+
+        pc, t = self._post_cut_state(), self._t()
+        core = pc.get("core") or {}
+        split = core.get("split") or {}
+        values = {"step": self.state.step, "time": t, **self._taus(t), "dt": dt,
+                  "limiter": self._dt_limiter, "dt_courant": pc["dt_courant"],
+                  "dt_core": split.get("dt_core"), "dt_far": split.get("dt_far"),
+                  "binds": split.get("binds"), "far_courant": split.get("far_courant"),
+                  **{k: core.get(k) for k in ("L", "R_K", "A_r", "A_z", "z_cap")},
+                  "core_nodes": (split.get("core") or {}).get("nodes"),
+                  "far_nodes": (split.get("far") or {}).get("nodes")}
+        for cls in ("core", "far"):
+            b = split.get(cls) or {}
+            values.update({f"h_{cls}": b.get("h"), f"U_{cls}": b.get("U"), f"r_{cls}": b.get("r"),
+                           f"z_{cls}": b.get("z"), f"chain_{cls}": b.get("chain")})
+        self._jetcore_rows.write("\t".join(_table_cell(values.get(c)) for c in COLUMNS) + "\n")
+
+    def _dt_limiter_of(self, dt: float, m: dict, t: float, focus_courant: bool) -> str:
+        """With ``jetcore``: the candidate of the step (``run``) equal to the step ``dt``, its
+        first in the order the step is chosen: ``dt_max``, ``focus`` (the collapse's Courant rule),
+        ``capillary``, ``t_end``, ``courant-core`` or ``courant-far`` (the split limit, by which
+        class binds), ``capillary-tip``, ``tau_end``, ``dt_growth``, ``scale-rate``, ``growth``;
+        ``none`` where none is (the step-size floor stops it). Read only, it sets nothing."""
+        s, st, r = self.s, self.state, self.reconnect
+        pc = self._post_cut_state()
+        split = (pc.get("core") or {}).get("split") or {}
+        t_cut = self._cut_times()[0]
+        cands = [("dt_max", s.dt_max),
+                 ("focus", s.courant * m["h_focus"] / m["U"] if focus_courant else math.inf),
+                 ("capillary", s.capillary * math.sqrt(m["ell"] ** 3)), ("t_end", s.t_end - t),
+                 (f"courant-{split.get('binds', 'core')}", pc["dt_courant"]),
+                 ("capillary-tip", pc["dt_capillary"]), ("tau_end", t_cut + r.tau_end - t),
+                 ("dt_growth", r.dt_growth * st.dt_prev if st.dt_prev is not None
+                  else math.inf)]
+        if math.isfinite(st.ell_prev) and st.t_prev < t:
+            rate = (st.ell_prev - m["ell"]) / (t - st.t_prev)
+            if rate > 0:
+                cands.append(("scale-rate", s.scale_rate * m["ell"] / rate))
+        if st.dt_prev is not None:
+            cands.append(("growth", s.growth * st.dt_prev))
+        return next((name for name, v in cands if v == dt), "none")
 
     def _filled(self) -> dict:
         """What the ring surgeries made have filled of the gas since the gas cut (the column of the
@@ -3245,6 +3368,8 @@ class CollapseDriver:
                     dt = min(dt, s.scale_rate * m["ell"] / rate)
             if st.dt_prev is not None:
                 dt = min(dt, s.growth * st.dt_prev)
+            if self._jetcore_rows is not None and r is not None:  # what set the step, read only
+                self._dt_limiter = self._dt_limiter_of(dt, m, t, focus_courant)
             if dt < self._dt_min():
                 stop = {"reason": "dt-floor", "dt": dt}
                 break

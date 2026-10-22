@@ -8,6 +8,10 @@
   their defaults, validated, the keys of jetcore of the leg (its sizing keys among
   ``events.SIZING_KEYS``) and those of pinch of the class ``liquid``; a key whose behaviour the
   driver does not make yet is refused (``events.PENDING_KEYS``).
+* The core of the upward jet (``jetcore.core_mask``: the base, the stem below the jet's tracked
+  neck, the walls) and the split Courant limit (``jetcore.courant_split``), the limit of every node
+  to the bit at one Courant number; stand-in runs with jetcore at its defaults take the same steps
+  and write ``jetcore.txt``, and with a far Courant number of its own the far nodes take longer.
 """
 
 from __future__ import annotations
@@ -280,3 +284,145 @@ def test_the_runner_admits_a_jetcore_change_and_refuses_a_pinch_change_after_a_l
                                                                  "pinch": {"enabled": True}}))
     run_case._check_events({**meta, "cut_stage": ev.PRECUT_EVENT, "event": {"k": 2}},
                            ev.EventSettings.from_dict({**LIQUID, "pinch": {"enabled": True}}))
+
+
+# --- C3: the core of the upward jet and the split Courant limit -----------------------------------
+
+
+def _jet_open_chain(delta=1e-3, r_n=0.3):
+    """The open chain of ``test_events_stops.cavity_with_head`` (a jet rising from the trough of a
+    groove, its head necked to ``r_n delta``) and its jet's base as the driver reads it."""
+    from test_events_stops import cavity_with_head
+
+    from faraday_singularity.collapse import Profile, jet_base
+    from faraday_singularity.reconnect import jet_base_apex
+
+    c = cavity_with_head(delta, r_n=r_n)
+    r, z = c.points[:, 0], c.points[:, 1]
+    jb = jet_base(Profile(r, z), 1.5, 1e-6)
+    a = jet_base_apex(r, z, jb.index)
+    return c, {"index": a["apex"], "r": jb.r_j, "z": jb.z_b, "R_apex": a["R_apex"]}
+
+
+def test_the_core_is_the_base_of_the_jet_its_stem_below_the_neck_and_the_walls():
+    """On a rising jet with a necked head: the nodes within ``R_K`` of the base are core but those
+    above the jet's tracked neck (its head), the walls beyond the base within ``wall_radius L`` are
+    core, the rest far; ``R_K`` is the larger of ``core_radius L`` and ``apex_extent R_apex``.
+    Without a base of a jet the whole open chain is core."""
+    from faraday_singularity.jetcore import core_mask, upward_neck
+
+    delta = 1e-3
+    c, apex = _jet_open_chain(delta)
+    P = c.points
+    kw = dict(delta=delta, core_radius=2.0, wall_radius=10.0, apex_extent=8.0, track_depth=0.05)
+    core = core_mask(P, c.end_types, apex, **kw)
+    L = max(apex["r"], delta)
+    assert core["L"] == L and not core["whole"]
+    assert core["R_K"] == max(2.0 * L, 8.0 * apex["R_apex"])
+    neck = upward_neck(P, c.end_types, apex["index"], 0.05)
+    assert neck is not None and 0 < neck["index"] < apex["index"]
+    assert core["z_cap"] == neck["z"]
+    m, idx = core["mask"], np.arange(len(P))
+    d = np.hypot(P[:, 0] - apex["r"], P[:, 1] - apex["z"])
+    assert not m[idx < neck["index"]].any()  # the head
+    assert m[(idx >= neck["index"]) & (d <= core["R_K"])].all()
+    walls = (idx > apex["index"]) & (d <= 10.0 * L)
+    assert m[walls].all() and not m[(idx > apex["index"]) & (d > max(10.0 * L, core["R_K"]))].any()
+    wider = core_mask(P, c.end_types, apex, **dict(kw, core_radius=4.0, wall_radius=20.0))
+    assert wider["mask"].sum() > m.sum() and (wider["mask"] | ~m).all()
+    whole = core_mask(P, c.end_types, None, **kw)
+    assert whole["whole"] and whole["mask"].all()
+
+
+def _random_segs(seed=3):
+    rng = np.random.default_rng(seed)
+    out = []
+    for k, n in enumerate((51, 77)):
+        s = np.sort(rng.uniform(0.0, 1.0, n))
+        out.append({"open": k == 0, "end_types": ("axis", "fixed"), "r": s,
+                    "z": np.sin(3.0 * s), "u_r": rng.normal(0.0, 1.0, n),
+                    "u_z": rng.normal(0.0, 3.0, n) * (rng.uniform(size=n) > 0.1)})
+    return out
+
+
+def test_the_split_limit_at_one_courant_number_is_the_limit_of_every_node_to_the_bit():
+    from faraday_singularity.jetcore import courant_split
+    from faraday_singularity.reconnect import courant_limit
+
+    segs = _random_segs()
+    rng = np.random.default_rng(5)
+    masks = [rng.uniform(size=len(segs[0]["r"])) > 0.5, None]
+    for c in (0.2, 0.4, 0.37):
+        split = courant_split(segs, masks, core=c, far=c)
+        assert split["dt"] == c * courant_limit(segs)["h_over_u"]
+    split = courant_split(segs, masks, core=0.4, far=0.8)
+    assert split["dt"] == min(split["dt_core"], split["dt_far"])
+    assert split["dt"] >= 0.4 * courant_limit(segs)["h_over_u"]
+    assert split["core"]["nodes"] + split["far"]["nodes"] == sum(len(c["r"]) for c in segs)
+    assert split["far"]["nodes"] >= len(segs[1]["r"])
+    allcore = courant_split(segs, [np.ones(len(c["r"]), bool) for c in segs], core=0.4, far=9.0)
+    assert allcore["dt"] == 0.4 * courant_limit(segs)["h_over_u"] and allcore["binds"] == "core"
+
+
+def _moving_problem():
+    """``CutProblem`` with the bubble moving fast (its nodes set the Courant limit, far nodes:
+    the open chain has no jet, so it is wholly core) and the open chain slowly."""
+    from test_bookkeeping import CutProblem
+
+    def speed(chain, r, z):
+        return np.full_like(r, 50.0 if chain == "bubble" else 1.0)
+
+    return CutProblem(speed=speed)
+
+
+def _block(**jetcore):
+    return ev.EventSettings.from_dict({**LIQUID, "jetcore": {"enabled": True, **jetcore}})
+
+
+def test_jetcore_at_its_defaults_leaves_the_steps_and_writes_its_rows(tmp_path):
+    """A stand-in run after the cut with jetcore at its defaults takes the steps of the run without
+    it, to the bit, and writes a row of ``jetcore.txt`` per row of ``chains.txt``: the far bubble
+    binds, at the core's Courant number, the core is the whole open chain (no jet)."""
+    from faraday_singularity.jetcore import COLUMNS
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-9, courant=0.4, focus_courant=False)
+    rows = {}
+    for name, block in (("plain", ev.EventSettings.from_dict(LIQUID)), ("jet", _block())):
+        drv = _events_driver(tmp_path / name, _moving_problem(), recon, block, max_steps=5)
+        drv.run(1e-9)
+        drv.close()
+        rows[name] = (tmp_path / name / "chains.txt").read_text()
+    assert rows["plain"] == rows["jet"]
+    text = (tmp_path / "jet" / "jetcore.txt").read_text().splitlines()
+    assert text[0] == "# " + "\t".join(COLUMNS) and len(text) == len(rows["jet"].splitlines())
+    last = dict(zip(COLUMNS, text[-1].split("\t")))
+    assert last["binds"] == "far" and float(last["far_courant"]) == 0.4
+    assert last["limiter"] in ("courant-far", "growth", "dt_growth")
+    assert not (tmp_path / "plain" / "jetcore.txt").exists()
+
+
+def test_a_far_courant_number_of_its_own_lets_the_far_nodes_take_longer_steps(tmp_path):
+    """With ``far_courant`` twice the core's the far bubble's limit doubles: the step the run
+    takes is the split limit, ``min(0.4 min_K, 0.8 min_F)``, which the far part sets here."""
+    from faraday_singularity.jetcore import COLUMNS
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-9, courant=0.4, focus_courant=False,
+                              dt_growth=10.0)
+    out = {}
+    for name, block in (("plain", _block()), ("fast", _block(far_courant=0.8))):
+        drv = _events_driver(tmp_path / name, _moving_problem(), recon, block, max_steps=6,
+                             growth=10.0)
+        drv.run(1e-9)
+        drv.close()
+        lines = (tmp_path / name / "jetcore.txt").read_text().splitlines()[1:]
+        out[name] = [dict(zip(COLUMNS, x.split("\t"))) for x in lines]
+    a, b = out["plain"][-1], out["fast"][-1]
+    assert float(b["dt_far"]) == pytest.approx(2.0 * float(a["dt_far"]), rel=1e-12)
+    assert float(b["dt_courant"]) == min(float(b["dt_core"]), float(b["dt_far"]))
+    assert float(b["dt_courant"]) > float(a["dt_courant"])
+    assert b["limiter"].startswith("courant-") and float(b["dt"]) == pytest.approx(
+        float(out["fast"][-2]["dt_courant"]), rel=1e-12)
+    legs = [json.loads(x) for x in (tmp_path / "fast" / "events.jsonl").read_text().splitlines()]
+    leg = next(e for e in legs if e["event"] == "leg")
+    assert leg["limits"]["jetcore"] == {"core_courant": 0.4, "far_courant": 0.8,
+                                        "core_radius": 2.0, "wall_radius": 10.0}
