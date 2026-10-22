@@ -339,3 +339,17 @@ def test_the_closing_speed_is_undefined_where_the_neck_changes_kind():
     rows += gas.after_step(t[4], neck_chain(0.0, r0=0.2), step=4)  # a neck, wider than the foot
     assert rows[-1]["neck_source"] == "neck" and math.isnan(rows[-1]["s"])
     assert not math.isfinite(gas.markers["r_reopen"]) and gas.reopen == 0
+
+
+def test_no_activation_while_the_bottom_is_in_the_window():
+    """A shallow cavity whose bottom lies in the neck window: the window's smallest radius would
+    be the bottom's own (zero on the axis), which is no neck; the gas stays dormant until the
+    bottom, with its bubble zone, lies below the window's foot."""
+    gas = _gas(r_on=0.06, z_lo=None)
+    shallow = neck_chain(0.0, z_b=0.5)  # the bottom inside the window (0.45, 0.75)
+    out = gas.before_step(0.0, shallow, step=0)
+    assert gas.status == "dormant" and "activated" not in out
+    assert gas._neck_of(shallow)[3] == "none"
+    deep = neck_chain(6.4e-3, z_b=0.3)
+    out = gas.before_step(1e-3, deep, step=1)
+    assert gas.status == "pending" and out["r_n"] > 0 and out["z_lo"] > 0.3

@@ -17,7 +17,9 @@ Gordillo (2011, Sec. 2.3) with the pocket resolved down to its bottom:
 
 The gas is dormant (no state, no traction) until the neck has closed to ``r_on``: the neck is the
 narrowest interior minimum of the chain's radius within the gas zones (as the collapse driver
-measures necks), and before one exists the smallest radius within ``neck_window``. The state at
+measures necks), and before one exists the smallest radius within ``neck_window`` above the bubble
+zone; while the cavity's bottom, with ``h_bz`` above it, is not below the window's foot there is
+no neck to follow (a shallow trough passing through the window). The state at
 which it first has is stored (``pending``); after the next step of the liquid the gas starts there,
 quasi-steadily from the pair of chains of that step (the face velocity ``-(dVcum/dt)/S``, a
 Bernoulli pressure recovered to the top, attached, or not recovered above the neck, separated, an
@@ -469,8 +471,16 @@ class NeckGas:
             r_n, z_n = float(neck[0]), float(neck[1])
             j = int(np.argmin(np.abs(np.asarray(z) - z_n) + np.abs(np.asarray(r) - r_n)))
             return r_n, z_n, j, "given"
-        lo, hi = (self.z_lo, self.s.z_hi) if math.isfinite(self.z_lo) else self.s.neck_window
-        return chain_neck(r, z, lo, hi, self.s.neck_window)
+        window = self.s.neck_window
+        bottom = float(np.asarray(z)[0])
+        if self.status == "dormant" and not bottom + self.s.h_bz < window[0]:
+            # the cavity's bottom, with a bubble zone below the gas, is not yet below the window:
+            # no neck to follow (the window's smallest radius would be the bottom's own)
+            return math.nan, math.nan, -1, "none"
+        active = self.status != "dormant" and math.isfinite(self.z_lo)
+        lo, hi = (self.z_lo, self.s.z_hi) if active else window
+        floor = self.z_lo if math.isfinite(self.z_lo) else bottom + self.s.h_bz
+        return chain_neck(r, z, lo, hi, (max(window[0], floor), window[1]))
 
     def _h_bz(self, w_axis: float, dt: float) -> float:
         rise = abs(w_axis) * dt if (math.isfinite(w_axis) and math.isfinite(dt)) else 0.0
@@ -500,7 +510,7 @@ class NeckGas:
             return out
         if self.status == "dormant":
             nk = self._neck_of(chain, neck)
-            if not (math.isfinite(nk[0]) and nk[0] <= self.s.r_on):
+            if not (math.isfinite(nk[0]) and 0.0 < nk[0] <= self.s.r_on):
                 return out
             # the bottom's rise in a step: its velocity on the axis (u_z of the chain's first node)
             z_lo = self.s.z_lo if self.s.z_lo is not None else \
