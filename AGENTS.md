@@ -14,7 +14,9 @@ Faraday threshold of the `J0` mode), and a collapse driver (`src/faraday_singula
 that writes the collapse and jet observables during the run (apex curvature, jet-base radius and
 speed, cone angle, running estimates of the singular time from the apex and, from the jet-base
 radius, of the origin of the jet's growth or of the time a closing base would reach the axis, crest
-and trough episodes of the axis) and stops before any pinch-off. The production runner can
+and trough episodes of the axis) and stops before any pinch-off, optionally with a quasi-one-dimensional compressible gas in the
+collapsing neck coupled to the free surface (`collapse.gas`, `src/faraday_singularity/neckgas/`).
+The production runner can
 continue a run through a neck pinch-off by an explicit cut at the start of a restart
 (`src/faraday_singularity/surgery.py`, the post-cut mode of the driver); it is tested on a synthetic
 necked cavity only, not yet on a production collapse, and no study in the cut radius has been run. The repository
@@ -424,6 +426,28 @@ add a second top-level `cases/` tree.
   `testCases/ring_fem_state.py`, and each hard closure of both violated in turn, a stop
   `event-unclosed` with `precut_e<k>`; F4, the liquid cut of the cavity's tip in the ring stage on
   that state with the tip necked, with the ring and after its removal) cover it.
+- The gas in the neck is the `collapse.gas` block (`src/faraday_singularity/neckgas/`: `q1d.py` the
+  quasi-1D compressible solver, ported verbatim from the one-way check with budgets, a retry, a
+  bitwise state and a regrid that merges into the bubble zone; `geometry.py` the duct from the
+  free surface; `coupler.py` the block, `GasSettings`, and the gas over a run, `NeckGas`). Without
+  the block nothing changes (`testCases/test_neckgas_identity.py` pins a runner run and its restart
+  to 2f3ac25 to the byte, besides the other pins). With it the problem carries the pinned field
+  `gas_traction` (`problem.GasTraction`, `additional_normal_traction` of the free surface:
+  `sigma_l . n = -(T + kappa) n`, `T` the gas overpressure, positive into the liquid); the driver
+  (`CollapseDriver(gas=...)`) checks and syncs the chain and sets the traction just before each
+  solve, advances the gas on the stepped chain just after it, before any rebuild
+  (`_gas_before_step`, `_gas_after_step`), limits the step with the traction applied, writes
+  `gas.txt`, `gas_profiles/`, the side file `<dump>.gas.npz` of every dump (deterministic bytes;
+  `restore(meta, gas_file)`; the runner hashes it as `gas_sha256` and copies it) and the hand-over
+  (`gas_handover` in landing states, `gas_cut.json` at a cut, after which the gas is retired), and
+  stops resumably on `neckgas.coupler.STOPS`. A dormant block differs from no block at round-off
+  (the compiled code changes); one-way coupling is the dormant trajectory to the byte. A restart of
+  this pyoomph release restores the finite-element state to round-off, not to the byte, with or
+  without the gas, so restart tests compare to round-off (`test_neckgas_restart_fem.py`). The heights
+  `z_hi` and `neck_window` and the reference law of `s_passive` belong to a case, never to the
+  defaults. Verification: `verificationCases/neck-gas/` (`verify_q1d.py --compare`, `forced_wave.py
+  gate`); the replay of saved frames of a passive run against the one-way solve runs when
+  `FARADAY_NECKGAS_REPLAY` names its directory (`testCases/test_neckgas_replay.py`).
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a
   new mesh) asks for a rebuild. Before the driver has set a focus, pyoomph makes it inside the
