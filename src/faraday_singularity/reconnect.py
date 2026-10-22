@@ -932,7 +932,8 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
                    h_min: float, *, neck_elements: float = 3.0, fold_ratio: float = 4.0,
                    fold_stop: float = 1e-3, fold_stop_elements: float = 3.0,
                    fold_search: float = 4.0, apexes: dict | None = None,
-                   guard: dict | None = None, events=None, invalid=None) -> dict | None:
+                   guard: dict | None = None, events=None, invalid=None,
+                   pinch: dict | None = None) -> dict | None:
     """The stop a state after the cut calls for, if any.
 
     The mesh cannot follow a second change of topology: the bridge closing again (the bubble and
@@ -976,16 +977,17 @@ def post_cut_stops(chains: Sequence[Chain], cut: CutGeometry, settings: Reconnec
 
     With ``events``, the events block (``events.EventSettings``), the stops are those of the events
     branch instead, in its own order and with its own limits (``events.post_cut_events``; a gas
-    neck deep also against its adjacent shoulders, :func:`adjacent_shoulders`), and ``invalid`` is
+    neck deep also against its adjacent shoulders, :func:`adjacent_shoulders`), ``invalid`` is
     the check of a fresh mesh's curved elements the driver makes among the stops of an invalid
-    state; without it the stops are those above, unchanged."""
+    state and ``pinch`` the history of the tracked necks of the block's ``pinch`` part (the
+    driver's); without it the stops are those above, unchanged."""
     if events is not None:
         from .events import post_cut_events
 
         return post_cut_events(chains, cut, settings, h_min, events, neck_elements=neck_elements,
                                fold_ratio=fold_ratio, fold_stop=fold_stop,
                                fold_stop_elements=fold_stop_elements, fold_search=fold_search,
-                               apexes=apexes, guard=guard, invalid=invalid)
+                               apexes=apexes, guard=guard, invalid=invalid, pinch=pinch)
     if invalid is not None:
         raise TypeError("post_cut_stops: invalid is a check of the events branch (events)")
     if len(chains) != 2:

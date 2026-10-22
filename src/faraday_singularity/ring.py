@@ -766,7 +766,7 @@ def loop_segment(loop: dict) -> dict:
 def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: dict, *,
                       neck_elements: float, fold_ratio: float, fold_stop: float,
                       fold_stop_elements: float, fold_search: float, apexes: dict | None,
-                      guard: dict | None, invalid=None) -> dict | None:
+                      guard: dict | None, invalid=None, pinch: dict | None = None) -> dict | None:
     """The stops and events of a state of the ring stage (after the ring cut,
     ``ringsurgery.ring_cut``; ``ring`` the problem's record of the stage), on the open chain
     (``chains``, ``reconnect.Chain``) and the ring (``loops``, ``(n, 2)`` arrays as
@@ -796,10 +796,12 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
        ``3 h_min`` of the open chain (``chain-contact``, ``X``); on a mesh a step has run on, the
        guard last. Not tested: the piercing (no bubble), the bridge (the axis is liquid up to the
        cavity's tip) and the bubble emptying. The ring's own events have no handler but the
-       removal's: each is a resumable stop."""
+       removal's: each is a resumable stop. With ``pinch.enabled`` the open chain's necks land
+       only when they close, as in ``events.post_cut_events`` (``pinch``, the driver's history)."""
     from shapely.geometry import LineString
 
-    from .events import (_neck_fields, _request, fold_stop_after_cut, head_fold, head_of_fold,
+    from .events import (_neck_fields, _pinch_field, _request, closing_readings,
+                         fold_stop_after_cut, head_fold, head_lands, head_of_fold, lands,
                          liquid_necks)
     from .reconnect import (Chain, adjacent_shoulders, chain_necks, edge_reading, fold_contact,
                             interface_guard, revolved_volume, spline_contact_stop)
@@ -842,6 +844,7 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
                     "contact_r": contact["at"][0], "contact_z": contact["at"][1],
                     "crossings": contact["count"]}
     necks = liquid_necks(named, ls) if ls.enabled else []
+    closing_readings(necks, events, settings.delta, pinch)
     fresh = bool(guard["fresh"]) if guard is not None else False
     if fresh:
         unresolved = [x for x in necks if x["r_n"] < ls.resolution * x["h_loc"]]
@@ -906,11 +909,11 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
         return None
 
     if ls.enabled:
-        landed = sorted((x for x in necks if x["landed"]), key=lambda x: x["ratio"])
+        landed = sorted((x for x in necks if lands(x, events)), key=lambda x: x["ratio"])
         if landed:
             x = landed[0]
             return _request("liquid-neck", "L" if x["status"] == "head" else "L-unhandled",
-                            eps_d=ls.eps_d, **_neck_fields(x))
+                            eps_d=ls.eps_d, **_neck_fields(x), **_pinch_field(x))
     else:
         found = secondary("liquid")
         if found is not None:
@@ -932,7 +935,7 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
         offer("ring", loop_fold_gap(L, ratio=fold_ratio, stop=stop_abs,
                                     stop_elements=fold_stop_elements,
                                     search_factor=fold_search))
-    lands, kinks, grooves = [], [], []
+    landing, kinks, grooves = [], [], []
     for score, name, f, fold_limit in closing.values():
         rec = {"chain": name, "contact": fold_contact(f.arc, f.h_elem), "fold_gap": f.gap,
                "fold_r": f.r, "fold_z": f.z, "fold_arc": f.arc, "fold_h_elem": f.h_elem,
@@ -958,13 +961,13 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
         head = head_of_fold(f.pair, necks)
         if head is not None:
             rec["a_head"] = {**_neck_fields(head), "r_n_over_s": head["r_n"] / head["s"],
-                             "eps_max": ls.eps_max}
-            if head["r_n"] <= ls.eps_max * head["s"]:
-                lands.append(((head["r_n"] / head["s"], score), head, rec))
+                             "eps_max": ls.eps_max, **_pinch_field(head)}
+            if head_lands(head, events):
+                landing.append(((head["r_n"] / head["s"], score), head, rec))
                 continue
         grooves.append((score, "A-groove", rec))
-    if lands:
-        _, head, rec = min(lands, key=lambda x: x[0])
+    if landing:
+        _, head, rec = min(landing, key=lambda x: x[0])
         return _request("a-head", "A-head" if head["status"] == "head" else "L-unhandled", **rec)
     if kinks:
         return min(kinks, key=lambda x: x[0])[1]

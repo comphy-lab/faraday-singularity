@@ -18,6 +18,10 @@
   the core's unchanged, the edge-turn profiles of the core.
 * The refinement before the piercing (``jetcore.prep_regions``, ``prep_mask``): its regions once
   the bubble is shorter than ``prep_gap delta``, their size and their nodes stepped as the core's.
+* The closing-neck trigger of ``pinch`` (``events.closing_neck``) on synthetic tracks (a pinch
+  fires, a stalled, noisy or decelerating neck and a short track do not), the landing of a neck
+  only from a closing history, the per-neck history in the state and the dumps and its restore,
+  and the liquid cut's admission under the trigger.
 """
 
 from __future__ import annotations
@@ -643,3 +647,185 @@ def test_before_the_piercing_the_driver_adds_the_regions_and_steps_their_nodes_a
     assert not any(g["name"].startswith("pierce_") for g in long.measure()["regions"])
     assert long._post_cut_state()["core"]["split"]["core"]["nodes"] == n_open
     long.close()
+
+
+# --- C6: the closing-neck trigger of pinch --------------------------------------------------------
+
+
+def _pinch(**kw):
+    return ev.PinchSettings(enabled=True, **kw)
+
+
+def _law(A, t_p, times):
+    """``r = A (t_p - t)^(2/3)``, an inertio-capillary pinch."""
+    return [[float(t), float(A * (t_p - t) ** (2.0 / 3.0))] for t in times]
+
+
+def test_the_closing_trigger_fires_on_a_pinch_and_on_no_stalled_or_decelerating_neck():
+    """The trigger on synthetic tracks at delta 1e-3 sampled every 5e-9: a pinch ``A (t_p -
+    t)^(2/3)`` fires once below ``r_c delta``, with ``T_p/tau_c = A^(-3/2)`` (1.71 for A = 0.7);
+    above ``r_c delta`` it does not; a stalled neck, with or without noise, a neck closing ever more
+    slowly towards a radius it stalls at, and a track with too few samples do not."""
+    from faraday_singularity.events import closing_neck
+
+    delta, dt, p = 1e-3, 5e-9, _pinch()
+    A, r_now = 0.7, 1.9e-4
+    t_now = 0.0
+    t_p = (r_now / A) ** 1.5
+    past = t_now - dt * np.arange(400, 0, -1)
+    got = closing_neck(_law(A, t_p, past), t_now, r_now, delta=delta, pinch=p)
+    assert got["fired"] and got["closing"] and got["pinching"] and got["small"]
+    assert got["T_p_over_tau_c"] == pytest.approx(A ** -1.5, rel=2e-2)
+    assert got["samples"] == int(got["window"] / dt) + 1 or got["samples"] >= p.min_samples
+    # above r_c delta
+    r_big = 3e-4
+    t_pb = (r_big / A) ** 1.5
+    big = closing_neck(_law(A, t_pb, past), t_now, r_big, delta=delta, pinch=p)
+    assert big["closing"] and not big["small"] and not big["fired"]
+    # stalled, and stalled with noise of a thousandth of the radius
+    flat = [[float(t), r_now] for t in past]
+    assert not closing_neck(flat, t_now, r_now, delta=delta, pinch=p)["fired"]
+    rng = np.random.default_rng(7)
+    noisy = [[float(t), r_now * (1.0 + 1e-3 * rng.normal())] for t in past]
+    assert not closing_neck(noisy, t_now, r_now, delta=delta, pinch=p)["fired"]
+    # closing ever more slowly: r = r_s + B exp(-(t - t0)/tau), decelerating (curvature > 0)
+    r_s, B, tau = 1.0e-4, 0.9e-4, 1e-6
+    slow = [[float(t), r_s + B * math.exp(-(t - past[0]) / tau)] for t in past]
+    r_end = r_s + B * math.exp(-(t_now - past[0]) / tau)
+    reading = closing_neck(slow, t_now, r_end, delta=delta, pinch=p)
+    assert not reading["closing"] and not reading["fired"]
+    # too few samples in the window
+    sparse = closing_neck(_law(A, t_p, t_now - 4e-8 * np.arange(5, 0, -1)), t_now, r_now,
+                          delta=delta, pinch=p)
+    assert sparse["samples"] < p.min_samples and not sparse["fired"]
+    # samples at the state's time or after it are not read (the current one stands for them)
+    later = _law(A, t_p, past) + [[t_now, 0.5 * r_now], [t_now + dt, 0.1 * r_now]]
+    assert closing_neck(later, t_now, r_now, delta=delta, pinch=p) == got
+
+
+def _headed_state(r_n):
+    from test_events_stops import bubble_with_head, cavity
+
+    bubble, _ = bubble_with_head(1e-3, r_n=r_n)
+    return [bubble, cavity()]
+
+
+def test_with_pinch_a_neck_lands_only_when_its_history_closes():
+    """A head necked to 0.09 delta lands at eps_d 0.2 without pinch; with it, not without a
+    history, and as a closing neck with the history of a pinch (the request with its trigger)."""
+    from faraday_singularity.reconnect import Chain, cut_geometry, post_cut_stops
+
+    chains = _headed_state(0.09)
+    s = ReconnectSettings(delta=1e-3)
+    cut = cut_geometry(chains, 3.0, gas_before=1.0)
+    h = s.tip_size * s.delta
+    plain = ev.EventSettings.from_dict(LIQUID)
+    pinched = ev.EventSettings.from_dict({**LIQUID, "pinch": {"enabled": True}})
+    got = post_cut_stops(chains, cut, s, h, events=plain)
+    assert (got["kind"], got["class"]) == ("liquid-neck", "L") and "pinch" not in got
+    none = post_cut_stops(chains, cut, s, h, events=pinched, pinch={"t": 0.0, "history": {}})
+    assert none is None or none.get("kind") != "liquid-neck"
+    named = [("bubble", chains[0]), ("open", chains[1])]
+    neck = next(x for x in ev.liquid_necks(named, pinched.liquid) if x["status"] == "head")
+    r_n, tau_c = neck["r_n"], neck["r_n"] ** 1.5
+    A = r_n / (1.5 * tau_c) ** (2.0 / 3.0)  # T_p = 1.5 tau_c
+    samples = _law(A, 1.5 * tau_c, -5e-10 * np.arange(400, 0, -1))
+    history = {"next": 2, "necks": {"bubble-1": {"chain": "bubble", "z_n": neck["z_n"],
+                                                 "r_n": r_n, "samples": samples}}}
+    got = post_cut_stops(chains, cut, s, h, events=pinched, pinch={"t": 0.0, "history": history})
+    assert (got["kind"], got["class"]) == ("liquid-neck", "L")
+    assert got["pinch"]["fired"] and got["pinch"]["history"] == "bubble-1"
+    assert got["pinch"]["T_p_over_tau_c"] == pytest.approx(1.5, rel=2e-2)
+    # another chain's history, or one too far in height, is not this neck's
+    assert ev.match_neck(history["necks"], "open", neck["z_n"], r_n) is None
+    assert ev.match_neck(history["necks"], "bubble", neck["z_n"] + 2.5 * r_n, r_n) is None
+    assert ev.match_neck(history["necks"], "bubble", neck["z_n"] + 1.5 * r_n, r_n) == "bubble-1"
+    assert Chain is not None
+
+
+class HeadProblem:
+    """``test_bookkeeping.CutProblem`` whose bubble is ``test_events_stops.bubble_with_head`` at
+    delta 1e-3, its head necked to ``r_n`` delta (tracked, not landed at 0.3)."""
+
+    @staticmethod
+    def make(r_n=0.3):
+        from test_bookkeeping import CutProblem
+        from test_events_stops import bubble_with_head
+
+        P = bubble_with_head(1e-3, r_n=r_n)[0].points
+
+        class _P(CutProblem):
+            def interface_segments(self):
+                segs = super().interface_segments()
+                segs[0] = self._chain("bubble", P[:, 0].copy(), P[:, 1].copy(), ("axis", "axis"))
+                return segs
+
+        return _P()
+
+
+def test_the_history_of_each_tracked_neck_is_kept_in_the_dumps_and_restored(tmp_path,
+                                                                           monkeypatch):
+    """With pinch, a stand-in run whose bubble holds a tracked head keeps a sample of its neck per
+    accepted step (``neck_history``), written into its dumps and restored from them; without the
+    part the dumps have no history."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    block = ev.EventSettings.from_dict({**LIQUID, "pinch": {"enabled": True}})
+    drv = _events_driver(tmp_path / "p", HeadProblem.make(), recon, block, max_steps=3,
+                         state_dt=0.0, state_keep=10)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["steps"] == 3
+    hist = drv.state.neck_history
+    (key, entry), = hist["necks"].items()
+    assert entry["chain"] == "bubble" and len(entry["samples"]) == 3
+    assert [s[0] for s in entry["samples"]] == sorted(s[0] for s in entry["samples"])
+    meta = json.loads((tmp_path / "p" / "states" / "state_00000003.json").read_text())
+    assert meta["neck_history"] == json.loads(json.dumps(hist))
+    again = _events_driver(tmp_path / "q", HeadProblem.make(), recon, block, max_steps=3)
+    from faraday_singularity import surgery  # a stand-in has no mesh sizing to restore
+
+    monkeypatch.setattr(surgery, "restore_cut", lambda problem, record: setattr(problem, "cut",
+                                                                                 record))
+    again.restore(meta)
+    assert again.state.neck_history == meta["neck_history"]
+    again.close()
+    plain = _events_driver(tmp_path / "r", HeadProblem.make(), recon,
+                           ev.EventSettings.from_dict(LIQUID), max_steps=2, state_dt=0.0,
+                           state_keep=10)
+    plain.run(1e-9)
+    plain.close()
+    meta = json.loads((tmp_path / "r" / "states" / "state_00000002.json").read_text())
+    assert "neck_history" not in meta
+
+
+def test_the_liquid_cut_under_pinch_refuses_a_neck_that_does_not_close(tmp_path):
+    """The admission of the liquid cut under pinch: a request whose trigger did not fire, or a neck
+    above ``r_c delta``, is refused before anything changes."""
+    from faraday_singularity import surgery
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    block = ev.EventSettings.from_dict({**LIQUID, "pinch": {"enabled": True}})
+    pb = HeadProblem.make(r_n=0.09)
+    drv = _events_driver(tmp_path / "a", pb, recon, block)
+    pb.recon = recon
+    named = [("bubble", None), ("open", None)]
+    del named
+    segs = pb.interface_segments()
+    from faraday_singularity.reconnect import Chain
+
+    chains = [("bubble", Chain(np.column_stack([segs[0]["r"], segs[0]["z"]]), ("axis", "axis"))),
+              ("open", Chain(np.column_stack([segs[1]["r"], segs[1]["z"]]), ("axis", "fixed")))]
+    neck = next(x for x in ev.liquid_necks(chains, block.liquid) if x["status"] == "head")
+    request = {"reason": ev.EVENT_REQUEST, "kind": "liquid-neck", "class": "L",
+               "handler": "liquid-cut", **{k: neck[k] for k in ev.NECK_KEYS if k in neck}}
+    for reading in (None, {"fired": False}):
+        req = dict(request, **({"pinch": reading} if reading is not None else {}))
+        with pytest.raises(surgery.CutRefused, match="does not close"):
+            surgery.liquid_cut(pb, block, recon, tmp_path / "cut", req, k=1, dt_prev=1e-6,
+                               elements_per_scale=8.0, h_floor=1e-7, log=lambda *_: None)
+    tight = ev.EventSettings.from_dict({**LIQUID, "pinch": {"enabled": True, "r_c": 0.05}})
+    with pytest.raises(surgery.CutRefused, match="does not close"):
+        surgery.liquid_cut(pb, tight, recon, tmp_path / "cut2",
+                           dict(request, pinch={"fired": True}), k=1, dt_prev=1e-6,
+                           elements_per_scale=8.0, h_floor=1e-7, log=lambda *_: None)
+    drv.close()

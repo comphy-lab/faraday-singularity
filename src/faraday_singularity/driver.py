@@ -316,6 +316,11 @@ Courant number; ``jetcore.txt`` holds a row per step (``jetcore.COLUMNS``: what
 set the step, the split limit, the core, the far regions) and every leg the resolved keys
 (``limits.jetcore``).
 
+With the block's ``pinch.enabled`` a tracked neck with a head lands only when it closes
+(``events.closing_neck``): the driver keeps the history of each tracked neck, matched across the
+accepted steps by its chain and height (``neck_history``, in every dump; restored with it,
+:meth:`CollapseDriver._commit_neck_history`), from which the stops read the trigger.
+
 After a cut the stops of a state are evaluated once (:meth:`CollapseDriver._post_cut_stop`, keyed
 by the state, :meth:`CollapseDriver._stop_key`): the check at the loop's top of the state the step
 has just checked gives the same answer without evaluating it again. With ``step_timing`` (the
@@ -713,6 +718,10 @@ class _State:
     legs: list = field(default_factory=list)
     # with jetcore: the yields of far kinks below the far floor made so far (jetcore.far_kink_regions)
     far_yields: int = 0
+    # with pinch.enabled: the history of each tracked neck, matched across steps by its chain and
+    # height (events.match_neck): {"next": the next key's number, "necks": {key: {chain, z_n, r_n,
+    # samples [[t, r_n], ...]}}}, from which events.closing_neck reads whether it closes
+    neck_history: dict = field(default_factory=dict)
 
 
 def _in_ulps(dt: float, t: float) -> float | None:
@@ -1118,7 +1127,8 @@ class CollapseDriver:
                                      fold_search=FOLD_SEARCH, apexes=apexes,
                                      guard={"fresh": fresh, "h_floor": self._h_floor(),
                                             "refine_ratio": s.refine_ratio},
-                                     invalid=self._jacobian_stop if fresh else None)
+                                     invalid=self._jacobian_stop if fresh else None,
+                                     pinch=self._pinch_context())
             if stop is not None:
                 stop.update(self._taus(self._t()))
             return stop
@@ -1132,7 +1142,8 @@ class CollapseDriver:
                                   apexes=apexes, guard={"fresh": fresh, "h_floor": self._h_floor(),
                                                         "refine_ratio": s.refine_ratio},
                                   events=self.events,
-                                  invalid=self._jacobian_stop if fresh else None)
+                                  invalid=self._jacobian_stop if fresh else None,
+                                  pinch=self._pinch_context())
             if stop is not None:
                 stop.update(self._taus(self._t()))
             return stop
@@ -1147,6 +1158,39 @@ class CollapseDriver:
         if stop is not None:
             stop.update(self._taus(self._t()))
         return stop
+
+    def _pinch_context(self) -> dict | None:
+        """With the block's ``pinch.enabled``: what the stops read the trigger of the tracked necks
+        from (``events.closing_readings``): the state's time and the history of the necks; None
+        otherwise."""
+        if self.events is None or not self.events.pinch.enabled:
+            return None
+        return {"t": self._t(), "history": self.state.neck_history}
+
+    def _commit_neck_history(self, t: float):
+        """With ``pinch.enabled``, at the end of an accepted step: the state's tracked necks
+        (``events.liquid_necks``) added to their histories (``neck_history``, each matched by its
+        chain and height, ``events.match_neck``; a neck without one starts its own, a history whose
+        neck is gone is dropped), the latest ``events.NECK_HISTORY_SAMPLES`` samples kept."""
+        from .events import NECK_HISTORY_SAMPLES, match_neck
+
+        st = self.state
+        named = self._named_post_cut_chains()
+        old = (st.neck_history or {}).get("necks") or {}
+        nxt = int((st.neck_history or {}).get("next", 1))
+        new, used = {}, set()
+        for x in (liquid_necks(named, self.events.liquid) if named else []):
+            key = match_neck(old, x["chain"], x["z_n"], x["r_n"], used)
+            if key is None:
+                key, nxt, samples = f"{x['chain']}-{nxt}", nxt + 1, []
+            else:
+                used.add(key)
+                samples = [list(v) for v in old[key]["samples"]]
+            if not samples or t > samples[-1][0]:
+                samples.append([float(t), float(x["r_n"])])
+            new[key] = {"chain": x["chain"], "z_n": float(x["z_n"]), "r_n": float(x["r_n"]),
+                        "samples": samples[-NECK_HISTORY_SAMPLES:]}
+        st.neck_history = {"next": nxt, "necks": new}
 
     def _event_stop(self, reason: str, request: dict, **extra) -> dict:
         """The stop of the run at an event (``events.post_cut_events``' request; ``reason`` one of
@@ -1586,6 +1630,8 @@ class CollapseDriver:
                 self._event("far-yield", m, name=g["name"], chain=g["chain"], turn=g["turn"],
                             target=g["target"], yields=g["yields"], r=g["r"], z=g["z"])
         st.kinks = kinks
+        if self.events is not None and self.events.pinch.enabled:
+            self._commit_neck_history(t)
 
     def _regions_focus(self, regions: list[dict], *, keep: bool) -> Focus:
         """The focus of a rebuild after a cut: one region per feature (``mesh.FocusRegion``) at its
@@ -2503,6 +2549,8 @@ class CollapseDriver:
                     meta["ring"] = self._ring()
                 if self._jetcore() is not None:  # with jetcore only: other dumps keep their keys
                     meta["far_yields"] = st.far_yields
+                if self.events.pinch.enabled:  # with pinch only
+                    meta["neck_history"] = json.loads(json.dumps(st.neck_history))
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -2665,6 +2713,7 @@ class CollapseDriver:
                                for k, v in (meta.get("apex_history") or {}).items()}
             st.kinks = {str(k): dict(v) for k, v in (meta.get("kinks") or {}).items()}
             st.far_yields = int(meta.get("far_yields", 0))
+            st.neck_history = json.loads(json.dumps(meta.get("neck_history") or {}))
             if self.events is not None:
                 self.pb.events = [dict(x) for x in meta.get("events") or []]
                 st.legs = [dict(x) for x in meta.get("legs") or []]

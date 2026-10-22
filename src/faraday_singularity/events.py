@@ -119,7 +119,9 @@ JETCORE_SNAPSHOTS = ("any", "core")
 # the keys of the parts jetcore and pinch whose behaviour the driver does not make yet: refused away
 # from their defaults, so that no case sets a key that does nothing
 PENDING_KEYS = {"jetcore": ("profile_dt", "box_gate", "box_gate_sigmas"),
-                "pinch": ("enabled", "r_c", "window", "min_samples", "kappa", "far_head")}
+                "pinch": ("far_head",)}
+# the samples (t, r_n) of each tracked neck the driver keeps, the latest (closing_neck)
+NECK_HISTORY_SAMPLES = 512
 
 
 def _number(value) -> bool:
@@ -735,6 +737,93 @@ def split_events_block(collapse: dict) -> tuple[dict, dict | None]:
     return rest, block
 
 
+# --- the closing neck of pinch: the history of a tracked neck and its trigger --------------------
+
+
+def match_neck(necks: dict, chain: str, z_n: float, r_n: float, used=()) -> str | None:
+    """The entry of a per-neck history (``necks``: by key, each with its ``chain``, height ``z_n``
+    and ``samples``, the driver's ``neck_history``) of the tracked neck at height ``z_n`` of radius
+    ``r_n`` on ``chain``: of the same chain, within ``2 r_n`` in height, not among ``used``, the
+    nearest; None without one."""
+    best = None
+    for key, h in (necks or {}).items():
+        if key in used or h.get("chain") != chain:
+            continue
+        dz = abs(float(h["z_n"]) - float(z_n))
+        if dz < 2.0 * float(r_n) and (best is None or dz < best[0]):
+            best = (dz, key)
+    return None if best is None else best[1]
+
+
+def closing_neck(samples, t: float, r_n: float, *, delta: float, pinch: PinchSettings) -> dict:
+    """The trigger of ``pinch`` on a tracked neck of radius ``r_n`` at time ``t``, from its earlier
+    samples ``(t_i, r_i)`` (those before ``t``; the current one is added): ``small``, ``r_n <= r_c
+    delta``; ``closing``, a quadratic fit of ``r(t)`` over the trailing ``window r_n^(3/2)``
+    (``tau_c = r_n^(3/2)``, the capillary time of the neck), with at least ``min_samples`` samples,
+    has a negative slope at ``t`` and a curvature not positive (a closure at a constant or growing
+    rate, as an inertio-capillary pinch; stretching and stalling decelerate); ``pinching``, the time
+    to the pinch at that rate, ``T_p = (2/3) r_n / |dr/dt|`` (exact for ``r ~ (t_p - t)^(2/3)``),
+    at most ``kappa tau_c``. ``fired`` when all three hold. Returns the readings."""
+    tau_c = float(r_n) ** 1.5
+    W = pinch.window * tau_c
+    out = {"fired": False, "small": bool(r_n <= pinch.r_c * delta), "limit": pinch.r_c * delta,
+           "tau_c": tau_c, "window": W, "samples": 0, "slope": math.nan, "curvature": math.nan,
+           "T_p": math.nan, "T_p_over_tau_c": math.nan, "closing": False, "pinching": False}
+    pts = [(float(a), float(b)) for a, b in (samples or ()) if t - W <= float(a) < t]
+    pts.append((float(t), float(r_n)))
+    out["samples"] = len(pts)
+    if len(pts) < max(3, pinch.min_samples) or not W > 0.0:
+        return out
+    T, R = np.asarray(pts, dtype=float).T
+    x = (T - t) / W  # in [-1, 0]
+    if np.ptp(x) <= 0.0:
+        return out
+    a, b, _ = np.polyfit(x, R, 2)
+    slope, curvature = float(b) / W, 2.0 * float(a) / W**2
+    T_p = (2.0 / 3.0) * r_n / abs(slope) if slope != 0.0 else math.inf
+    out.update(slope=slope, curvature=curvature, T_p=T_p, T_p_over_tau_c=T_p / tau_c,
+               closing=bool(slope < 0.0 and curvature <= 0.0),
+               pinching=bool(T_p <= pinch.kappa * tau_c))
+    out["fired"] = bool(out["small"] and out["closing"] and out["pinching"])
+    return out
+
+
+def closing_readings(necks: list[dict], events: EventSettings, delta: float,
+                     pinch: dict | None) -> None:
+    """With ``pinch.enabled``: the trigger of each tracked neck (:func:`closing_neck`, ``pinch``
+    in each), from the driver's history (``pinch``: ``t`` the state's time, ``history`` its
+    ``neck_history``, :func:`match_neck`); no history is no sample but the current one."""
+    if not events.pinch.enabled:
+        return
+    t = float((pinch or {}).get("t", math.nan))
+    history = ((pinch or {}).get("history") or {}).get("necks") or {}
+    for x in necks:
+        key = match_neck(history, x["chain"], x["z_n"], x["r_n"]) if math.isfinite(t) else None
+        samples = history[key]["samples"] if key is not None else ()
+        x["pinch"] = {**closing_neck(samples, t, x["r_n"], delta=delta, pinch=events.pinch),
+                      "history": key}
+
+
+def lands(x: dict, events: EventSettings) -> bool:
+    """Whether a tracked neck lands: with ``pinch.enabled`` when it closes (its trigger fired),
+    without it at ``r_n <= liquid.eps_d s`` (``landed``)."""
+    if events.pinch.enabled:
+        return bool((x.get("pinch") or {}).get("fired"))
+    return bool(x["landed"])
+
+
+def head_lands(head: dict, events: EventSettings) -> bool:
+    """Whether a fold that reaches the head of a tracked neck lands that neck: with
+    ``pinch.enabled`` when the neck closes, without it at ``r_n <= liquid.eps_max s``."""
+    if events.pinch.enabled:
+        return bool((head.get("pinch") or {}).get("fired"))
+    return bool(head["r_n"] <= events.liquid.eps_max * head["s"])
+
+
+def _pinch_field(x: dict) -> dict:
+    return {"pinch": x["pinch"]} if "pinch" in x else {}
+
+
 # --- the events after the cut, as the stops find them ---------------------------------------------
 
 # what reconnect.post_cut_stops returns, with the block, for an event: the driver meets it with its
@@ -942,7 +1031,7 @@ def _request(kind: str, cls: str, **fields) -> dict:
 def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, *,
                     neck_elements: float, fold_ratio: float, fold_stop: float,
                     fold_stop_elements: float, fold_search: float, apexes: dict | None,
-                    guard: dict | None, invalid=None) -> dict | None:
+                    guard: dict | None, invalid=None, pinch: dict | None = None) -> dict | None:
     """The stops and events of a state after the cut with the events block, in their order
     (``reconnect.post_cut_stops`` with ``events``; its arguments).
 
@@ -977,7 +1066,11 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
        secondary-pinch test, deep also against its adjacent shoulders
        (``reconnect.adjacent_shoulders``: a stationary pair on a nearly vertical wall is none), its
        request with both shoulders and depths (``gas-neck``, class ``G``); the bridge closing
-       (``bridge-closing``, ``B``) and the chains approaching (``chain-contact``, ``X``)."""
+       (``bridge-closing``, ``B``) and the chains approaching (``chain-contact``, ``X``).
+
+    With ``pinch.enabled`` a tracked neck lands, and a fold that reaches its head lands it, only
+    when it closes (:func:`closing_readings` from the driver's history ``pinch``, :func:`lands`,
+    :func:`head_lands`), the trigger's readings in the request (``pinch``)."""
     from .reconnect import (Chain, adjacent_shoulders, chains_disjoint, chain_necks, edge_reading,
                             fold_contact, interface_guard, revolved_volume, spline_contact_stop)
     from .selfcontact import InterfaceSelfIntersection, fold_gap
@@ -1007,6 +1100,7 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
     if stop is not None:
         return stop
     necks = liquid_necks(named, ls) if ls.enabled else []
+    closing_readings(necks, events, settings.delta, pinch)
     fresh = bool(guard["fresh"]) if guard is not None else False
     if fresh:
         unresolved = [x for x in necks if x["r_n"] < ls.resolution * x["h_loc"]]
@@ -1070,11 +1164,11 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
         return None
 
     if ls.enabled:
-        landed = sorted((x for x in necks if x["landed"]), key=lambda x: x["ratio"])
+        landed = sorted((x for x in necks if lands(x, events)), key=lambda x: x["ratio"])
         if landed:
             x = landed[0]
             return _request("liquid-neck", "L" if x["status"] == "head" else "L-unhandled",
-                            eps_d=ls.eps_d, **_neck_fields(x))
+                            eps_d=ls.eps_d, **_neck_fields(x), **_pinch_field(x))
     else:
         found = secondary("liquid")
         if found is not None:  # no head classified: none to cut
@@ -1098,7 +1192,7 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
                                         ratio=fold_ratio, stop=stop_abs,
                                         stop_elements=fold_stop_elements,
                                         search_factor=fold_search))
-    lands, kinks, grooves = [], [], []
+    landing, kinks, grooves = [], [], []
     for score, name, fold, fold_limit in closing.values():
         rec = {"chain": name, "contact": fold_contact(fold.arc, fold.h_elem),
                "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
@@ -1120,13 +1214,13 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
         head = head_of_fold(fold.pair, [x for x in necks if x["chain"] == name])
         if head is not None:
             rec["a_head"] = {**_neck_fields(head), "r_n_over_s": head["r_n"] / head["s"],
-                             "eps_max": ls.eps_max}
-            if head["r_n"] <= ls.eps_max * head["s"]:  # the head's neck lands
-                lands.append(((head["r_n"] / head["s"], score), head, rec))
+                             "eps_max": ls.eps_max, **_pinch_field(head)}
+            if head_lands(head, events):  # the head's neck lands
+                landing.append(((head["r_n"] / head["s"], score), head, rec))
                 continue
         grooves.append((score, rec))
-    if lands:  # a fold that lands a head's neck before any groove, the narrowest r_n/s first
-        _, head, rec = min(lands, key=lambda x: x[0])
+    if landing:  # a fold that lands a head's neck before any groove, the narrowest r_n/s first
+        _, head, rec = min(landing, key=lambda x: x[0])
         return _request("a-head", "A-head" if head["status"] == "head" else "L-unhandled", **rec)
     if kinks:
         return min(kinks, key=lambda x: x[0])[1]

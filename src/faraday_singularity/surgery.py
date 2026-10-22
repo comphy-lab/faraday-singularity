@@ -1401,11 +1401,20 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
         "Re_n": neck["r_n"] * abs(u_r) / Oh if Oh > 0.0 else math.nan,
         "We_n": neck["r_n"] * u_r**2})
     # the class of the request holds of the neck under these settings, not only under those it was
-    # made with (a restart from the state before an event may change the keys of the class)
-    if cls == "L" and not neck["landed"]:
+    # made with (a restart from the state before an event may change the keys of the class); with
+    # pinch.enabled a neck lands when it closes, which the request's trigger read from the history
+    # of the neck (events.closing_neck), its radius against r_c delta read again here
+    pinch = getattr(events, "pinch", None)
+    if pinch is not None and pinch.enabled and cls in ("L", "A-head"):
+        reading = ((request.get("a_head") or {}) if cls == "A-head" else request).get("pinch")
+        if not (isinstance(reading, dict) and reading.get("fired")) or \
+                not neck["r_n"] <= pinch.r_c * delta:
+            raise CutRefused(f"the neck does not close under pinch (r_c {pinch.r_c:g}): r_n/delta "
+                             f"{neck['r_n'] / delta:.6g}, trigger {reading!r}")
+    elif cls == "L" and not neck["landed"]:
         raise CutRefused(f"the neck has not landed at liquid.eps_d {ls.eps_d:g}: r_n/s "
                          f"{neck['r_n'] / neck['s']:.6g}")
-    if cls == "A-head" and not neck["r_n"] <= ls.eps_max * neck["s"]:
+    elif cls == "A-head" and not neck["r_n"] <= ls.eps_max * neck["s"]:
         raise CutRefused(f"the neck of the head the fold reaches lies above liquid.eps_max "
                          f"{ls.eps_max:g}: r_n/s {neck['r_n'] / neck['s']:.6g}")
     record["dumps"] = {}
