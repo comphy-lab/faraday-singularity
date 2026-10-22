@@ -16,6 +16,8 @@
   split by the core (``jetcore.split_refine``), the far kinks recentred, floored and yielding
   below the floor only past the turn (``jetcore.far_kink_regions``), the far targets floored with
   the core's unchanged, the edge-turn profiles of the core.
+* The refinement before the piercing (``jetcore.prep_regions``, ``prep_mask``): its regions once
+  the bubble is shorter than ``prep_gap delta``, their size and their nodes stepped as the core's.
 """
 
 from __future__ import annotations
@@ -575,3 +577,69 @@ def test_a_far_region_at_the_floor_asks_for_no_rebuild_and_one_above_it_at_the_f
     assert rule(3.5e-4, cls="core") is not False  # the core's ratio, 1.5
     assert rule(4.5e-4) is not False and asked == [3.5e-4, 4.5e-4]
     drv.close()
+
+
+# --- C5: the refinement before the piercing -------------------------------------------------------
+
+
+def test_the_pre_pierce_regions_come_once_the_bubble_is_short_and_are_stepped_as_the_core():
+    """``jetcore.prep_regions``: none while the bubble is at least ``prep_gap delta`` long; below
+    it, ``pierce_tip`` and ``pierce_bottom`` at the bubble's two ends on the axis, of the radius of
+    the downward jet's shoulder ``s_t``, at ``prep_rho s_t / 2.25``, floored at ``h_floor``; their
+    nodes are those of ``jetcore.prep_mask``."""
+    from test_events_stops import bubble_with_head
+
+    from faraday_singularity.jetcore import prep_mask, prep_regions
+    from faraday_singularity.ring import jet_shoulder
+
+    P = bubble_with_head(1e-3, r_n=0.3)[0].points
+    seg = {"r": P[:, 0], "z": P[:, 1]}
+    length = float(P[-1, 1] - P[0, 1])
+    kw = dict(delta=1e-3, prep_rho=0.125, h_floor=1e-7)
+    assert prep_regions(seg, prep_gap=0.99 * length / 1e-3, **kw) == []
+    assert prep_regions(seg, prep_gap=None, **kw) == [] and prep_mask(seg, []) is None
+    got = prep_regions(seg, prep_gap=1.01 * length / 1e-3, **kw)
+    s_t = float(P[jet_shoulder(P), 0])
+    assert [g["name"] for g in got] == ["pierce_tip", "pierce_bottom"]
+    assert [g["z"] for g in got] == [float(P[-1, 1]), float(P[0, 1])]
+    for g in got:
+        assert g["radius"] == s_t and g["target"] == pytest.approx(0.125 * s_t / 2.25)
+    floored = prep_regions(seg, prep_gap=1.01 * length / 1e-3, delta=1e-3, prep_rho=0.125,
+                           h_floor=1.0)
+    assert all(g["target"] == 1.0 for g in floored)
+    m = prep_mask(seg, got)
+    d = np.minimum(np.hypot(P[:, 0], P[:, 1] - P[-1, 1]), np.hypot(P[:, 0], P[:, 1] - P[0, 1]))
+    assert (m == (d <= s_t)).all() and m[0] and m[-1]
+
+
+def test_before_the_piercing_the_driver_adds_the_regions_and_steps_their_nodes_at_the_cores_number(
+        tmp_path):
+    """A stand-in run after the cut whose bubble (an ellipse 2b long) is shorter than ``prep_gap
+    delta``: the measured regions hold ``pierce_tip`` and ``pierce_bottom`` (class ``prep``, no far
+    floor on them), the split Courant limit counts their nodes as core, and ``jetcore.txt`` the
+    regions and ``s_t``; with the bubble longer, none."""
+    from test_bookkeeping import CutProblem
+
+    from faraday_singularity.jetcore import COLUMNS
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-9, courant=0.4, focus_courant=False)
+    block = _block(prep_gap=4.0, far_floor=1.0, far_courant=0.8)
+    short = _events_driver(tmp_path / "short", CutProblem(a=0.01, b=1.5e-3), recon, block,
+                           max_steps=1)
+    m = short.measure()
+    prep = {g["name"]: g for g in m["regions"] if g["name"].startswith("pierce_")}
+    assert set(prep) == {"pierce_tip", "pierce_bottom"}
+    assert all(g["class"] == "prep" and not g.get("floored") and g["target"] < 1.0
+               for g in prep.values())
+    core = short._post_cut_state()["core"]
+    n_open = len(short._post_cut_state()["segs"][1]["r"])
+    assert core["split"]["core"]["nodes"] > n_open  # the open chain and the bubble's ends
+    short.run(1e-9)
+    short.close()
+    row = dict(zip(COLUMNS, (tmp_path / "short" / "jetcore.txt").read_text().splitlines()[-1]
+                   .split("\t")))
+    assert row["prep"] == "2" and float(row["s_t"]) > 0.0
+    long = _events_driver(tmp_path / "long", CutProblem(), recon, block, max_steps=1)
+    assert not any(g["name"].startswith("pierce_") for g in long.measure()["regions"])
+    assert long._post_cut_state()["core"]["split"]["core"]["nodes"] == n_open
+    long.close()

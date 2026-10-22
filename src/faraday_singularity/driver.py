@@ -309,7 +309,10 @@ follows the part's keys (:meth:`CollapseDriver._feature_regions`: each region's 
 ``recentre`` the guard's far kinks in regions of their own, ``jetcore.far_kink_regions``, each
 yield below the floor an event ``far-yield``; the far refine ratio; the ring's kinks at the
 column's size; the profiles of an element that bends from the core's elements only, with
-``edge_turn_snapshots`` ``core``); ``jetcore.txt`` holds a row per step (``jetcore.COLUMNS``: what
+``edge_turn_snapshots`` ``core``); before the piercing, with ``prep_gap``, the bubble's bottom and
+the downward jet's tip are refined (``jetcore.prep_regions``, ``pierce_bottom``, ``pierce_tip``)
+so that the ring cut admits the splice radius ``prep_rho s_t``, their nodes stepped at the core's
+Courant number; ``jetcore.txt`` holds a row per step (``jetcore.COLUMNS``: what
 set the step, the split limit, the core, the far regions) and every leg the resolved keys
 (``limits.jetcore``).
 
@@ -940,7 +943,7 @@ class CollapseDriver:
         opens = [c for c in segs if c["open"]]
         if jet is None or not opens:
             return None
-        from .jetcore import core_mask, courant_split
+        from .jetcore import core_mask, courant_split, prep_mask, prep_regions
         from .ring import loop_segment
 
         o = opens[0]
@@ -949,8 +952,13 @@ class CollapseDriver:
                          core_radius=jet.core_radius, wall_radius=jet.wall_radius,
                          apex_extent=self.reconnect.apex_extent,
                          track_depth=self.events.liquid.track_depth)
+        bubble = next((c for c in segs if not c["open"]), None)
+        core["prep"] = prep_regions(bubble if self._ring() is None else None,
+                                    delta=self.reconnect.delta, prep_gap=jet.prep_gap,
+                                    prep_rho=jet.prep_rho, h_floor=self._h_floor())
         chains = list(segs) + [loop_segment(x) for x in loops]
-        masks = [core["mask"] if c is o else None for c in chains]
+        masks = [core["mask"] if c is o else prep_mask(c, core["prep"]) if c is bubble else None
+                 for c in chains]
         core["split"] = courant_split(chains, masks, core=self.reconnect.courant,
                                       far=self._far_courant())
         return core
@@ -1442,6 +1450,7 @@ class CollapseDriver:
         frozen = self._frozen_ring_regions()
         regions += frozen
         if jet is not None and core is not None:
+            regions += [dict(g) for g in core.get("prep") or ()]  # before the piercing
             self._far_sizing(regions, segs, core)
         for g in regions:
             current = focus.region(g["name"]) if focus is not None else None
@@ -1679,7 +1688,8 @@ class CollapseDriver:
                   "far_nodes": (split.get("far") or {}).get("nodes"),
                   "far_regions": sum(1 for g in m.get("regions") or () if g.get("class") == "far"),
                   "far_floored": sum(1 for g in m.get("regions") or () if g.get("floored")),
-                  "far_yields": self.state.far_yields}
+                  "far_yields": self.state.far_yields, "prep": len(core.get("prep") or ()),
+                  "s_t": (core.get("prep") or [{}])[0].get("s_t")}
         for cls in ("core", "far"):
             b = split.get(cls) or {}
             values.update({f"h_{cls}": b.get("h"), f"U_{cls}": b.get("U"), f"r_{cls}": b.get("r"),

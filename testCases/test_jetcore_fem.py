@@ -7,6 +7,9 @@ and ``pinch`` parts) on the synthetic states of the liquid cut and of the ring.
   at the floor, four chords wide, that ask for a rebuild only where their elements are coarser than
   the refine ratio times the floor and never mesh below it, the run steps to its limit without a
   stop, and the core's regions are sized as without the part.
+* The refinement before the piercing on the synthetic pierced state of ``ring_fem_state.py``: the
+  ring cut's geometry refuses the splice radius ``0.125 s_t`` on the state's mesh and admits it
+  after the rule's rebuild of ``pierce_tip`` and ``pierce_bottom``.
 
 Each problem compiles in seconds; the module takes a few minutes.
 """
@@ -169,3 +172,59 @@ def test_the_core_is_sized_as_without_the_part_and_the_far_region_at_the_floor(h
     assert heads["plain"]["result"]["stop"]["reason"] == heads["far"]["result"]["stop"]["reason"]
     assert math.isfinite(heads["far"]["result"]["remesh_count"])
     assert np.isfinite(H_HEAD)
+
+
+# --- C5: the refinement before the piercing -------------------------------------------------------
+
+
+def test_the_refinement_before_the_piercing_admits_the_smallest_splice_radius(tmp_path):
+    """On the synthetic pierced state of ``ring_fem_state.py`` (the jet's head ``DELTA/6`` above
+    the plug at ``0.8 DELTA``): the ring cut's geometry refuses the splice radius ``0.125 s_t`` on
+    the state's mesh (the splices hold fewer than 1.5 elements of it) and admits it after the rule's
+    rebuild of the regions ``pierce_tip`` and ``pierce_bottom`` (``jetcore.prep_gap``), at
+    ``0.125 s_t / 2.25``, with the margin of 1.5 on the check; the regions' nodes are stepped at the
+    core's Courant number."""
+    import ring_fem_state as S
+
+    from faraday_singularity import ring
+
+    rho = 0.125
+    block = ev.EventSettings.from_dict({
+        "ring": {"enabled": True, "rho": rho, "sigma_V": 1e-6, "sigma_Pz": 1e-6,
+                 "sigma_KE": 1e-6},
+        "jetcore": {"enabled": True, "prep_gap": 4.0, "prep_rho": rho, "far_courant": 0.8}})
+
+    def geometry(pb):
+        chains = dict(surgery._named_chains(pb)[0])
+        return ring.ring_cut_geometry(chains["bubble"], chains["open"], block.ring,
+                                      elements_per_scale=8.0, min_angle=30.0,
+                                      reservoir_depth=3.0,
+                                      V_b=pb.cut["geometry"]["bubble_volume"], bubble_stop=0.01)
+
+    with S.pierce_problem(tmp_path / "pb") as pb:
+        pb.initialise()
+        S.gas_cut_record(pb)
+        S.impose(pb)
+        with pytest.raises(ring.RingCutRefused) as err:
+            geometry(pb)
+        before = err.value.checks
+        assert "splice" in before["failed"] and before["rho"] < before["rho_min"]
+        drv = CollapseDriver(pb, CollapseSettings(t_end=10.0, dt_max=0.01, max_steps=1),
+                             tmp_path / "run", reconnect=S.RECON, events=block)
+        m = drv.reset_after_cut(pb.cut)
+        prep = {g["name"]: g for g in m["regions"] if g["name"].startswith("pierce_")}
+        assert set(prep) == {"pierce_tip", "pierce_bottom"}
+        s_t = prep["pierce_tip"]["s_t"]
+        assert prep["pierce_tip"]["target"] == pytest.approx(rho * s_t / 2.25, rel=1e-12)
+        assert prep["pierce_tip"]["radius"] == s_t and prep["pierce_tip"]["class"] == "prep"
+        core = drv._post_cut_state()["core"]
+        split = core["split"]
+        assert split["far_courant"] == 0.8
+        for _ in range(3):  # the rule's rebuilds, by at most max_refine_factor each
+            m = drv.measure()
+            drv.state.last_remesh_step = drv.state.refine_blocked_until = -10
+            if not drv._maybe_remesh_features(m):
+                break
+        g = geometry(pb)
+        assert g.rho == pytest.approx(rho * g.s_t) and g.rho >= g.checks["rho_min"]
+        drv.close()

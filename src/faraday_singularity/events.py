@@ -118,8 +118,7 @@ JETCORE_KINKS = ("grow", "recentre")
 JETCORE_SNAPSHOTS = ("any", "core")
 # the keys of the parts jetcore and pinch whose behaviour the driver does not make yet: refused away
 # from their defaults, so that no case sets a key that does nothing
-PENDING_KEYS = {"jetcore": ("prep_gap", "prep_rho", "profile_dt", "box_gate",
-                            "box_gate_sigmas"),
+PENDING_KEYS = {"jetcore": ("profile_dt", "box_gate", "box_gate_sigmas"),
                 "pinch": ("enabled", "r_c", "window", "min_samples", "kappa", "far_head")}
 
 

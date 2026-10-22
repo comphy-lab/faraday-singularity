@@ -25,6 +25,13 @@ at the floor, below it only while the turn exceeds ``far_yield_turn`` (a yield, 
 rebuild); the far regions refined beyond ``far_refine_ratio`` of their targets; the ring's kinks no
 finer than the column. The tracked necks' regions are exempt, so that a neck is followed to its
 landing.
+
+Before the piercing (:func:`prep_regions`), once the bubble is shorter than ``prep_gap delta``, its
+bottom and the downward jet's tip are refined so that the ring cut (``ring.ring_cut_geometry``,
+which needs the splice radius ``rho`` at least ``ring.RHO_MIN_NODES`` element lengths at both
+splices) admits ``rho = prep_rho s_t``, ``s_t`` the radius of the jet's shoulder, with a margin of
+``PREP_MARGIN``; these regions are exempt from the far floor and their nodes are stepped at the
+core's Courant number (:func:`prep_mask`).
 """
 
 from __future__ import annotations
@@ -42,7 +49,8 @@ import numpy as np
 COLUMNS = ("step", "time", "tau", "tau_p", "dt", "limiter", "dt_courant", "dt_core", "dt_far",
            "binds", "far_courant", "h_core", "U_core", "r_core", "z_core", "chain_core", "h_far",
            "U_far", "r_far", "z_far", "chain_far", "L", "R_K", "A_r", "A_z", "z_cap",
-           "core_nodes", "far_nodes", "far_regions", "far_floored", "far_yields")
+           "core_nodes", "far_nodes", "far_regions", "far_floored", "far_yields", "prep",
+           "s_t")
 
 
 def upward_neck(points, end_types, apex_index: int, track_depth: float) -> dict | None:
@@ -141,6 +149,8 @@ def courant_split(segs, masks, *, core: float, far: float) -> dict:
 
 
 # --- the far region's sizing ----------------------------------------------------------------------
+
+PREP_MARGIN = 1.5  # the margin of the refinement before the piercing on the ring cut's check
 
 # the classes of the regions of a rebuild after the cut with jetcore (region_class): the core's,
 # resolved as without the part; the far region's, floored and refined at the far ratio; a tracked
@@ -246,4 +256,43 @@ def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, 
             continue
         if t >= g["t_set"] + hold(g["h_before"]):
             g.update(released=True, target=g["h_before"])
+    return out
+
+
+def prep_regions(bubble_seg, *, delta: float, prep_gap: float | None, prep_rho: float,
+                 h_floor: float) -> list[dict]:
+    """The regions of the refinement before the piercing (module docstring): none unless the
+    bubble (``bubble_seg``, its nodes upwards from its bottom on the axis to the downward jet's tip
+    on the axis) is shorter than ``prep_gap delta``; else ``pierce_tip`` about the jet's tip and
+    ``pierce_bottom`` about the bubble's bottom, each of radius ``s_t`` (the jet's shoulder,
+    ``ring.jet_shoulder``) at ``max(prep_rho s_t / (RHO_MIN_NODES PREP_MARGIN), h_floor)``."""
+    from .ring import RHO_MIN_NODES, jet_shoulder
+
+    if prep_gap is None or bubble_seg is None:
+        return []
+    P = np.column_stack([np.asarray(bubble_seg["r"], dtype=float),
+                         np.asarray(bubble_seg["z"], dtype=float)])
+    if len(P) < 8:
+        return []
+    length = float(P[-1, 1] - P[0, 1])
+    if not length < prep_gap * delta:
+        return []
+    s_t = float(P[jet_shoulder(P), 0])
+    if not s_t > 0.0:
+        return []
+    size = max(prep_rho * s_t / (RHO_MIN_NODES * PREP_MARGIN), h_floor)
+    return [{"name": name, "target": size, "r": 0.0, "z": float(P[k, 1]), "radius": s_t,
+             "ell": s_t, "floor": h_floor, "s_t": s_t, "bubble_length": length}
+            for name, k in (("pierce_tip", -1), ("pierce_bottom", 0))]
+
+
+def prep_mask(seg, regions: list[dict]) -> np.ndarray | None:
+    """The nodes of a chain within any of the regions of :func:`prep_regions` (stepped at the
+    core's Courant number); None without a region."""
+    if not regions:
+        return None
+    r, z = np.asarray(seg["r"], dtype=float), np.asarray(seg["z"], dtype=float)
+    out = np.zeros(len(r), dtype=bool)
+    for g in regions:
+        out |= np.hypot(r - g["r"], z - g["z"]) <= g["radius"]
     return out
