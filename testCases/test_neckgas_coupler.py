@@ -320,3 +320,22 @@ def test_retire_stops_the_gas():
     assert gas.status == "retired" and np.all(gas.traction(np.array([0.5])) == 0)
     assert gas.after_step(1.0, neck_chain(8e-3), step=99) == []
     assert copy.copy(gas.handover()) == {}
+
+
+def test_the_closing_speed_is_undefined_where_the_neck_changes_kind():
+    """Before a neck forms the gas follows the window's smallest radius; the first neck can be
+    wider than the window's foot, which is no reopening."""
+    gas = _gas(r_on=0.2, z_lo=0.32)
+    t = np.linspace(0.0, 2e-3, 6)
+    cone = lambda tt: (lambda r, z: (r, z, 0 * r - 1.0, 0 * r))(  # noqa: E731
+        *(lambda z: (np.r_[0.0, 0.05 + 0.3 * (z[1:] - 0.3) - 5.0 * tt], z))(
+            np.r_[0.3, np.linspace(0.3 + 1e-3, 1.2, 600)]))
+    rows = []
+    for k in range(3):  # no interior minimum: the window's foot
+        gas.before_step(t[k], cone(t[k]), step=k)
+        rows += gas.after_step(t[k + 1], cone(t[k + 1]), step=k + 1)
+    assert {r["neck_source"] for r in rows} == {"window"}
+    gas.before_step(t[3], cone(t[3]), step=3)
+    rows += gas.after_step(t[4], neck_chain(0.0, r0=0.2), step=4)  # a neck, wider than the foot
+    assert rows[-1]["neck_source"] == "neck" and math.isnan(rows[-1]["s"])
+    assert not math.isfinite(gas.markers["r_reopen"]) and gas.reopen == 0

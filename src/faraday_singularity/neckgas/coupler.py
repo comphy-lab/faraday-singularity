@@ -628,10 +628,13 @@ class NeckGas:
         s = self.s
         r_n, z_n, j, source = neck
         prev = self.prev
-        speed = -(r_n - prev[1]) / (t - prev[0]) if (prev is not None and t > prev[0]) else \
-            math.nan
+        # the closing speed between rows of the same neck: undefined where the neck the gas follows
+        # changes kind (the window's smallest radius before a neck forms, then the neck itself,
+        # which can be wider than the window's foot)
+        same = prev is not None and (len(prev) < 3 or prev[2] == source)
+        speed = -(r_n - prev[1]) / (t - prev[0]) if (same and t > prev[0]) else math.nan
         if before is not None or prev is None:
-            self.prev = (t, r_n)
+            self.prev = (t, r_n, source)
         z_ch, ur_ch = self.chain[1], self.chain[2]
         s_u = -float(ur_ch[j]) if 0 <= j < len(ur_ch) else math.nan
         lo, hi = s.angle_window
@@ -880,7 +883,8 @@ class NeckGas:
                                                        float(meta["neck"][1]),
                                                        int(meta["neck"][2]), str(meta["neck"][3]))
         self.prev = None if meta["prev"] is None else (float(meta["prev"][0]),
-                                                       float(meta["prev"][1]))
+                                                       float(meta["prev"][1]),
+                                                       *[str(x) for x in meta["prev"][2:3]])
         self.slow, self.markers = dict(meta["slow"]), dict(meta["markers"])
         self.stop, self.regrids = meta["stop"], list(meta["regrids"])
         self.zf = np.array(arrays["zf"], dtype=float) if "zf" in arrays else None
