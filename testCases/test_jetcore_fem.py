@@ -10,6 +10,10 @@ and ``pinch`` parts) on the synthetic states of the liquid cut and of the ring.
 * The refinement before the piercing on the synthetic pierced state of ``ring_fem_state.py``: the
   ring cut's geometry refuses the splice radius ``0.125 s_t`` on the state's mesh and admits it
   after the rule's rebuild of ``pierce_tip`` and ``pierce_bottom``.
+* The far-head cut on the heads' state: an unhandled gas neck on the bubble's head met by the liquid
+  cut of that head (``far-head``, ``F-head``), its hard closures closed, the run going on; and the
+  box gate on a real rebuild, passing under wide floors and stopping on the state before the
+  rebuild under tight ones.
 
 Each problem compiles in seconds; the module takes a few minutes.
 """
@@ -228,3 +232,91 @@ def test_the_refinement_before_the_piercing_admits_the_smallest_splice_radius(tm
         g = geometry(pb)
         assert g.rho == pytest.approx(rho * g.s_t) and g.rho >= g.checks["rho_min"]
         drv.close()
+
+
+# --- C7: the far-head cut -------------------------------------------------------------------------
+
+FAR_HEAD_BLOCK = {"liquid": {"enabled": True, **{k: lcf.KEYED[k] for k in ("sigma_V", "sigma_Pz",
+                                                                           "sigma_KE")}},
+                  "post": {"open_neck_stop": False, "neck_floor": 1e-5},
+                  "jetcore": {"enabled": True}, "pinch": {"far_head": True}}
+
+
+def test_an_unhandled_gas_neck_on_the_downward_head_is_met_by_the_cut_of_that_head(tmp_path):
+    """On the heads' state with the flow about the necks imposed, a gas neck (class ``G``, no
+    handler) on the head the bubble's top holds: with ``pinch.far_head`` the driver cuts that head
+    by the liquid cut (kind ``far-head``, class ``F-head``), its hard closures closed, the head's
+    volume removed and the run goes on from the fresh mesh; the request of the far event is in the
+    record."""
+    recon = rc.ReconnectSettings(delta=DELTA, dt0=1e-5, tip_size=0.25, bridge_size=0.25,
+                                 focus_size=0.25)
+    block = ev.EventSettings.from_dict(FAR_HEAD_BLOCK)
+    with heads_problem(tmp_path / "pb", recon) as pb:
+        pb.initialise()
+        gas_cut_record(pb, recon)
+        lcf.impose(pb, lcf.stream_velocity, list(_chains()[2]))
+        drv = CollapseDriver(pb, CollapseSettings(t_end=10.0, dt_max=0.01, max_steps=2,
+                                                  state_dt=0.0, state_keep=10),
+                             tmp_path / "run", reconnect=recon, events=block)
+        m = drv.reset_after_cut(pb.cut)
+        named = drv._named_post_cut_chains()
+        neck = next(x for x in ev.liquid_necks(named, block.liquid)
+                    if x["chain"] == "bubble" and x["status"] == "head")
+        site = neck["head"][1] - 6
+        gas = {"reason": ev.EVENT_REQUEST, "kind": "gas-neck", "class": "G",
+               "handler": ev.HANDLERS["G"], "chain": "bubble", "index": site,
+               "r_neck": float(named[0][1].points[site, 0])}
+        V0 = pb.cut_observables()["volume"]
+        m2, stop = drv._meet_event(m, gas)
+        assert stop is None, stop
+        rec = pb.events[-1]
+        assert (rec["kind"], rec["class"], rec["outcome"]) == ("far-head", "F-head", "made")
+        assert rec["request"]["far_event"]["class"] == "G"
+        assert not rec["closures"]["hard"] and rec["removed"]["V"] > 0.0
+        assert pb.cut_observables()["volume"] == pytest.approx(V0 - rec["removed"]["V"],
+                                                               abs=5.0 * lcf.KEYED["sigma_V"])
+        result = drv.run(1e-8)
+        drv.close()
+    assert result["events"]["made"] == 1 and result["events"]["by_kind"] == {"far-head": 1}
+    events = _events(tmp_path / "run" / "events.jsonl")
+    assert any(e["event"] == "far-head" for e in events)
+    assert any(e["event"] == "liquid-cut" and e["kind"] == "far-head" for e in events)
+    assert (tmp_path / "run" / "events" / "event_001.json").is_file()
+    assert np.isfinite(m2["time"])
+
+
+def test_the_box_gate_reads_a_real_rebuild_and_stops_on_the_state_before_it(tmp_path):
+    """On the heads' state, with the rule rebuilding at every step it may (refine ratio 0.5): under
+    floors far above the box's noise every rebuild passes the gate (``box_gate`` in each remesh
+    event, its dump deleted); under floors far below it the first rebuild stops the run
+    (``box-gate``) on the state before it, kept as ``states/gate_<step>.dump`` with its record, the
+    run's end state."""
+    recon = rc.ReconnectSettings(delta=DELTA, dt0=1e-5, tip_size=0.25, bridge_size=0.25,
+                                 focus_size=0.25)
+    out = {}
+    for name, sigma in (("wide", 1.0), ("tight", 1e-30)):
+        block = ev.EventSettings.from_dict({
+            "liquid": {"enabled": True, "sigma_V": sigma, "sigma_Pz": sigma},
+            "post": {"open_neck_stop": False, "neck_floor": 1e-5},
+            "jetcore": {"enabled": True, "box_gate": True}})
+        with heads_problem(tmp_path / f"pb-{name}", recon) as pb:
+            pb.initialise()
+            gas_cut_record(pb, recon)
+            drv = CollapseDriver(pb, CollapseSettings(t_end=10.0, dt_max=0.01, max_steps=2,
+                                                      refine_ratio=0.5, remesh_backoff=2,
+                                                      state_dt=0.0, state_keep=10),
+                                 tmp_path / name, reconnect=recon, events=block)
+            drv.reset_after_cut(pb.cut)
+            out[name] = drv.run(1e-8)
+            drv.close()
+    wide, tight = out["wide"], out["tight"]
+    assert wide["stop"]["reason"] == "max-steps" and wide["remesh_count"] >= 1
+    gates = [e["box_gate"] for e in _events(tmp_path / "wide" / "events.jsonl")
+             if e["event"] == "remesh" and "box_gate" in e]
+    assert gates and all(g["passed"] and g["box"] == "core" for g in gates)
+    assert not list((tmp_path / "wide" / "states").glob("gate_*"))
+    stop = tight["stop"]
+    assert stop["reason"] == "box-gate" and not stop["passed"]
+    (gate,) = (tmp_path / "tight" / "states").glob("gate_*.dump")
+    assert stop["end_state"] == str(gate) and gate.with_suffix(".json").is_file()
+    assert abs(stop["dV"]) > 0.0 or abs(stop["dPz"]) > 0.0

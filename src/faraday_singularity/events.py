@@ -99,7 +99,7 @@ RING_FILLS = ("blend", "zero")
 RING_AFTER_REMOVAL = ("stop", "continue")
 RING_RHO_MAX = 0.8
 # the kinds of the events a run makes, by class: the keys of a class are fixed after its first event
-EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head"), "gap": ("groove-fill",),
+EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head", "far-head"), "gap": ("groove-fill",),
                  "ring": ("piercing", "ring-collapse")}
 # a dump of the state before an event, from which a restart may change the keys of its class
 PRECUT_EVENT = "precut-event"
@@ -118,8 +118,7 @@ JETCORE_KINKS = ("grow", "recentre")
 JETCORE_SNAPSHOTS = ("any", "core")
 # the keys of the parts jetcore and pinch whose behaviour the driver does not make yet: refused away
 # from their defaults, so that no case sets a key that does nothing
-PENDING_KEYS = {"jetcore": ("profile_dt", "box_gate", "box_gate_sigmas"),
-                "pinch": ("far_head",)}
+PENDING_KEYS = {"jetcore": ("profile_dt",)}
 # the samples (t, r_n) of each tracked neck the driver keeps, the latest (closing_neck)
 NECK_HISTORY_SAMPLES = 512
 
@@ -824,6 +823,45 @@ def _pinch_field(x: dict) -> dict:
     return {"pinch": x["pinch"]} if "pinch" in x else {}
 
 
+# the classes of the events without a handler that the far-head cut meets (pinch.far_head): a gas
+# neck (the split of a chain) and a closing groove
+FAR_EVENT_CLASSES = ("G", "A-groove")
+
+
+def far_head_request(request: dict, necks: list[dict], open_core=None) -> dict | None:
+    """With ``pinch.far_head``: the request of the cut of the far head an event without a handler
+    lies on (kind ``far-head``, class ``F-head``, handler ``liquid-cut``, the event's request as
+    ``far_event``), or None. The event is of a class of :data:`FAR_EVENT_CLASSES`; its site, the
+    gas neck's node (``index``) or the fold pair's nodes (``fold_pair``) on its ``chain``, lies on
+    the head of a tracked neck of that chain with a single head (``necks``, :func:`liquid_necks`,
+    status ``head``), beside the neck itself, and in the far region: no node of the site a core
+    node of the open chain (``open_core``, ``jetcore.core_mask``'s mask; every node of another
+    chain is far). Of several heads, that of the narrowest ``r_n/s``."""
+    if request.get("class") not in FAR_EVENT_CLASSES:
+        return None
+    chain = request.get("chain")
+    if request.get("class") == "G":
+        site = [int(request["index"])] if request.get("index") is not None else []
+    else:
+        site = [int(k) for k in request.get("fold_pair") or ()]
+    if chain is None or not site:
+        return None
+    if chain == "open":
+        if open_core is None:
+            return None
+        mask = np.asarray(open_core, dtype=bool)
+        if any(mask[k] for k in site if 0 <= k < len(mask)):
+            return None
+    hits = [x for x in necks if x["chain"] == chain and x.get("status") == "head"
+            and x.get("head") is not None
+            and any(x["head"][0] <= k <= x["head"][1] and k != x["index"] for k in site)]
+    if not hits:
+        return None
+    x = min(hits, key=lambda x: x["r_n"] / x["s"])
+    return _request("far-head", "F-head", **_neck_fields(x), **_pinch_field(x),
+                    far_event={k: v for k, v in request.items() if k != "reason"})
+
+
 # --- the events after the cut, as the stops find them ---------------------------------------------
 
 # what reconnect.post_cut_stops returns, with the block, for an event: the driver meets it with its
@@ -836,6 +874,9 @@ EVENT_SCHEMA = "faraday-event/2"  # the schema of an event's record (events/even
 # met with liquid events off (L-unhandled) has none, whatever found it
 HANDLERS = {"W1": "ring", "L": "liquid-cut", "A-head": "liquid-cut", "L-unhandled": None,
             "A-groove": "groove-fill", "G": "n-chain-split", "B": None, "X": None,
+            # with pinch.far_head: the liquid cut of a far head an event without a handler lies on
+            # (far_head_request)
+            "F-head": "liquid-cut",
             # in the ring stage (ring.ring_stage_events): the ring emptied below bubble_stop of the
             # bubble's volume at the gas cut, removed; the ring coming up to the axis; a fold of
             # the ring closing (its top wedge, its corners, its pinching in two)

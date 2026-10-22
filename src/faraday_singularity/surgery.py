@@ -1030,7 +1030,7 @@ def restore_cut(problem, record: dict) -> None:
 # --- the cut of a liquid neck after the gas cut ---------------------------------------------------
 
 # the kinds of event a liquid cut is made for, and the class of each (events.post_cut_events)
-LIQUID_CUT_CLASSES = {"liquid-neck": "L", "a-head": "A-head"}
+LIQUID_CUT_CLASSES = {"liquid-neck": "L", "a-head": "A-head", "far-head": "F-head"}
 # the stages of a liquid cut before it changes the problem: any failure up to them is a refusal
 LIQUID_UNCHANGED_STAGES = ("admission", "precut", "caps", "plan", "budgets", "park")
 CAP_FILL_DENSITY = 4  # samples of the old bulk velocity per node of the new mesh along the cap
@@ -1228,9 +1228,11 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
                k: int, dt_prev: float, elements_per_scale: float, h_floor: float, driver=None,
                on_made=None, log=print) -> dict:
     """Cut the liquid neck an event request lands (``events.post_cut_events``: ``liquid-neck``,
-    class ``L``, or ``a-head``, class ``A-head``), the ``k``-th event after the gas cut, and
-    project. ``elements_per_scale`` is the run's after the cut (``reconnect.elements_per_scale``,
-    or the collapse's without it: a key of the cut, as the regions of its features have it) and
+    class ``L``, or ``a-head``, class ``A-head``; with ``pinch.far_head`` ``far-head``, class
+    ``F-head``, the head of a far event without a handler, ``events.far_head_request``, with no
+    test of its landing), the ``k``-th event after the gas cut, and project.
+    ``elements_per_scale`` is the run's after the cut (``reconnect.elements_per_scale``, or the
+    collapse's without it: a key of the cut, as the regions of its features have it) and
     ``h_floor`` the run's floor of the sizes after it (``post.h_floor``, a key of the leg); the
     record keeps both with the cap (``cap.elements_per_scale``, ``mesh.event_cap``).
 
@@ -1405,6 +1407,8 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
     # pinch.enabled a neck lands when it closes, which the request's trigger read from the history
     # of the neck (events.closing_neck), its radius against r_c delta read again here
     pinch = getattr(events, "pinch", None)
+    if cls == "F-head" and not (pinch is not None and pinch.far_head):
+        raise CutRefused("a far head is cut only with pinch.far_head")
     if pinch is not None and pinch.enabled and cls in ("L", "A-head"):
         reading = ((request.get("a_head") or {}) if cls == "A-head" else request).get("pinch")
         if not (isinstance(reading, dict) and reading.get("fired")) or \

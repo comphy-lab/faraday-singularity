@@ -22,6 +22,9 @@
   fires, a stalled, noisy or decelerating neck and a short track do not), the landing of a neck
   only from a closing history, the per-neck history in the state and the dumps and its restore,
   and the liquid cut's admission under the trigger.
+* The far-head cut (``events.far_head_request``, the driver's ``_far_head``) and the core box
+  gate (``CollapseDriver._gate_before``, ``_gate_after``: within its floors the dump before the
+  rebuild deleted, beyond them the run stopped on it).
 """
 
 from __future__ import annotations
@@ -829,3 +832,121 @@ def test_the_liquid_cut_under_pinch_refuses_a_neck_that_does_not_close(tmp_path)
                            dict(request, pinch={"fired": True}), k=1, dt_prev=1e-6,
                            elements_per_scale=8.0, h_floor=1e-7, log=lambda *_: None)
     drv.close()
+
+
+# --- C7: the far-head cut and the core box gate ---------------------------------------------------
+
+
+def test_a_far_event_on_a_tracked_head_is_routed_to_the_cut_of_that_head():
+    """``events.far_head_request``: a gas neck or a closing groove whose site lies on the head of
+    a tracked neck (beside the neck) is met by the cut of that neck, kind ``far-head``, class
+    ``F-head``, the event its ``far_event``; a site off every head, a site of the open chain in the
+    core, and an event of another class are not."""
+    chains = _headed_state(0.3)
+    named = [("bubble", chains[0]), ("open", chains[1])]
+    block = ev.EventSettings.from_dict(LIQUID)
+    necks = ev.liquid_necks(named, block.liquid)
+    neck = next(x for x in necks if x["status"] == "head" and x["chain"] == "bubble")
+    lo, hi = neck["head"]
+    site = (lo + hi) // 2 if neck["index"] != (lo + hi) // 2 else hi - 1
+    gas = {"reason": ev.EVENT_REQUEST, "kind": "gas-neck", "class": "G",
+           "handler": "n-chain-split", "chain": "bubble", "index": site, "r_neck": 1e-4}
+    got = ev.far_head_request(gas, necks)
+    assert (got["kind"], got["class"], got["handler"]) == ("far-head", "F-head", "liquid-cut")
+    assert (got["chain"], got["index"]) == ("bubble", neck["index"])
+    assert got["far_event"] == {k: v for k, v in gas.items() if k != "reason"}
+    assert ev.event_neck(got)["index"] == neck["index"]
+    groove = {"reason": ev.EVENT_REQUEST, "kind": "groove", "class": "A-groove",
+              "handler": "groove-fill", "chain": "bubble", "fold_pair": [site, site + 4]}
+    assert ev.far_head_request(groove, necks)["kind"] == "far-head"
+    off = dict(gas, index=1)  # the bubble's bottom, on no head
+    assert ev.far_head_request(off, necks) is None
+    assert ev.far_head_request(dict(gas, index=neck["index"]), necks) is None  # the neck itself
+    assert ev.far_head_request(dict(gas, **{"class": "B"}), necks) is None
+    # on the open chain: far only off the core
+    opens = [x for x in necks if x["chain"] == "open" and x["status"] == "head"]
+    if opens:
+        x = opens[0]
+        k = (x["head"][0] + x["head"][1]) // 2
+        req = dict(gas, chain="open", index=k if k != x["index"] else k + 1)
+        n = len(chains[1].points)
+        assert ev.far_head_request(req, necks, np.zeros(n, bool))["kind"] == "far-head"
+        assert ev.far_head_request(req, necks, np.ones(n, bool)) is None
+        assert ev.far_head_request(req, necks, None) is None
+    assert ev.HANDLERS["F-head"] == "liquid-cut" and "far-head" in ev.EVENT_CLASSES["liquid"]
+
+
+def test_the_driver_routes_an_unhandled_far_event_only_with_far_head(tmp_path):
+    """The driver's :meth:`_far_head`: with ``pinch.far_head`` (and jetcore) a gas neck on the
+    bubble's tracked head becomes a far-head request; without it none."""
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    pb = HeadProblem.make(r_n=0.3)
+    block = ev.EventSettings.from_dict({**LIQUID, "jetcore": {"enabled": True},
+                                        "pinch": {"far_head": True}})
+    drv = _events_driver(tmp_path / "a", pb, recon, block)
+    named = drv._named_post_cut_chains()
+    neck = next(x for x in ev.liquid_necks(named, block.liquid) if x["chain"] == "bubble"
+                and x["status"] == "head")
+    site = neck["head"][1] - 2
+    gas = {"reason": ev.EVENT_REQUEST, "kind": "gas-neck", "class": "G",
+           "handler": "n-chain-split", "chain": "bubble", "index": site}
+    assert drv._far_head(gas)["kind"] == "far-head"
+    drv.close()
+    plain = _events_driver(tmp_path / "b", HeadProblem.make(r_n=0.3), recon,
+                           ev.EventSettings.from_dict({**LIQUID, "jetcore": {"enabled": True}}))
+    assert plain._far_head(gas) is None
+    plain.close()
+
+
+GATED = {"liquid": {**LIQUID["liquid"], "sigma_V": 1e-12, "sigma_Pz": 1e-9},
+         "post": LIQUID["post"]}
+
+
+def _gate_run(tmp_path, monkeypatch, dV, dPz, **kw):
+    """A stand-in run with jetcore's box gate whose box budgets change by ``dV`` and ``dPz`` in
+    each rebuild (``CollapseDriver._box_budgets`` replaced), to its rebuild."""
+    from test_bookkeeping import CutProblem
+
+    calls = {"n": 0}
+
+    def budgets(self, boxes):
+        calls["n"] += 1
+        k = self.pb.remesh_count
+        return [{"V": 1.0 + k * dV, "A": 1.0, "Pz": 2.0 + k * dPz, "KE": 0.0, "points": 100}
+                for _ in boxes]
+
+    monkeypatch.setattr(drv_mod.CollapseDriver, "_box_budgets", budgets)
+    block = ev.EventSettings.from_dict({**GATED, "jetcore": {"enabled": True, "box_gate": True,
+                                                             **kw}})
+    drv = _events_driver(tmp_path, CutProblem(), ReconnectSettings(delta=1e-3, dt0=1e-3), block,
+                         max_steps=3, state_dt=0.0, state_keep=10)
+    out = drv.run(1e-9)
+    drv.close()
+    return out, calls["n"]
+
+
+def test_the_box_gate_passes_a_rebuild_within_its_floors_and_deletes_its_dump(tmp_path,
+                                                                             monkeypatch):
+    out, n = _gate_run(tmp_path, monkeypatch, dV=1e-12, dPz=1e-9)
+    assert out["stop"]["reason"] == "max-steps" and out["remesh_count"] >= 1 and n >= 2
+    events = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    gates = [e["box_gate"] for e in events if e["event"] == "remesh" and "box_gate" in e]
+    assert gates and all(g["passed"] for g in gates)
+    assert gates[0]["limit_V"] == 5e-12 and gates[0]["limit_Pz"] == 5e-9
+    assert not list((tmp_path / "states").glob("prebuild*")) and not list(
+        (tmp_path / "states").glob("gate_*"))
+
+
+def test_the_box_gate_stops_on_the_state_before_a_rebuild_beyond_its_floors(tmp_path,
+                                                                           monkeypatch):
+    out, _ = _gate_run(tmp_path, monkeypatch, dV=0.0, dPz=1e-8)  # twice the momentum's limit
+    stop = out["stop"]
+    assert stop["reason"] == "box-gate" and stop["trigger"] == "rule" and not stop["passed"]
+    assert stop["dPz"] == pytest.approx(1e-8) and stop["limit_Pz"] == pytest.approx(5e-9)
+    (gate,) = (tmp_path / "states").glob("gate_*.dump")
+    assert stop["end_state"] == stop["precut"] == str(gate)
+    meta = json.loads(gate.with_suffix(".json").read_text())
+    assert meta["box_gate"]["box"]["box"] == "core" and meta["cut"] is not None
+    assert "events_settings" in meta and not list((tmp_path / "states").glob("prebuild*"))
+    out2, _ = _gate_run(tmp_path / "wide", monkeypatch, dV=0.0, dPz=1e-8, box_gate_sigmas=20.0)
+    assert out2["stop"]["reason"] == "max-steps"

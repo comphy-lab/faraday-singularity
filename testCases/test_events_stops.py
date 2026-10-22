@@ -325,7 +325,8 @@ def test_the_handler_of_an_event_is_its_classs_and_an_unhandled_class_has_none()
     handler), not as a groove to fill."""
     assert ev.HANDLERS == {"W1": "ring", "L": "liquid-cut", "A-head": "liquid-cut",
                            "L-unhandled": None, "A-groove": "groove-fill", "G": "n-chain-split",
-                           "B": None, "X": None, "W2": "ring-removal", "RA": None, "RF": None}
+                           "B": None, "X": None, "F-head": "liquid-cut", "W2": "ring-removal",
+                           "RA": None, "RF": None}
     big = ev.EventSettings.from_dict({"liquid": {"enabled": True, "max_head_volume": 2.0},
                                       "post": {"open_neck_stop": False, "neck_floor": 2e-6}})
     bubble, apex = bubble_with_head(1e-3, r_n=0.2, r_w=0.54)

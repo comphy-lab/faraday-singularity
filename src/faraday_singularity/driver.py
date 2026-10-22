@@ -316,6 +316,16 @@ Courant number; ``jetcore.txt`` holds a row per step (``jetcore.COLUMNS``: what
 set the step, the split limit, the core, the far regions) and every leg the resolved keys
 (``limits.jetcore``).
 
+With the block's ``pinch.far_head`` an event without a handler (a gas neck, a closing groove)
+whose site lies on the head of a tracked neck in the far region is met by the liquid cut of that
+neck (``events.far_head_request``, kind ``far-head``, class ``F-head``, an event ``far-head``;
+its budgets the cut's hard closures). With ``jetcore.box_gate`` every ordinary rebuild may change
+the liquid volume and axial momentum in the box of radius ``liquid.box_radius delta`` about the
+core's base by at most ``box_gate_sigmas`` times ``liquid.sigma_V`` and ``liquid.sigma_Pz``
+(:meth:`CollapseDriver._gate_before`, :meth:`CollapseDriver._gate_after`, ``box_gate`` in the
+``remesh`` event); otherwise the run stops (``box-gate``) on the state before the rebuild, dumped
+before it as ``states/gate_<step>.dump``, its ``end_state``, from which a continuation resumes.
+
 With the block's ``pinch.enabled`` a tracked neck with a head lands only when it closes
 (``events.closing_neck``): the driver keeps the history of each tracked neck, matched across the
 accepted steps by its chain and height (``neck_history``, in every dump; restored with it,
@@ -756,6 +766,8 @@ class CollapseDriver:
             minimum_dt_after_cut(events.post, settings.dt_min if events.post.dt_min is None
                                  else events.post.dt_min)
         self._post_cut_cache: tuple | None = None
+        # with jetcore.box_gate: the stop of a rebuild whose box changed beyond it (_gate_after)
+        self._gate_stop: dict | None = None
         # after a cut: the stops of the last state checked (_post_cut_stop), by its key, so that the
         # check of the same state at the loop's top after the step's own is not made again
         self._stop_cache: tuple | None = None
@@ -1957,6 +1969,61 @@ class CollapseDriver:
             self._noise.write("\t".join(_table_cell(row.get(c)) for c in BOX_NOISE_COLUMNS)
                               + "\n")
 
+    def _gate_before(self) -> dict | None:
+        """With ``jetcore.box_gate``, before an ordinary rebuild after the cut (the rule's or one
+        for distortion): the box about the core's base (on the axis at the height of the jet's base,
+        ``jetcore.core_mask``'s ``A_z``, or of the cavity's tip without one; radius
+        ``liquid.box_radius delta``), its liquid volume and axial momentum as a liquid cut takes
+        them (:meth:`_box_budgets`), and the state before the rebuild, dumped
+        (``states/prebuild.dump``, outside the rotation); None otherwise."""
+        jet = self._jetcore()
+        if jet is None or not jet.box_gate:
+            return None
+        pc = self._post_cut_state()
+        core, rec = pc.get("core") or {}, pc.get("record") or {}
+        z = core.get("A_z", math.nan)
+        if not math.isfinite(z):
+            z = float(rec.get("z_cavity_tip", math.nan))
+        if not math.isfinite(z):
+            return None
+        box = {"box": "core", "chain": "open", "z": float(z),
+               "R": self.events.liquid.box_radius * self.reconnect.delta}
+        path = self.outdir / "states" / "prebuild.dump"
+        self._write_state(path, kept=True, box_gate={"box": box})
+        return {"box": box, "before": self._box_budgets([box])[0], "dump": path}
+
+    def _gate_after(self, gate: dict | None, reason: str) -> dict:
+        """After the rebuild of :meth:`_gate_before`: the change of the box's volume and momentum
+        against ``box_gate_sigmas`` times ``liquid.sigma_V`` and ``liquid.sigma_Pz`` (``box_gate``,
+        for the ``remesh`` event; empty without the gate). Within both, the dump of the state before
+        it is deleted; beyond either, it is kept as ``states/gate_<step>.dump`` and the run stops on
+        it (``box-gate``, the stop of the next check, :meth:`_stop`), the state the rebuild left
+        not accepted."""
+        if gate is None:
+            return {}
+        after = self._box_budgets([gate["box"]])[0]
+        jet, ls = self._jetcore(), self.events.liquid
+        dV = float(after["V"]) - float(gate["before"]["V"])
+        dPz = float(after["Pz"]) - float(gate["before"]["Pz"])
+        lim_V, lim_Pz = jet.box_gate_sigmas * ls.sigma_V, jet.box_gate_sigmas * ls.sigma_Pz
+        reading = {"reason": reason, **gate["box"], "dV": dV, "dPz": dPz, "limit_V": lim_V,
+                   "limit_Pz": lim_Pz, "points_before": gate["before"]["points"],
+                   "points_after": after["points"],
+                   "passed": bool(abs(dV) <= lim_V and abs(dPz) <= lim_Pz)}
+        dump = gate["dump"]
+        if reading["passed"]:
+            for f in (dump, dump.with_suffix(".json")):
+                f.unlink(missing_ok=True)
+            return {"box_gate": reading}
+        kept = dump.with_name(f"gate_{self.state.step:08d}.dump")
+        for f, g in ((dump, kept), (dump.with_suffix(".json"), kept.with_suffix(".json"))):
+            f.replace(g)
+        reading["dump"] = str(kept)
+        self._gate_stop = {"reason": "box-gate", "trigger": reason,
+                           **{k: v for k, v in reading.items() if k != "reason"},
+                           "precut": str(kept), **self._taus(self._t())}
+        return {"box_gate": reading}
+
     def _box_noise_summary(self) -> dict | None:
         """The log of the noise of the box (``post.log_box_noise``) in the run's result: the
         rebuilds and the rows logged, and the largest and the rms change of each budget over the
@@ -2341,8 +2408,10 @@ class CollapseDriver:
         focus = self._regions_focus(regions, keep=False)
         template.focus = focus
         noise = self._box_noise_before()  # post.log_box_noise only
+        gate = self._gate_before()  # jetcore.box_gate only
         self.pb.force_remesh()
         self._box_noise_after(noise, "rule")
+        gated = self._gate_after(gate, "rule")
         st.last_remesh_step = st.step
         hold = {}
         if refining:
@@ -2354,7 +2423,7 @@ class CollapseDriver:
                     h_near_before=m["h_near"], h_near_after=after["h_near"],
                     asked_by=[g["name"] for g in asked],
                     regions=self._region_record(regions, focus), **hold,
-                    **self._axis_repair_note())
+                    **self._axis_repair_note(), **gated)
         done = {g["name"]: g for g in after.get("regions", [])}
         if refining and not any(done.get(g["name"], {}).get("h_max", math.inf) <= 0.9 * g["h_max"]
                                 for g in asked):
@@ -2426,14 +2495,16 @@ class CollapseDriver:
                         grading=old.grading)
         template.focus = new
         noise = self._box_noise_before()  # after a cut with post.log_box_noise only
+        gate = self._gate_before()  # jetcore.box_gate only
         self.pb.force_remesh()
         self._box_noise_after(noise, "distortion")
+        gated = self._gate_after(gate, "distortion")
         self._distortion_remeshes += 1
         after = self.measure()
         self._event("remesh", m, reason="distortion", **flags[0], flagged_substeps=len(flags),
                     focus_size=new.size, focus_radius=new.radius, focus_size_before=old.size,
                     focus_radius_before=old.radius, h_near_before=m["h_near"],
-                    h_near_after=after["h_near"], **extra, **self._axis_repair_note())
+                    h_near_after=after["h_near"], **extra, **self._axis_repair_note(), **gated)
         return after
 
     def _axis_repair_note(self) -> dict:
@@ -2909,7 +2980,13 @@ class CollapseDriver:
         if request.get("handler") in RING_HANDLERS and self.events.ring.enabled:
             return self._meet_ring(m, request)
         if request.get("handler") not in IMPLEMENTED_HANDLERS:
-            return m, self._unhandled_event(request)
+            far = self._far_head(request)
+            if far is None:
+                return m, self._unhandled_event(request)
+            self._event("far-head", m, far_kind=request.get("kind"),
+                        far_class=request.get("class"), chain=far.get("chain"),
+                        r_n=far.get("r_n"), s=far.get("s"), z_n=far.get("z_n"))
+            request = far
         if len(self._made_events()) >= self.events.max_events:
             return m, self._event_stop(EVENT_LIMIT, request, max_events=self.events.max_events)
         neck = event_neck(request)
@@ -2946,6 +3023,21 @@ class CollapseDriver:
         self._drop_event_dumps()
         self._prune_meshes()
         return m, None
+
+    def _far_head(self, request: dict) -> dict | None:
+        """With ``pinch.far_head`` (and ``jetcore``): the request of the cut of the far head an
+        event without a handler lies on (``events.far_head_request``, from the tracked necks of
+        the state and the core of its open chain); None otherwise."""
+        from .events import far_head_request
+
+        if self.events is None or not self.events.pinch.far_head or self._jetcore() is None:
+            return None
+        named = self._named_post_cut_chains()
+        if not named:
+            return None
+        core = self._post_cut_state().get("core")
+        mask = None if core is None or core["whole"] else core["mask"]
+        return far_head_request(request, liquid_necks(named, self.events.liquid), mask)
 
     def _meet_ring(self, m: dict, request: dict) -> tuple[dict, dict | None]:
         """Meet a request of the ring's handlers (``ring``: the piercing, class ``W1``;
@@ -3434,8 +3526,11 @@ class CollapseDriver:
         return None
 
     def _stop(self, m):
-        """The stop the measured state calls for, if any: a geometry stop (after a cut, those of
-        both chains too) before the jet stop."""
+        """The stop the measured state calls for, if any: a rebuild the box gate refused
+        (``box-gate``, :meth:`_gate_after`), a geometry stop (after a cut, those of both chains
+        too) before the jet stop."""
+        if self._gate_stop is not None:
+            return dict(self._gate_stop)
         return self._geometry_stop(m) or self._post_cut_stop() or self._jet_stop(m)
 
     def _jet_stop(self, m):
@@ -3571,6 +3666,9 @@ class CollapseDriver:
                 flags += self._quality_floor_flags()
             # with a focus, the driver's rebuild, before the step is measured, as pyoomph's was
             m = self._distortion_remesh(flags) if defer and flags else self.measure()
+            if self._gate_stop is not None:  # jetcore.box_gate refused the rebuild for distortion
+                stop = dict(self._gate_stop)
+                break
             if defer and inside and r is not None:
                 self._event("remesh", m, reason="inverted-element", rebuilds=inside)
             self._tick("measure")
@@ -3647,7 +3745,7 @@ class CollapseDriver:
         # with the events block, a cut whose hard budgets do not close leaves the problem holding
         # a cut that is not accepted: nothing more is read from it, and the run ends on the state
         # before the event, which the cut kept
-        unclosed = stop.get("reason") == EVENT_UNCLOSED
+        unclosed = stop.get("reason") in (EVENT_UNCLOSED, "box-gate")
         if r is not None:  # after a cut the state the run ends on is a dump too
             if not unclosed:
                 self._commit_post_cut(m)
