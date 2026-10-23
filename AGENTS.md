@@ -332,7 +332,8 @@ add a second top-level `cases/` tree.
   times and the dump; a cut refused or unclosed has its own, to which the dump is added; `record`
   in the stop):
   `event-unhandled` (no handler made: the ring of a piercing without `ring.enabled`, the groove
-  fill, the split of a gas neck, a liquid neck without a single head), `max-events` (the event
+  fill without `groove.enabled`, the split of a gas neck, a liquid neck without a single head),
+  `max-events` (the event
   after `max_events`),
   `event-cascade` (`events.CascadeMonitor` judges it to shrink: an interval at its tip below
   `cascade_min_interval delta^2`, or the last `cascade_count` pairs of ratios of intervals and of
@@ -398,7 +399,8 @@ add a second top-level `cases/` tree.
   (`FaradayProblem.interface_loops`; `interface_segments` sets loops aside); its stops are
   `ring.ring_stage_events` (the open chain's necks, folds, heads and gas neck as
   `events.post_cut_events` reads them; the ring's removal below `bubble_stop V_b`, W2; its approach
-  to the axis, RA, its folds, RF, its approach to the open chain, X, each a resumable stop). A
+  to the axis, RA, its folds, RF (filled with `groove.enabled`, below), its approach to the
+  open chain, X, each a resumable stop). A
   landed neck of the open chain in the ring stage is cut by `surgery.liquid_cut` as before the
   ring (record `stage` `ring`), its rebuild the ring stage's own (the template's
   `pending_ring_geometry`: the cut chain and the ring as it is, or no loop after the removal; no
@@ -424,6 +426,28 @@ add a second top-level `cases/` tree.
   `testCases/ring_fem_state.py`, and each hard closure of both violated in turn, a stop
   `event-unclosed` with `precut_e<k>`; F4, the liquid cut of the cavity's tip in the ring stage on
   that state with the tip necked, with the ring and after its removal) cover it.
+- The events block's `groove` part (`events.GrooveEventSettings`, `groove.py`,
+  `groovesurgery.py`; off by default, written into the block and its hash only where it differs
+  from its defaults, its keys keys of the class `gap`, `EventSettings.CLASS_OF_PART`) makes the fill
+  of a closing gas groove (`groovesurgery.groove_fill`, `CollapseDriver._meet_groove`, before the
+  far-head route of `pinch.far_head`) for `A-groove` (the open chain or the bubble, and the open
+  chain in the ring stage) and `RF` (the ring's loop; its request names `groove-fill` only with the
+  part): the pocket of the fold pair must be gas (`groove.side_of`; a liquid sheet is refused), the
+  mouth where the walls lie `mouth` fold limits apart or have turned out of the groove
+  (`groove.MOUTH_TURN`), a cubic closure C1 at the splices, the filled region at most `max_fill V_b`
+  and never on the core or the base of the upward jet; the rebuild through the template's
+  `pending_ring_geometry` (built by `_define_ring_geometry` also before the ring, the only path
+  that sets it there) with the projection transfer; the bulk's unlocated nodes those inside the
+  filled region within a twentieth of the old surface's shortest chord there; the projection's
+  box a disc at the site (`surgery.site_grid`, `box_polyline_budgets(..., r_centre=)`,
+  `project(box=<grid>)`); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`);
+  `groove-fill-refused` a resumable stop; the record kind `groove-fill` (`EVENT_CLASSES["gap"]`),
+  a row of `events.txt`, `budget.txt` net of it (`CollapseDriver._filled`),
+  `CollapseDriver.reset_after_groove`. Runs without the part, or with it and no groove met, are
+  those of 89f7f49 (`testCases/test_groove_identity.py`), besides every earlier pin;
+  `test_groove_settings.py`, `test_groove_geometry.py`, `test_groove_driver.py` (stand-ins) and
+  `test_groove_fem.py` (a finger of gas of a ring and a slot of the open chain filled, the
+  refusals unchanged) cover it.
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,
   its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest

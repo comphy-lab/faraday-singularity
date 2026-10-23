@@ -456,8 +456,8 @@ single head or with one too large, or met with liquid events off, whose head is 
 classified, is of class `L-unhandled`, which has none. The run makes the cut of a landed liquid
 neck, `L` or `A-head` (below), within itself and goes on; it stops on any other event, resumably
 (`event-unhandled`, with the event's number `k`, its `kind`, `class` and the handler of its class:
-the fill of a groove and the split of a gas neck are still to be built, and the ring of a piercing
-is made only with `ring.enabled`, below),
+the split of a gas neck is still to be built, the ring of a piercing is made only with
+`ring.enabled` and the fill of a groove only with `groove.enabled`, below),
 and keeps the state before it as `states/precut_e<k>.dump` (`cut_stage` `precut-event`), besides
 the state it ends on, with the record of the event (`events/event_<k>.json`, `outcome`
 `unhandled`); a continuation from it meets the event again, and its handler once one exists. The
@@ -621,7 +621,8 @@ quadratic surface can change that volume by; `loop` in the record, a failure oth
 polylines of the cut's box hold the ring's gas where the box reaches it; after the ring's removal
 the same rebuild has no loop. The ring's own events are resumable stops: its approach to the axis
 (`ring-axis`, class `RA`, below `max(ring.axis_ratio r_w, 3 h_col)`), the closing of one of its
-folds (`ring-fold`, `RF`) and its approach to the open chain (`chain-contact`, `X`).
+folds (`ring-fold`, `RF`; filled with `groove.enabled`, below) and its approach to the open chain
+(`chain-contact`, `X`).
 Once its volume falls below `bubble_stop` of the bubble's at the gas cut
 (`ring-collapse`, class `W2`) it is removed (`ringsurgery.ring_removal`) by the same sequence and
 closures (Q1-Q6), the removal logged; `ring.after_removal` `stop` (the default) then ends the window
@@ -639,6 +640,42 @@ that the fill's own amounts make no jump in them (the projection's change of the
 momentum and the noise of the rebuild still enter them, as at a liquid cut), the dumps hold the
 record of the stage (`ring`) and `run_status.json` the events of the ring (`events.ring`: the event
 of the cut, that of the removal and its time).
+
+The block's `groove` part (off by default, written into the block and its hash only where it
+differs from its defaults; its keys are keys of the class `gap`, fixed once a fill is made except
+from the state before an event) makes the fill of a closing gas groove, the handler of `A-groove`
+(a fold of the open chain or the bubble) and of `RF` (a fold of the ring), before the far-head cut
+of `pinch.far_head` (`groovesurgery.groove_fill`, `groove.py`). The pocket the fold pair closes off
+(on the ring, the side of the smaller volume) must be gas: a pocket of liquid, a thin liquid sheet
+between two faces of gas that the fold test meets alike, is refused. Every part of the groove
+narrower than `groove.mouth` times the fold's limit (1.5) is filled at once: each wall is walked
+from the pair away from the pocket until it lies that far from the other wall or has turned out
+of the groove (75 degrees from its tangent at the pair), and the two nodes reached are the
+splices. The closure is a cubic curve C1 with both walls at the splices, its handles
+`groove.cap_height` times those of a circular arc turning by the angle between the walls' tangents
+(1, tried once more at 0.5 if refused), at `groove.cut_elements` points per mouth width (null for
+the run's elements per scale). A fill is refused before anything changes where the pair lies at a
+chain's end, where no mouth is found within the chain, where the closure leaves the old gas or
+makes a knife-edge angle, where the filled region is not simple or not inside the old gas, where the
+new chains or the new loop are not a mesh's, where it would take a node of the upward jet's core
+(`jetcore`) or straddle the base of that jet, and where it would take more than `groove.max_fill`
+of the bubble's volume at the gas cut (0.01, the share below which the ring is removed): a fill
+never splits the ring or a chain, and a larger pocket (a lobe of the ring, a bubble pinching in
+two) waits for a handler of its own. The rebuild is the project's own, before the ring as in its
+stage, the transfer by projection onto the old interface checked against the nodes the geometry
+predicts it cannot locate (on the closure, inside the filled region), then the velocity of the new
+liquid (`groove.fill`: `blend`, pyoomph's nearest-node blend, or `zero`) and the pressure-impulse
+projection (`groove.projection`, `groove.restart`). Its budgets within `max(groove.box_radius
+delta, 2 L_fill)` of the filled region's centroid, a disc at the site (G1-G6): the liquid volume
+gained against the filled volume, the axial momentum the transfer carried against the filled
+region's, the identity of the disc's cutoff in the projection's weak form and the disc's change of
+momentum by the projection are hard checks, the kinetic energies and the area flags, each limit
+floored at a multiple of the part's noise floors (`groove.sigma_V`, `sigma_Pz`, `sigma_KE`, 0 until
+set); a hard miss is a resumable stop (`event-unclosed`), a refusal `groove-fill-refused`. A fill
+made is an event of kind `groove-fill` (`events/event_<k>.json` with the filled region, the closure
+and the pocket), a row of `events.txt` (its fill a negative removal, its closures in `F1`-`F6`) and
+a fill in the totals of `budget.txt`, which stay net of it. The triple of its length scale is
+`gap.kappa_g` (the trigger `kappa_g delta`), run as branches from the state before the first fill.
 
 The block's `jetcore` part (off by default, and written into the block and its hash only where it
 differs from its defaults; every key a key of the leg, its sizing keys among `events.SIZING_KEYS`)
