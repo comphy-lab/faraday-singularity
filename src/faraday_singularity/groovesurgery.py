@@ -46,9 +46,15 @@ The fill is a rebuild the project owns, as the ring surgeries are (``ringsurgery
    liquid gains against the filled volume, G2 the momentum the transfer carries against the filled
    region's, G3 the projection's momentum balance in the disc (the cutoff identity) and ``G3_box``
    the disc's change of momentum by the projection, hard (``surgery.BudgetUnclosed``,
-   ``event-unclosed``); G4-G6 (energies, area) flags; then the record, the driver's bookkeeping
-   (``on_made``), ``postcut_e<k>`` and ``events/event_<k>.json`` (kind ``groove-fill``) with the
-   filled region, the closure and the pocket.
+   ``event-unclosed``), but ``G3_box`` beyond its limit only a flag where the identity G3 resolves
+   it, the impulse of the merge (:func:`merge_impulse`); G4-G6 (energies, area) flags; then the
+   record, the driver's bookkeeping (``on_made``), ``postcut_e<k>`` and ``events/event_<k>.json``
+   (kind ``groove-fill``) with the filled region, the closure and the pocket.
+
+A refusal leaves the problem unchanged; a fill whose hard closures miss leaves it rebuilt, wholly,
+under a state that is not accepted. On a far head the driver then falls back to the far-head cut of
+that head from the state before the event, which it loads back from ``precut_e<k>`` after a miss
+(``driver.CollapseDriver._groove_fallback``); elsewhere either is a resumable stop.
 """
 
 from __future__ import annotations
@@ -73,6 +79,42 @@ LOOP_NODE_RANGE = (0.5, 1.5)  # the new loop's nodes against the planned points 
 # a refusal of the geometry that a flatter closure may not meet (the closure's own checks): retried
 RETRIED = {"closure", "angle", "fill", "chains"}
 assert set(REQUEST_KINDS) == set(GROOVE_CLASSES)
+# G3_box beyond its limit is the impulse of the merge where the cutoff identity resolves it: its
+# larger side at least this share of the disc's change of momentum (merge_impulse)
+MERGE_RESOLVED = 0.5
+
+
+def merge_impulse(closures: dict, floor_Pz: float = 0.0) -> dict:
+    """The closures of a fill (``ringsurgery._ring_closures``, prefix ``G``) with ``G3_box`` read as
+    the impulse of the merge the fill makes. A fill joins liquid that moved at different velocities
+    across the gas it removes (the walls of the groove closing and sliding past each other); the
+    projection is that merge's inelastic impulse, which acts near free surfaces and so moves
+    momentum out of any disc about the site (its far field a dipole, whose flux through a sphere
+    does not fall with its radius), physically, balanced in the end at the container's bottom
+    (``global_identity``). The disc's change of momentum against ``P_ref = V_fill U`` (``U`` the
+    surface's largest speed, a translation that makes no impulse) is then no test of the momentum
+    balance, which is the cutoff identity G3: the disc's change equals the impulse's flux through
+    its boundary. So ``G3_box`` beyond its limit stays a flag, out of ``hard``, where G3 holds and
+    resolves it: the identity's larger side at least ``MERGE_RESOLVED`` of ``G3_box`` and not below
+    ``floor_Pz`` (the momentum floor of the closures, five ``groove.sigma_Pz``), so that the
+    momentum the disc lost is a measured flux, not noise the identity cannot see; otherwise it stays
+    hard.
+    Returns the closures, unchanged where ``G3_box`` is within its limit, else with ``G3_merge``
+    (``side``, ``share``, ``floor``, ``resolved``)."""
+    if "G3_box" not in closures.get("hard", ()):
+        return closures
+    phi = closures.get("G3_phi") or {}
+    sides = [abs(float(phi.get(x, math.nan))) for x in ("phi_lhs", "phi_rhs")]
+    side = max(sides) if all(math.isfinite(x) for x in sides) else math.nan
+    box = float(closures["G3_box"])
+    share = side / box if box > 0.0 and math.isfinite(side) else math.nan
+    resolved = bool("G3" not in closures.get("flags", ()) and math.isfinite(share)
+                    and share >= MERGE_RESOLVED and side >= float(floor_Pz))
+    out = dict(closures, G3_merge={"side": side, "share": share, "floor": float(floor_Pz),
+                                   "resolved": resolved})
+    if resolved:
+        out["hard"] = [x for x in closures["hard"] if x != "G3_box"]
+    return out
 
 
 def _spacing(P, loop: bool) -> tuple[np.ndarray, np.ndarray, float]:
@@ -151,9 +193,9 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
     from .events import CAP_RETRY_HEIGHT, predict_unlocated
     from .groove import GrooveFillRefused, groove_fill_geometry
     from .ring import closed, loop_kept
-    from .ringsurgery import (CORNER_TOL, _axis_ends, _base_record, _corners, _focus_regions,
-                              _inside, _node_sets, _rebuild, _ring_closures, _transfer_check,
-                              _zero_inside)
+    from .ringsurgery import (CORNER_TOL, RING_NOISE_FLOORS, _axis_ends, _base_record, _corners,
+                              _focus_regions, _inside, _node_sets, _rebuild, _ring_closures,
+                              _transfer_check, _zero_inside)
     from .surgery import (INTERFACE, BudgetUnclosed, CutFailed, CutRefused,
                           _axis_spans_of_mesh, _jsonable, _keep, _named_chains, box_integrals,
                           box_polyline_budgets, orient_interface_chart, project, site_grid,
@@ -394,6 +436,7 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
                               {"A_cl": g.A_cl, "A_rem": g.A_rem},
                               sigma={"V": gs.sigma_V, "Pz": gs.sigma_Pz, "KE": gs.sigma_KE},
                               prefix="G")
+    closures = merge_impulse(closures, RING_NOISE_FLOORS["R3_box"][1] * gs.sigma_Pz)
     closures["global_identity"] = {x: record["projection"].get(x, math.nan)
                                    for x in ("delta_Pz", "Pi_on_bottom")}
     record["closures"] = closures

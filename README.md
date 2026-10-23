@@ -671,7 +671,19 @@ gained against the filled volume, the axial momentum the transfer carried agains
 region's, the identity of the disc's cutoff in the projection's weak form and the disc's change of
 momentum by the projection are hard checks, the kinetic energies and the area flags, each limit
 floored at a multiple of the part's noise floors (`groove.sigma_V`, `sigma_Pz`, `sigma_KE`, 0 until
-set); a hard miss is a resumable stop (`event-unclosed`), a refusal `groove-fill-refused`. A fill
+set). The disc's change of momentum beyond its limit (0.05 `V_fill U`) is only a flag where the
+identity holds and resolves it, its larger side at least half the change and at the momentum
+floor or above: a fill joins liquid that moved at different velocities across the gas it removes,
+and the projection is the inelastic impulse of that merge, which near free surfaces moves momentum
+out of any disc about the site, balanced at the container's bottom, so that the identity, not the
+disc's change, is the momentum balance (`G3_merge` in the closures). A hard miss is a resumable
+stop (`event-unclosed`), a refusal `groove-fill-refused`. With
+`pinch.far_head` (and `jetcore`) a fill refused or unclosed on the head of a tracked neck in the far
+region (the downward jet's head, any head off the upward jet's core) falls back to the far-head cut
+of that head as the same event, from the state before it (loaded back from `precut_e<k>` after an
+unclosed fill): the fill's record is kept as `events/event_<k>_fill.json`, the cut's request
+carries `fallback` (the fill's outcome, stage, hard closures and record) and the run writes an
+event `groove-fallback`; a fill failing elsewhere stays its stop. A fill
 made is an event of kind `groove-fill` (`events/event_<k>.json` with the filled region, the closure
 and the pocket), a row of `events.txt` (its fill a negative removal, its closures in `F1`-`F6`) and
 a fill in the totals of `budget.txt`, which stay net of it. The triple of its length scale is

@@ -440,8 +440,20 @@ add a second top-level `cases/` tree.
   that sets it there) with the projection transfer; the bulk's unlocated nodes those inside the
   filled region within a twentieth of the old surface's shortest chord there; the projection's
   box a disc at the site (`surgery.site_grid`, `box_polyline_budgets(..., r_centre=)`,
-  `project(box=<grid>)`); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`);
-  `groove-fill-refused` a resumable stop; the record kind `groove-fill` (`EVENT_CLASSES["gap"]`),
+  `project(box=<grid>)`); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
+  but `G3_box` beyond its limit only a flag where the cutoff identity G3 holds and resolves it (its
+  larger side at least `MERGE_RESOLVED` 0.5 of `G3_box` and at the momentum floor or above;
+  `groovesurgery.merge_impulse`, `G3_merge` in the closures): the projection of a fill is the
+  inelastic impulse of the merge it makes, which moves momentum out of any disc about the site
+  physically, so the disc's change against `P_ref = V_fill U` tests no balance
+  (`test_groove_closures.py`); `groove-fill-refused` a resumable stop; with `pinch.far_head` a
+  fill refused or unclosed on a far head (`events.far_head_request`, found on the state before the
+  fill) falls back to the far-head cut of that head as the same event
+  (`CollapseDriver._groove_fallback`; after an unclosed fill the state before the event is loaded
+  back into the problem from `precut_e<k>`,
+  `CollapseDriver._reload_event_state`, as a restart holds it: the only state loaded back within a
+  run), the fill's record `events/event_<k>_fill.json`, `fallback` in the cut's request, an event
+  `groove-fallback`; the record kind `groove-fill` (`EVENT_CLASSES["gap"]`),
   a row of `events.txt`, `budget.txt` net of it (`CollapseDriver._filled`),
   `CollapseDriver.reset_after_groove`. With `groove.sheets` `log` (default `event`) the stops'
   chain and ring folds are selected per side (`groove.side_folds`, `side` in the request): a
@@ -451,9 +463,11 @@ add a second top-level `cases/` tree.
   handler (`events.SHEET_CONTACT`, never routed to the fill); `test_groove_sheets.py`. Runs
   without the part, or with it and no groove met, are
   those of 89f7f49 (`testCases/test_groove_identity.py`), besides every earlier pin;
-  `test_groove_settings.py`, `test_groove_geometry.py`, `test_groove_driver.py` (stand-ins) and
-  `test_groove_fem.py` (a finger of gas of a ring and a slot of the open chain filled, the
-  refusals unchanged) cover it.
+  `test_groove_settings.py`, `test_groove_geometry.py`, `test_groove_driver.py` (stand-ins, the
+  fall-back among them), `test_groove_fem.py` (a finger of gas of a ring and a slot of the open
+  chain filled, the refusals unchanged) and `test_groove_fallback_fem.py` (the fall-back on the
+  heads' state: the cut after a reload equals the cut without one) cover it, and
+  `test_groove_fallback_identity.py` pins runs without a failing fill on a far head to 8407091.
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,
   its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest
