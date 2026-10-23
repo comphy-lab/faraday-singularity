@@ -48,7 +48,10 @@ In the ring stage (the ring of a pierced bubble, ``ringsurgery.ring_cut``: ``rin
 the template) every rebuild meshes the ring, a closed loop of the free surface, as a hole of the
 liquid of two splines named ``interface``, at its frozen sizing (:class:`RingSizing`), from the
 geometry a ring surgery plans (``pending_ring_geometry``) or from the current nodes
-(``FaradayCylinderMesh._define_ring_geometry``); before the stage nothing reads it.
+(``FaradayCylinderMesh._define_ring_geometry``). Before the stage the same build makes the
+geometry the fill of a groove plans (``groovesurgery.groove_fill``, ``pending_ring_geometry`` with
+the new chains and no loop), the only rebuild that sets one there; every other rebuild is as
+before.
 """
 
 from __future__ import annotations
@@ -221,9 +224,12 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
         self.default_resolution = s.h_max
 
         segs = None
-        if self.is_remeshing() and getattr(self, "ring_stage", False):
+        if self.is_remeshing() and (getattr(self, "ring_stage", False)
+                                    or getattr(self, "pending_ring_geometry", None) is not None):
             # the ring stage (inert before it): the ring's own build; no pyoomph plan is parked
-            # while a loop exists, whose open chart could not carry it
+            # while a loop exists, whose open chart could not carry it; and, before the ring, the
+            # build of a geometry a surgery the project owns plans (the fill of a groove,
+            # groovesurgery.groove_fill), the only one that sets it then
             if self.has_pending_surgery_plan(self.interface_name):
                 raise RuntimeError("a surgery plan is parked on the template in the ring stage")
             return self._define_ring_geometry(focus, h_focus)

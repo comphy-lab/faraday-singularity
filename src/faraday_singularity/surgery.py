@@ -452,6 +452,30 @@ def box_grid(z_centre: float, radius: float, n: int = BOX_SAMPLES) -> dict:
             "dphi_dz": dphi * np.sin(T).ravel()}
 
 
+def site_grid(r_centre: float, z_centre: float, radius: float, n: int = BOX_SAMPLES) -> dict:
+    """The polar grid of the budgets within ``radius`` of a point ``(r_centre, z_centre)`` off
+    the axis (the fill of a groove, ``groovesurgery.groove_fill``), as :func:`box_grid` lays its
+    half-disc on the axis: the midpoints of ``n x n`` cells of the whole disc in the distance
+    ``rho`` from the centre and the angle about it, those at ``r > 0`` kept, their places, the
+    volume of each revolved about the axis (``dV``), the cutoff ``phi`` of :func:`box_cutoff` in
+    ``rho`` and its axial derivative (``dphi/drho sin(theta)``). ``v = phi e_z`` is a velocity the
+    projection's weak form holds for wherever the disc lies in the liquid or reaches only its free
+    surfaces (its radial part zero, the axis's condition), so the identity of the cutoff
+    (:func:`_box_projection`) holds in it as in a box on the axis."""
+    h_rho, h_th = radius / n, 2.0 * math.pi / n
+    rho = (np.arange(n) + 0.5) * h_rho
+    theta = -math.pi + (np.arange(n) + 0.5) * h_th
+    P, T = np.meshgrid(rho, theta, indexing="ij")
+    P, T = P.ravel(), T.ravel()
+    r, z = r_centre + P * np.cos(T), z_centre + P * np.sin(T)
+    keep = r > 0.0
+    phi, dphi = box_cutoff(P, radius)
+    return {"z": float(z_centre), "r_c": float(r_centre), "R": float(radius), "n": int(n),
+            "r": r[keep], "zz": z[keep], "rho": P[keep],
+            "dV": (2.0 * math.pi * r * P * h_rho * h_th)[keep], "phi": phi[keep],
+            "dphi_dz": (dphi * np.sin(T))[keep]}
+
+
 def box_cutoff(rho, radius: float) -> tuple[np.ndarray, np.ndarray]:
     """The cutoff of the box of radius ``radius`` at the distances ``rho`` from its centre and its
     derivative in ``rho``: one within half the radius, zero beyond it, a cubic step in between
@@ -502,19 +526,22 @@ def box_integrals(problem, grid: dict, polygons: dict | None = None) -> dict:
     return out
 
 
-def box_polyline_budgets(chains, z_centre: float, radius: float, reservoir_depth: float) -> dict:
+def box_polyline_budgets(chains, z_centre: float, radius: float, reservoir_depth: float, *,
+                         r_centre: float = 0.0) -> dict:
     """The volumes and the area within the half-disc of ``radius`` about ``(0, z_centre)`` from the
     polylines of the ``chains`` (``reconnect.Chain``), clipped to it (as ``reconnect.
     gas_volume_in_box`` clips to a box): the gas they bound (``V_gas``; the open chain closed
     through the gas above it), the liquid (``V_liquid``, the half-disc's revolved volume, a sphere,
-    less the gas) and the area of the interface (``A``), each polyline segment revolved."""
+    less the gas) and the area of the interface (``A``), each polyline segment revolved. With
+    ``r_centre`` the disc about ``(r_centre, z_centre)`` at ``r >= 0`` instead (the site of a
+    groove's fill, :func:`site_grid`); zero is the half-disc on the axis."""
     from shapely.geometry import LineString, Point, Polygon
     from shapely.geometry import box as shapely_box
 
     from .reconnect import closed_section, revolved_volume
 
-    disc = Point(0.0, z_centre).buffer(radius, quad_segs=256).intersection(
-        shapely_box(0.0, z_centre - radius, radius, z_centre + radius))
+    disc = Point(r_centre, z_centre).buffer(radius, quad_segs=256).intersection(
+        shapely_box(0.0, z_centre - radius, r_centre + radius, z_centre + radius))
     V_disc = revolved_volume(np.asarray(disc.exterior.coords)[:-1])
     gas = area = 0.0
     for c in chains:
@@ -568,7 +595,7 @@ def _box_projection(grid: dict, before: dict, after: dict, found: np.ndarray) ->
 
 
 def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None = None, *,
-            box: tuple[float, float] | None = None) -> dict:
+            box: tuple[float, float] | dict | None = None) -> dict:
     """Steps 6-8: impulsive history, the projection, the restart of the history at ``t_cut``.
 
     Returns the projection diagnostics, filled into ``out`` as they are made, so that they survive
@@ -576,7 +603,8 @@ def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None
     broke the energy identity. With ``box`` (``(z_centre, radius)``, a liquid cut's) the velocity is
     sampled on the polar grid of that box (:func:`box_grid`) before the solve and again, with the
     pressure impulse, after it and before the old pressure is put back, for what the projection
-    changed there (``out["box"]``, :func:`_box_projection`); without it nothing else is read."""
+    changed there (``out["box"]``, :func:`_box_projection`); ``box`` may also be a grid itself (a
+    groove's fill: :func:`site_grid`, a disc at its site); without it nothing else is read."""
     s = settings
     pb = problem
     out = {} if out is None else out
@@ -586,7 +614,7 @@ def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None
     if s.projection:
         grid = sampled = None
         if box is not None:
-            grid = box_grid(*box)
+            grid = box if isinstance(box, dict) else box_grid(*box)
             sampled = sample_fields(pb, grid["r"], grid["zz"], ("velocity_x", "velocity_y"))
         ip, saved = _pressures(pb)
         pb._projecting = True

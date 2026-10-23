@@ -160,8 +160,11 @@ def test_a_gas_finger_of_the_ring_is_filled_at_its_mouth():
     assert math.isfinite(f.gap) and f.gap < limit and rc.fold_contact(f.arc, f.h_elem) == "fold"
     g = fill("ring", L, f.pair, limit, others=[flat_open()])
     assert g.side == "gas" and g.gas_share == pytest.approx(1.0)
-    # the mouth: the walls at least w_f apart at the splices, narrower within
-    assert g.mouth >= g.width and g.width == pytest.approx(1.5 * limit)
+    # the mouth: the walls at least w_f apart at the splices, or turned out of the groove there
+    assert g.width == pytest.approx(1.5 * limit)
+    assert set(g.checks["mouth_ends"]) <= {"width", "turn"}
+    if g.checks["mouth_ends"] == ["width", "width"]:
+        assert g.mouth >= g.width
     # the gas before is the gas after and the filled region together
     V0, V1 = rc.revolved_volume(L), rc.revolved_volume(g.points)
     assert V0 == pytest.approx(V1 + g.V_fill, rel=1e-12)
@@ -225,7 +228,7 @@ def test_a_slot_of_gas_in_the_open_chain_is_filled():
     f, limit = chain_fold(c.points)
     assert math.isfinite(f.gap) and f.gap < limit and rc.fold_contact(f.arc, f.h_elem) == "fold"
     g = fill("open", c.points, f.pair, limit, ends=c.end_types)
-    assert g.side == "gas" and g.mouth >= g.width
+    assert g.side == "gas" and set(g.checks["mouth_ends"]) <= {"width", "turn"}
     gas0 = rc.revolved_volume(rc.closed_section(c.points, c.end_types, RESERVOIR))
     gas1 = rc.revolved_volume(rc.closed_section(g.points, c.end_types, RESERVOIR))
     assert gas0 == pytest.approx(gas1 + g.V_fill, rel=1e-12)
@@ -260,13 +263,15 @@ def test_a_finger_of_gas_of_the_bubble_is_filled():
     rc.check_chains([rc.Chain(g.points, bubble.end_types), flat_open()])
 
 
-def test_a_pair_at_the_end_or_walls_narrow_to_the_end_are_refused():
+def test_a_pair_at_the_end_or_walls_narrow_to_the_end_are_refused(monkeypatch):
     c = slot_open()
     f, limit = chain_fold(c.points)
     with pytest.raises(groove.GrooveFillRefused) as e:
         fill("open", c.points, (0, f.pair[1]), limit, ends=c.end_types)
     assert e.value.checks["failed"] == ["pair"]
-    # a fill width wider than the whole surface's gap to the axis end: no mouth within the chain
+    # a fill width wider than the whole surface's gap to the axis end, and walls never turned out
+    # of the groove: no mouth within the chain
+    monkeypatch.setattr(groove, "MOUTH_TURN", 179.999)
     with pytest.raises(groove.GrooveFillRefused) as e:
         fill("open", c.points, f.pair, limit, ends=c.end_types, width=10.0)
     assert e.value.checks["failed"] == ["mouth"]

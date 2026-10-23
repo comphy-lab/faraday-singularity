@@ -266,14 +266,16 @@ def run_info(run, records: list[dict]) -> dict:
 
 
 RING_KINDS = ("piercing", "ring-collapse")  # the kinds of the ring surgeries (ringsurgery.py)
+GROOVE_KINDS = ("groove-fill",)  # the kind of the fill of a groove (groovesurgery.py)
 
 
 def _removal(rec: dict) -> dict:
-    """What an event made took from the liquid: a liquid cut's ``removed``; a ring surgery's fill
-    (``filled``, the gas it turned into liquid) as a negative removal; empty for the others."""
+    """What an event made took from the liquid: a liquid cut's ``removed``; a ring surgery's fill,
+    or a groove's (``filled``, the gas it turned into liquid), as a negative removal; empty for the
+    others."""
     if rec.get("removed"):
         return rec["removed"]
-    filled = rec.get("filled") if rec.get("kind") in RING_KINDS else None
+    filled = rec.get("filled") if rec.get("kind") in RING_KINDS + GROOVE_KINDS else None
     if not filled:
         return {}
     return {key: -_num(filled.get(key)) for key in ("V", "Pz", "KE")}
@@ -282,10 +284,10 @@ def _removal(rec: dict) -> dict:
 def _closure_fields(closures: dict, kind) -> tuple[dict, float]:
     """The closures of an event's record as ``F1``-``F6``, relative to their scales, and the
     relative error of the cutoff identity: a liquid cut's own, a ring surgery's R1-R6 (Q1-Q6 for
-    the ring's removal) in their places."""
+    the ring's removal) and a groove's fill's G1-G6 in their places."""
     rel = closures.get("relative") or {}
-    if kind in RING_KINDS:
-        prefix = "Q" if kind == "ring-collapse" else "R"
+    if kind in RING_KINDS + GROOVE_KINDS:
+        prefix = "Q" if kind == "ring-collapse" else "G" if kind in GROOVE_KINDS else "R"
         return ({f"F{i}": _num(rel.get(f"{prefix}{i}")) for i in range(1, 7)},
                 _num((closures.get(f"{prefix}3_phi") or {}).get("phi_relative_error")))
     return ({f: _num(rel.get(f)) for f in ("F1", "F2", "F3", "F4", "F5", "F6")},

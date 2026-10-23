@@ -16,10 +16,11 @@ following its gas to a closure the mesh cannot make. This module is the fill's g
   of gas is filled; a pocket of liquid, a thin liquid sheet between two faces of gas, which the
   fold test meets alike, is refused;
 * **the mouth**: from each node of the pair along its wall, away from the pocket, while the wall
-  lies within the fill's width ``w_f`` (``groove.mouth`` times the fold's limit) of the other wall;
-  the first node at least ``w_f`` from it is the splice. Every part of the groove narrower than
+  lies within the fill's width ``w_f`` (``groove.mouth`` times the fold's limit) of the other wall
+  and has not turned out of the groove (``MOUTH_TURN`` from its tangent at the pair); the first
+  node at least ``w_f`` from it, or so turned, is the splice. Every part of the groove narrower than
   ``w_f`` is filled at once, so that the fold test does not meet the rest of the groove again on
-  the fresh mesh;
+  the fresh mesh, but not the surface the groove opens onto;
 * **the closure** from splice to splice, a cubic curve whose control points lie on the walls'
   tangents at the splices (C1 there), its handles ``eta`` times those of a circular arc turning by
   the angle between the tangents (``2c/3`` for a U-turn across the mouth chord ``c``), spaced from
@@ -57,6 +58,10 @@ from .events import (
 )
 
 SIDE_TOL = 1e-3  # a pocket is gas where at least 1 - SIDE_TOL of its area lies in the gas
+# the walk to the mouth ends where a wall's tangent has turned by this many degrees from its
+# tangent at the pair: the walls then open onto the surface around the groove, and the closure
+# across them still turns by at least 180 - 2 MOUTH_TURN degrees into the groove (30)
+MOUTH_TURN = 75.0
 BEZIER_SAMPLES = 4097  # samples of the closure's curve for its arclength
 CHAINS = ("open", "bubble", "ring")
 
@@ -78,7 +83,8 @@ class GrooveFill:
     ``closure`` the closure from next to the first splice to next to the second; ``fill`` the
     filled region ``Q`` (old gas that becomes liquid), of volume ``V_fill``; ``pocket`` the pocket
     of the fold pair; ``A_rem`` the area of the old surface between the splices, ``A_cl`` that of
-    the closure; ``i_s``, ``j_s`` the splices as old indices; ``checks`` the hard checks as read."""
+    the closure; ``i_s``, ``j_s`` the splices as old indices; ``h_arc`` the shortest chord of the
+    old surface between the splices; ``checks`` the hard checks as read."""
     chain: str
     pair: tuple
     gap: float
@@ -107,6 +113,7 @@ class GrooveFill:
     V_gas_before: float
     V_gas_after: float
     U_max: float = math.nan
+    h_arc: float = math.nan
     checks: dict = field(default_factory=dict)
 
     def summary(self) -> dict:
@@ -119,7 +126,7 @@ class GrooveFill:
                 "V_pocket": self.V_pocket, "A_rem": self.A_rem, "A_cl": self.A_cl,
                 "L_fill": self.L_fill, "r_c": self.r_c, "z_c": self.z_c,
                 "V_gas_before": self.V_gas_before, "V_gas_after": self.V_gas_after,
-                "checks": dict(self.checks)}
+                "U_max": self.U_max, "h_arc": self.h_arc, "checks": dict(self.checks)}
 
 
 def _unit(v) -> np.ndarray:
@@ -202,18 +209,29 @@ def closure_points(B, h_start: float, h_end: float, h_c: float) -> tuple[np.ndar
     return _bezier(B, tu), u, length
 
 
-def _march(P, start: int, step: int, other, width: float) -> int:
+def _tangent(P, k: int) -> np.ndarray:
+    return _unit(P[min(k + 1, len(P) - 1)] - P[max(k - 1, 0)])
+
+
+def _march(P, start: int, step: int, other, width: float,
+           max_turn: float | None = None) -> tuple[int, str]:
     """From node ``start`` of ``P`` in the direction ``step`` (-1 or +1), the first node at least
-    ``width`` from the polyline ``other``; -1 where the walk reaches the end of ``P`` first."""
+    ``width`` from the polyline ``other`` (``width``), or whose tangent has turned by more than
+    ``max_turn`` degrees (``MOUTH_TURN`` when None) from that at ``start`` (``turn``); ``(-1,
+    "end")`` where the walk reaches the end of ``P`` first."""
     import shapely
 
     line = shapely.LineString(np.asarray(other, dtype=float))
+    d0 = _tangent(P, int(start))
+    cos_max = math.cos(math.radians(MOUTH_TURN if max_turn is None else max_turn))
     k = int(start)
     while 0 <= k < len(P):
         if not float(shapely.distance(line, shapely.Point(P[k]))) < width:
-            return k
+            return k, "width"
+        if 0 < k < len(P) - 1 and float(np.dot(_tangent(P, k), d0)) < cos_max:
+            return k, "turn"
         k += step
-    return -1
+    return -1, "end"
 
 
 def groove_fill_geometry(chain: str, points, end_types, pair, *, width: float, eta: float,
@@ -285,9 +303,9 @@ def groove_fill_geometry(chain: str, points, end_types, pair, *, width: float, e
         refuse("side", f"the pocket of the fold pair is {side} (gas share {share:.6g}), not a "
                        "groove of gas")
     # the mouth: each wall walked away from the pocket while within the fill's width of the other
-    i_s = _march(Pw, a_w, -1, Pw[b_w:], width)
-    j_s = _march(Pw, b_w, +1, Pw[:a_w + 1], width)
-    checks.update(splices_walked=[int(i_s), int(j_s)])
+    i_s, why_s = _march(Pw, a_w, -1, Pw[b_w:], width)
+    j_s, why_e = _march(Pw, b_w, +1, Pw[:a_w + 1], width)
+    checks.update(splices_walked=[int(i_s), int(j_s)], mouth_ends=[why_s, why_e])
     if not (1 <= i_s < a_w and b_w < j_s <= len(Pw) - 2):
         refuse("mouth", "the mouth of the groove is not found within the chain (the walls stay "
                         f"within {width:.6g} of each other to its ends)")
@@ -390,4 +408,5 @@ def groove_fill_geometry(chain: str, points, end_types, pair, *, width: float, e
                       A_cl=revolved_area(np.vstack([Pw[i_s], C, Pw[j_s]])),
                       L_fill=float(np.max(np.hypot(Q[:, 0] - r_c, Q[:, 1] - z_c))), r_c=r_c,
                       z_c=z_c, V_gas_before=V_gas_before, V_gas_after=V_gas_after, U_max=U_max,
+                      h_arc=float(np.min(np.hypot(*np.diff(Pw[i_s:j_s + 1], axis=0).T))),
                       checks=checks)

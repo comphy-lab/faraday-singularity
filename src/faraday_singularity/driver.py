@@ -317,6 +317,16 @@ Courant number; ``jetcore.txt`` holds a row per step (``jetcore.COLUMNS``: what
 set the step, the split limit, the core, the far regions) and every leg the resolved keys
 (``limits.jetcore``).
 
+With the block's ``groove.enabled`` (``events.GrooveEventSettings``) a closing gas groove (class
+``A-groove``, of the open chain or the bubble; ``RF``, a fold of the ring) is met by its fill
+(``groovesurgery.groove_fill``, :meth:`CollapseDriver._meet_groove`): the gas beyond the groove's
+mouth becomes liquid, the run goes on from the fresh mesh (:meth:`CollapseDriver.
+reset_after_groove`), the fill a negative removal in ``events.txt`` and in the totals of
+``budget.txt``; a fill refused (a pocket of liquid, a sheet, among the refusals; one on the base or
+the core of the upward jet; one beyond ``groove.max_fill V_b``) is a resumable stop
+(``groove-fill-refused``). It comes before the far-head cut of ``pinch.far_head``, which then
+meets the gas necks alone.
+
 With the block's ``pinch.far_head`` an event without a handler (a gas neck, a closing groove)
 whose site lies on the head of a tracked neck in the far region is met by the liquid cut of that
 neck (``events.far_head_request``, kind ``far-head``, class ``F-head``, an event ``far-head``;
@@ -356,7 +366,8 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
                        jet_base, necks)
 from .episodes import ETA_HYS, EpisodeTracker
 from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, EVENT_SCHEMA,
-                     EVENT_STOPS, EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, IMPLEMENTED_HANDLERS,
+                     EVENT_STOPS, EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, GROOVE_CLASSES,
+                     GROOVE_FILL_REFUSED, IMPLEMENTED_HANDLERS,
                      LIQUID_CUT_REFUSED, PRECUT_EVENT, RING_CUT_REFUSED, RING_HANDLERS,
                      RING_REMOVAL_REFUSED, SIZING_KEYS, STOP_OUTCOMES, CascadeMonitor,
                      EventSettings, event_dump_policy, event_dumps_kept, event_neck, event_tip,
@@ -1781,10 +1792,12 @@ class CollapseDriver:
         return next((name for name, v in cands if v == dt), "none")
 
     def _filled(self) -> dict:
-        """What the ring surgeries made have filled of the gas since the gas cut (the column of the
-        ring cut, the ring at its removal): the volume, axial momentum and kinetic energy of the
-        liquid each put there (its record's ``filled``), summed; zero without one."""
-        rings = [e for e in self._made_events() if e.get("kind") in EVENT_CLASSES["ring"]
+        """What the ring surgeries and the fills of grooves made have filled of the gas since the
+        gas cut (the column of the ring cut, the ring at its removal, the gas beyond a groove's
+        mouth): the volume, axial momentum and kinetic energy of the liquid each put there (its
+        record's ``filled``), summed; zero without one."""
+        kinds = EVENT_CLASSES["ring"] + EVENT_CLASSES["gap"]
+        rings = [e for e in self._made_events() if e.get("kind") in kinds
                  and isinstance(e.get("filled"), dict)]
         return {"events": len(rings), **{key: sum((float(e["filled"].get(key) or 0.0)
                                                    for e in rings), 0.0)
@@ -1793,7 +1806,7 @@ class CollapseDriver:
     def _removed(self) -> dict:
         """What the events made have removed of the liquid since the gas cut: the volume, axial
         momentum and kinetic energy of each removed head at its cut (its record's ``removed``),
-        summed, and the number of events; with ring surgeries made (the ring stage), net of what
+        summed, and the number of events; with ring surgeries or fills of grooves made, net of what
         they filled (:meth:`_filled`, a fill a negative removal, counted among the events), so that
         the fill's own amounts make no jump in the totals of ``budget.txt`` (the projection's change
         of the whole liquid's momentum and the noise of the rebuild still enter them)."""
@@ -2981,12 +2994,16 @@ class CollapseDriver:
            state after the event is kept) and its row of ``events.txt``.
 
         With the block's ``ring.enabled`` the ring's handlers (``events.RING_HANDLERS``) are made
-        too (:meth:`_meet_ring`). In the ring stage the liquid cut of the open chain is made as
+        too (:meth:`_meet_ring`), and with ``groove.enabled`` the fill of a closing gas groove
+        (``events.GROOVE_CLASSES``, :meth:`_meet_groove`). In the ring stage the liquid cut of the
+        open chain is made as
         before, through the ring stage's own rebuild and transfer by projection, which keep the
         ring (``surgery.liquid_cut``; its record ``stage`` ``ring``), not through pyoomph's parked
         plan, whose open chart cannot carry the ring's loop."""
         if request.get("handler") in RING_HANDLERS and self.events.ring.enabled:
             return self._meet_ring(m, request)
+        if self.events.groove.enabled and request.get("class") in GROOVE_CLASSES:
+            return self._meet_groove(m, request)
         if request.get("handler") not in IMPLEMENTED_HANDLERS:
             far = self._far_head(request)
             if far is None:
@@ -3095,15 +3112,111 @@ class CollapseDriver:
                        **self._taus(m["time"])}
         return m, None
 
+    def _meet_groove(self, m: dict, request: dict) -> tuple[dict, dict | None]:
+        """Meet a closing gas groove (class ``A-groove`` or ``RF``) with the block's
+        ``groove.enabled``: the event after ``max_events`` made is a resumable stop
+        (``max-events``); the fill (``groovesurgery.groove_fill``), with no test of a cascade (no
+        tip of the axis makes it), the run's last step as the history's, the stops' fold limits,
+        and with ``jetcore`` the mask of the open chain's core, whose nodes no fill takes: a
+        refusal, which leaves the problem unchanged, is a resumable stop (``groove-fill-refused``),
+        and so are hard budgets that do not close (``event-unclosed``); any other failure ends the
+        run as a failed one, raised. Made: its row of ``events.txt``, the dumps the policy drops,
+        the meshes pruned, and the run goes on from the fresh mesh."""
+        if len(self._made_events()) >= self.events.max_events:
+            return m, self._event_stop(EVENT_LIMIT, request, max_events=self.events.max_events)
+        from .groovesurgery import groove_fill
+        from .surgery import BudgetUnclosed, CutRefused
+
+        st, r, s = self.state, self.reconnect, self.s
+        k = len(self._made_events()) + 1
+        eps = s.elements_per_scale if r.elements_per_scale is None else r.elements_per_scale
+        dt_prev = st.dt_prev if st.dt_prev else float(self._cut_record()["settings"]["dt0"])
+        core = self._post_cut_state().get("core")
+        fold = {"ratio": s.fold_ratio, "stop": self._fold_stop(),
+                "stop_elements": s.fold_stop_elements}
+        self._event_after = None
+        try:
+            made = groove_fill(self.pb, self.events, r, self.outdir, request, k=k,
+                               dt_prev=dt_prev, elements_per_scale=eps, h_floor=self._h_floor(),
+                               fold=fold, core=None if core is None else core["mask"],
+                               driver=self, on_made=self._on_groove_made)
+        except (CutRefused, BudgetUnclosed) as e:
+            rec = getattr(e, "record", None) or {}
+            reason = EVENT_UNCLOSED if isinstance(e, BudgetUnclosed) else GROOVE_FILL_REFUSED
+            extra = {"hard": (rec.get("closures") or {}).get("hard")} if reason == \
+                EVENT_UNCLOSED else {}
+            return m, self._event_stop(reason, request, precut=e.precut,
+                                       failed_at=rec.get("failed_at"),
+                                       error=rec.get("error", f"{type(e).__name__}: {e}"),
+                                       record=f"events/event_{k:03d}.json", **extra)
+        m = self._event_after
+        self._write_ring_event_row(made)
+        self._drop_event_dumps()
+        self._prune_meshes()
+        return m, None
+
+    def _on_groove_made(self, rec: dict):
+        """The driver's bookkeeping of a fill made (``groovesurgery.groove_fill``'s ``on_made``,
+        before the state after it is kept and its record written), into its record: the event's
+        place in the run (``step``, ``leg``, ``tau_over_delta2``, ``t_prime_over_T``, the source
+        ``commit``, ``dt.before``); then :meth:`reset_after_groove` and the commit of the jets'
+        bases and the kink regions of the fresh mesh (:meth:`_commit_post_cut`), which the state
+        after the event, kept next, holds as the run steps from it."""
+        st, delta = self.state, self.reconnect.delta
+        t_cut, t_p = self._cut_times()
+        T, tau_p = t_p - t_cut, rec.get("tau_p")
+        rec.update(step=st.step, leg=len(st.legs) - 1,
+                   tau_over_delta2=_finite(float(rec["tau"]) / delta**2),
+                   t_prime_over_T=(_finite(float(tau_p) / T) if tau_p is not None
+                                   and math.isfinite(T) and T != 0.0 else None),
+                   commit=self.leg_info.get("commit"))
+        rec.setdefault("dt", {})["before"] = _finite(st.dt_prev)
+        m_new = self.reset_after_groove(rec)
+        self._commit_post_cut(m_new)
+        self._event_after = m_new
+
+    def reset_after_groove(self, record: dict) -> dict:
+        """Restart the bookkeeping that the fill of a groove invalidates (``record`` its record)
+        and measure the fresh mesh, as :meth:`reset_after_event` does for a liquid cut: no new
+        cycle, the births, series, holds and last step kept; the growth limit of the local scale
+        and the rate limit of the step restart, the kink regions of the chain filled are dropped
+        and so is the apex history of the jet whose base the groove straddled, and the remesh
+        check of the step is not made on the fresh mesh (``_checks_pending`` cleared, so that the
+        state after the event is kept without ``resume_at``); the event ``groove-fill`` is
+        recorded and a profile written (reason ``groove-fill``)."""
+        st = self.state
+        st.ell_prev = st.t_prev = math.nan
+        chain = record.get("chain")
+        st.kinks.pop(chain, None)
+        st.kinks.pop(f"{chain}_far", None)  # jetcore's far kink of the chain
+        jet = (record.get("request") or {}).get("jet")
+        if jet is not None:
+            st.apex_history.pop(jet, None)
+        self._checks_pending = False
+        self._post_cut_cache = self._stop_cache = None
+        m = self.measure()
+        k = record.get("k")
+        filled = record.get("filled") or {}
+        self._event("groove-fill", m, k=k, kind=record.get("kind"),
+                    **{"class": record.get("class")}, chain=chain, V_fill=filled.get("V"),
+                    Pz_fill=filled.get("Pz"), KE_fill=filled.get("KE"),
+                    mouth=(record.get("geometry") or {}).get("mouth"),
+                    record=f"events/event_{int(k):03d}.json" if k is not None else None)
+        self._track_tips(m, snapshot=False)
+        self._snapshot(m, "groove-fill")
+        return m
+
     def _write_ring_event_row(self, rec: dict):
-        """The row of ``events.txt`` of a ring surgery made: its chain ``ring``, its fill as a
-        negative removal (``V_rem``, ``Pz_rem``, ``KE_rem``), its closures R1-R6 (Q1-Q6 for the
-        removal) relative to their scales in ``F1``-``F6``, the cutoff identity, the transfer's
-        counts, the step of the history and its wall time; every other column empty."""
+        """The row of ``events.txt`` of a ring surgery made, or of the fill of a groove: its chain
+        (``ring``; the chain filled for a fill), its fill as a negative removal (``V_rem``,
+        ``Pz_rem``, ``KE_rem``), its closures R1-R6 (Q1-Q6 for the removal, G1-G6 for a fill)
+        relative to their scales in ``F1``-``F6``, the cutoff identity, the transfer's counts, the
+        step of the history and its wall time; every other column empty."""
         filled = rec.get("filled") or {}
         closures = rec.get("closures") or {}
         rel = closures.get("relative") or {}
-        prefix = "Q" if rec.get("kind") == "ring-collapse" else "R"
+        groove = rec.get("kind") in EVENT_CLASSES["gap"]
+        prefix = "Q" if rec.get("kind") == "ring-collapse" else "G" if groove else "R"
         phi = closures.get(f"{prefix}3_phi") or {}
         tr = rec.get("transfer") or {}
         neg = {key: (-float(filled[x]) if filled.get(x) is not None else None)
@@ -3111,7 +3224,8 @@ class CollapseDriver:
         values = {"k": rec.get("k"), "step": rec.get("step"), "time": rec.get("t"),
                   "tau": rec.get("tau"), "tau_p": rec.get("tau_p"),
                   "tau_over_delta2": rec.get("tau_over_delta2"), "kind": rec.get("kind"),
-                  "class": rec.get("class"), "chain": "ring", **neg,
+                  "class": rec.get("class"), "chain": rec.get("chain") if groove else "ring",
+                  **neg,
                   **{f"F{i}": rel.get(f"{prefix}{i}") for i in range(1, 7)},
                   "phi_relative_error": phi.get("phi_relative_error"),
                   "predicted_unlocated": tr.get("predicted_unlocated"),
