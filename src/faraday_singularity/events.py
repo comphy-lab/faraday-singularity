@@ -105,6 +105,11 @@ RING_RHO_MAX = 0.8
 # the new liquid (the blend, as the ring cut's default, or zero), the classes of the events it is the
 # handler of (a fold of the open chain or the bubble, a fold of the ring's loop) and its name
 GROOVE_FILLS = ("blend", "zero")
+# how a fold whose pocket is liquid (a thin liquid sheet between two faces of gas) is met: as any
+# fold, an event (event), or as a sheet, logged and no event unless its faces close to the scale of
+# the mesh (log, groove.side_folds); the kind of the request of a sheet closed so
+GROOVE_SHEETS = ("event", "log")
+SHEET_CONTACT = "sheet-contact"
 GROOVE_CLASSES = ("A-groove", "RF")
 GROOVE_HANDLER = "groove-fill"
 # the kinds of the events a run makes, by class: the keys of a class are fixed after its first event
@@ -537,7 +542,14 @@ class GrooveEventSettings:
     delta, 2 L_fill)`` of the filled region, their hard limits floored at ``sigma_V``, ``sigma_Pz``
     and ``sigma_KE`` (the solver's units, none until set). A fill takes at most ``max_fill`` of the
     bubble's volume at the gas cut (``V_b``), the share below which the ring itself is removed by
-    default; a larger pocket (a lobe of the ring, a bubble pinching in two) is refused."""
+    default; a larger pocket (a lobe of the ring, a bubble pinching in two) is refused.
+
+    ``sheets`` says how the stops meet a fold of a chain or of the ring whose pocket is liquid, a
+    thin liquid sheet the fold test meets as it meets a groove: ``event`` as any fold (an event,
+    whose fill is then refused), ``log`` as a sheet (``groove.side_folds``: the fold of each side
+    found apart, so that a sheet hides no groove of gas), no event but a row of ``sheets.txt`` at
+    most once per rebuild, unless its faces close below ``sheet_contact`` element lengths of the
+    finer side (the kind ``sheet-contact``, without a handler: a resumable stop)."""
     enabled: bool = False
     mouth: float = 1.5
     cap_height: float = 1.0
@@ -550,11 +562,17 @@ class GrooveEventSettings:
     sigma_Pz: float = 0.0
     sigma_KE: float = 0.0
     max_fill: float = 0.01
+    sheets: str = "event"
+    sheet_contact: float = 1.0
 
     def __post_init__(self):
         from .reconnect import RESTARTS
 
         _flag("groove", "enabled", self.enabled)
+        if self.sheets not in GROOVE_SHEETS:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.groove.sheets must be one of "
+                             f"{GROOVE_SHEETS}")
+        _positive("groove", "sheet_contact", self.sheet_contact)
         _flag("groove", "projection", self.projection)
         if not (_number(self.mouth) and self.mouth >= 1.0):
             raise ValueError(f"collapse.{EVENTS_BLOCK}.groove.mouth must be at least one (the "
@@ -1183,7 +1201,11 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
 
     With ``pinch.enabled`` a tracked neck lands, and a fold that reaches its head lands it, only
     when it closes (:func:`closing_readings` from the driver's history ``pinch``, :func:`lands`,
-    :func:`head_lands`), the trigger's readings in the request (``pinch``)."""
+    :func:`head_lands`), the trigger's readings in the request (``pinch``). With ``groove.sheets``
+    ``log`` the fold of each chain is that of each side apart (``groove.side_folds``, ``side`` in
+    the request): one whose pocket is liquid, a sheet, is no event unless its faces close below
+    ``groove.sheet_contact`` element lengths of the finer side (``sheet-contact``, class
+    ``A-groove``, without a handler)."""
     from .reconnect import (Chain, adjacent_shoulders, chains_disjoint, chain_necks, edge_reading,
                             fold_contact, interface_guard, revolved_volume, spline_contact_stop)
     from .selfcontact import InterfaceSelfIntersection, fold_gap
@@ -1287,17 +1309,28 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
         if found is not None:  # no head classified: none to cut
             return _request("liquid-neck", "L-unhandled", detected_by="secondary-pinch", **found)
     # the closing folds: the one of each chain (fold_gap's, closest to its limit) and, so that a
-    # closer fold elsewhere on its chain hides none, the one of each tracked head
+    # closer fold elsewhere on its chain hides none, the one of each tracked head; with
+    # groove.sheets log the fold of each chain on each side apart (groove.side_folds), so that a
+    # sheet of liquid hides no groove of gas
     closing = {}
 
-    def offer(name, fold):
+    def offer(name, fold, side=None, h_fine=math.nan):
         fold_limit = max(stop_abs, fold_stop_elements * fold.h_elem)
         if math.isfinite(fold.gap) and fold.gap < fold_limit:
             closing.setdefault((name, tuple(fold.pair)), (fold.gap / fold_limit, name, fold,
-                                                          fold_limit))
+                                                          fold_limit, side, h_fine))
 
+    sheets = events.groove.sheets == "log"
     for name, fold in folds:
-        offer(name, fold)
+        if sheets:
+            from .groove import side_folds
+
+            for side, x in side_folds(dict(named)[name].points, loop=False, ratio=fold_ratio,
+                                      stop=stop_abs, stop_elements=fold_stop_elements,
+                                      search_factor=fold_search).items():
+                offer(name, x["fold"], side, x["h_fine"])
+        else:
+            offer(name, fold)
     points = {name: c.points for name, c in named}
     for x in necks:
         if x.get("head") is not None:
@@ -1305,12 +1338,14 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
                                         ratio=fold_ratio, stop=stop_abs,
                                         stop_elements=fold_stop_elements,
                                         search_factor=fold_search))
-    landing, kinks, grooves = [], [], []
-    for score, name, fold, fold_limit in closing.values():
+    landing, kinks, grooves, contacts = [], [], [], []
+    for score, name, fold, fold_limit, side, h_fine in closing.values():
         rec = {"chain": name, "contact": fold_contact(fold.arc, fold.h_elem),
                "fold_gap": fold.gap, "fold_r": fold.r, "fold_z": fold.z, "fold_arc": fold.arc,
                "fold_h_elem": fold.h_elem, "fold_limit": fold_limit,
                "fold_pair": list(fold.pair), "kappa_g": events.gap.kappa_g}
+        if side is not None:
+            rec["side"] = side
         a, b = fold.pair
         jet = next((x for x in (apexes or {}).get(name, []) if a < int(x["index"]) < b), None)
         if jet is not None:
@@ -1323,6 +1358,12 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
             # (nothing to fill or cut), the stop of the cut's own stops
             reason = "self-contact-approach" if jet is None else "annular-contact-approach"
             kinks.append((score, {"reason": reason, "trigger": "fold-gap", **rec}))
+            continue
+        if side == "liquid":  # a sheet: no event, unless its faces close to the scale of the mesh
+            contact_limit = events.groove.sheet_contact * h_fine
+            if fold.gap < contact_limit:
+                contacts.append((score, {**rec, "h_fine": h_fine,
+                                         "sheet_contact_limit": contact_limit}))
             continue
         head = head_of_fold(fold.pair, [x for x in necks if x["chain"] == name])
         if head is not None:
@@ -1337,6 +1378,12 @@ def post_cut_events(chains, cut, settings, h_min: float, events: EventSettings, 
         return _request("a-head", "A-head" if head["status"] == "head" else "L-unhandled", **rec)
     if kinks:
         return min(kinks, key=lambda x: x[0])[1]
+    if contacts and (not grooves or min(contacts, key=lambda x: x[0])[0]
+                     < min(grooves, key=lambda x: x[0])[0]):
+        # a sheet whose faces meet, closer to its limit than any groove: no handler
+        req = _request(SHEET_CONTACT, "A-groove", **min(contacts, key=lambda x: x[0])[1])
+        req["handler"] = None
+        return req
     if grooves:  # the groove closest to its limit, on either chain
         return _request("groove", "A-groove", **min(grooves, key=lambda x: x[0])[1])
     found = secondary("gas")

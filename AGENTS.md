@@ -443,7 +443,13 @@ add a second top-level `cases/` tree.
   `project(box=<grid>)`); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`);
   `groove-fill-refused` a resumable stop; the record kind `groove-fill` (`EVENT_CLASSES["gap"]`),
   a row of `events.txt`, `budget.txt` net of it (`CollapseDriver._filled`),
-  `CollapseDriver.reset_after_groove`. Runs without the part, or with it and no groove met, are
+  `CollapseDriver.reset_after_groove`. With `groove.sheets` `log` (default `event`) the stops'
+  chain and ring folds are selected per side (`groove.side_folds`, `side` in the request): a
+  liquid pocket, a sheet, is no event but a row of `sheets.txt` (`driver.SHEET_COLUMNS`,
+  `CollapseDriver._log_sheets`, `groove.sheet_reading`) at most once per rebuild, and its faces
+  below `sheet_contact` element lengths of the finer side the kind `sheet-contact`, without a
+  handler (`events.SHEET_CONTACT`, never routed to the fill); `test_groove_sheets.py`. Runs
+  without the part, or with it and no groove met, are
   those of 89f7f49 (`testCases/test_groove_identity.py`), besides every earlier pin;
   `test_groove_settings.py`, `test_groove_geometry.py`, `test_groove_driver.py` (stand-ins) and
   `test_groove_fem.py` (a finger of gas of a ring and a slot of the open chain filled, the

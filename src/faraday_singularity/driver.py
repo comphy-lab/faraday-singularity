@@ -325,7 +325,10 @@ reset_after_groove`), the fill a negative removal in ``events.txt`` and in the t
 ``budget.txt``; a fill refused (a pocket of liquid, a sheet, among the refusals; one on the base or
 the core of the upward jet; one beyond ``groove.max_fill V_b``) is a resumable stop
 (``groove-fill-refused``). It comes before the far-head cut of ``pinch.far_head``, which then
-meets the gas necks alone.
+meets the gas necks alone. With ``groove.sheets`` ``log`` a fold whose pocket is liquid, a thin
+sheet, is no event (``groove.side_folds``) but a row of ``sheets.txt`` at most once per rebuild
+(:meth:`CollapseDriver._log_sheets`), and its faces closing to the scale of the mesh a resumable
+stop (``sheet-contact``, never the fill).
 
 With the block's ``pinch.far_head`` an event without a handler (a gas neck, a closing groove)
 whose site lies on the head of a tracked neck in the far region is met by the liquid cut of that
@@ -367,7 +370,7 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
 from .episodes import ETA_HYS, EpisodeTracker
 from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, EVENT_SCHEMA,
                      EVENT_STOPS, EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, GROOVE_CLASSES,
-                     GROOVE_FILL_REFUSED, IMPLEMENTED_HANDLERS,
+                     GROOVE_FILL_REFUSED, IMPLEMENTED_HANDLERS, SHEET_CONTACT,
                      LIQUID_CUT_REFUSED, PRECUT_EVENT, RING_CUT_REFUSED, RING_HANDLERS,
                      RING_REMOVAL_REFUSED, SIZING_KEYS, STOP_OUTCOMES, CascadeMonitor,
                      EventSettings, event_dump_policy, event_dumps_kept, event_neck, event_tip,
@@ -657,6 +660,13 @@ RING_COLUMNS = ("step", "time", "tau", "tau_p", "dt", "ring_volume", "ring_volum
 # the step, the snapshot, the remesh check, the commit after the cut and the dump; the total
 STEP_TIMING_COLUMNS = ("step", "time", "dt", "top", "solve", "measure", "rows", "stops", "snapshot",
                        "remesh", "commit", "dump", "total")
+# sheets.txt, with the block's groove.sheets log only: a row per sheet (a fold of a chain or of the
+# ring whose pocket is liquid, groove.side_folds) at most once per rebuild: its chain and pair, the
+# fold's limit and the limit of its faces' contact, the element length of its finer side, and what
+# groove.sheet_reading reads of its pocket
+SHEET_COLUMNS = ("step", "time", "tau", "tau_p", "remesh_count", "chain", "a", "b", "r", "z",
+                 "thickness", "fold_limit", "h_fine", "contact_limit", "arc", "length",
+                 "tip_distance", "tip_r", "tip_z", "area", "mean_thickness", "volume")
 
 
 def _table_cell(v) -> str:
@@ -816,6 +826,11 @@ class CollapseDriver:
         # the making hands its record (_meet_event, _on_event_made)
         self._event_rows = self._drops = self._budget = None
         self._ring_rows = None  # ring.txt, opened in the ring stage only (_open_ring_rows)
+        # sheets.txt, with groove.sheets log only, opened at its first row (_log_sheets): the
+        # rebuild of its last rows and the rows written
+        self._sheet_rows = None
+        self._sheets_rc = None
+        self._sheets_logged = 0
         self._dumps_dropped = 0  # the dumps of events the policy deleted (post.keep_event_dumps)
         self._meshes_pruned = 0  # the files of meshes no dump refers to deleted (post.prune_gmsh)
         self._event_before: tuple | None = None
@@ -885,7 +900,7 @@ class CollapseDriver:
         if self._chains is not None:
             self._chains.close()
         for f in (self._event_rows, self._drops, self._budget, self._noise, self._ring_rows,
-                  self._timing, self._jetcore_rows):
+                  self._timing, self._jetcore_rows, self._sheet_rows):
             if f is not None:
                 f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
@@ -1739,6 +1754,61 @@ class CollapseDriver:
             self._write_ring_row(dt)
         if self._jetcore_rows is not None:  # with jetcore only
             self._write_jetcore_row(m, dt)
+        if self.events is not None and self.events.groove.sheets == "log":
+            self._log_sheets()
+
+    def _log_sheets(self):
+        """With the block's ``groove.sheets`` ``log``: the sheets of the state, at most once per
+        rebuild (the first state of a rebuild that has one), each a row of ``sheets.txt``
+        (:data:`SHEET_COLUMNS`, opened at its first row): on each chain and the ring the fold whose
+        pocket is liquid (``groove.side_folds``) that closes below the fold's limit at the scale of
+        the resolved surface (``contact`` ``fold``), which the stops meet as no event, and what
+        ``groove.sheet_reading`` reads of its pocket (thickness at the pair, length beyond it, tip,
+        area, mean thickness, volume)."""
+        if self.pb.remesh_count == self._sheets_rc:
+            return
+        from .groove import sheet_reading, side_folds
+        from .reconnect import fold_contact
+
+        s, pc, t = self.s, self._post_cut_state(), self._t()
+        kw = {"ratio": s.fold_ratio, "stop": self._fold_stop(),
+              "stop_elements": s.fold_stop_elements, "search_factor": FOLD_SEARCH}
+        items = []
+        for c in pc["segs"]:
+            P = np.column_stack([c["r"], c["z"]]).astype(float)
+            for k, end in ((0, 0), (-1, 1)):
+                if c["end_types"][end] == AXIS:
+                    P[k, 0] = 0.0
+            items.append(("open" if c["open"] else "bubble", P, False))
+        items += [("ring", np.column_stack([x["r"], x["z"]]), True)
+                  for x in pc.get("loops") or []]
+        rows = []
+        for name, P, loop in items:
+            x = side_folds(P, loop=loop, **kw)["liquid"]
+            f = x["fold"]
+            limit = max(kw["stop"], s.fold_stop_elements * f.h_elem)
+            if not (math.isfinite(f.gap) and f.gap < limit) or fold_contact(f.arc,
+                                                                             f.h_elem) != "fold":
+                continue
+            rd = sheet_reading(P, f.pair, loop=loop)
+            rows.append({"step": self.state.step, "time": t, **self._taus(t),
+                         "remesh_count": self.pb.remesh_count, "chain": name,
+                         "a": rd["pair"][0], "b": rd["pair"][1], "fold_limit": limit,
+                         "h_fine": x["h_fine"],
+                         "contact_limit": self.events.groove.sheet_contact * x["h_fine"],
+                         **{k: rd[k] for k in ("r", "z", "thickness", "arc", "length",
+                                               "tip_distance", "tip_r", "tip_z", "area",
+                                               "mean_thickness", "volume")}})
+        if not rows:
+            return
+        if self._sheet_rows is None:
+            self._sheet_rows = open(self.outdir / "sheets.txt", "w", buffering=1)
+            self._sheet_rows.write("# " + "\t".join(SHEET_COLUMNS) + "\n")
+        for row in rows:
+            self._sheet_rows.write("\t".join(_table_cell(row[c]) for c in SHEET_COLUMNS)
+                                   + "\n")
+        self._sheets_rc = self.pb.remesh_count
+        self._sheets_logged += len(rows)
 
     def _write_jetcore_row(self, m: dict, dt: float):
         """The row of ``jetcore.txt`` of a step after the cut (``jetcore.COLUMNS``): the step just
@@ -3002,7 +3072,8 @@ class CollapseDriver:
         plan, whose open chart cannot carry the ring's loop."""
         if request.get("handler") in RING_HANDLERS and self.events.ring.enabled:
             return self._meet_ring(m, request)
-        if self.events.groove.enabled and request.get("class") in GROOVE_CLASSES:
+        if self.events.groove.enabled and request.get("class") in GROOVE_CLASSES and \
+                request.get("kind") != SHEET_CONTACT:
             return self._meet_groove(m, request)
         if request.get("handler") not in IMPLEMENTED_HANDLERS:
             far = self._far_head(request)
@@ -3534,6 +3605,7 @@ class CollapseDriver:
                 "dumps_dropped": self._dumps_dropped, "meshes_pruned": self._meshes_pruned,
                 "box_noise": self._box_noise_summary(),
                 **({"ring": self._ring_summary()} if self._ring() is not None else {}),
+                **({"sheets": self._sheets_logged} if self._sheets_logged else {}),
                 "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
                                                          "handler", "record")}
                          if stop.get("reason") in EVENT_STOPS else None)}

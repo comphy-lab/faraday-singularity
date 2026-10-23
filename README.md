@@ -676,6 +676,13 @@ made is an event of kind `groove-fill` (`events/event_<k>.json` with the filled 
 and the pocket), a row of `events.txt` (its fill a negative removal, its closures in `F1`-`F6`) and
 a fill in the totals of `budget.txt`, which stay net of it. The triple of its length scale is
 `gap.kappa_g` (the trigger `kappa_g delta`), run as branches from the state before the first fill.
+The fold test meets a thin liquid sheet between two faces of gas as it meets a groove; with
+`groove.sheets` `log` (`event` by default) the stops select the fold of each chain and of the ring
+on each side apart, so that a sheet hides no groove of gas: a fold whose pocket is liquid is no
+event but a row of `sheets.txt` (its thickness at the pair, its length beyond it, its tip, area,
+mean thickness and volume) at most once per rebuild, and only its faces closing below
+`groove.sheet_contact` element lengths of the finer side (1) is one, `sheet-contact`, without a
+handler (a resumable stop).
 
 The block's `jetcore` part (off by default, and written into the block and its hash only where it
 differs from its defaults; every key a key of the leg, its sizing keys among `events.SIZING_KEYS`)

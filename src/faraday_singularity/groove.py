@@ -30,6 +30,13 @@ following its gas to a closure the mesh cannot make. This module is the fill's g
   that becomes liquid, of volume ``V_fill``; and the new chain, or the new loop, oriented and
   seamed as the ring's is.
 
+The side of a fold (:func:`side_folds`, with the block's ``groove.sheets`` ``log``): the fold test
+meets a thin liquid sheet between two faces of gas as it meets a groove, so the stops then select
+the fold of each chain and of the ring on each side apart (the pocket's polygon counter-clockwise
+in the chain's direction, gas; clockwise, liquid), a sheet is no event but a record
+(:func:`sheet_reading`: its thickness at the pair, its length beyond it, its tip, area, mean
+thickness and volume), and only its faces closing to the scale of the mesh is one.
+
 Hard checks refuse a fill before anything changes (:class:`GrooveFillRefused`): a pair at a chain's
 end, a pocket that is not simple or not gas, a mouth not found within the chain, a fill on the core
 of the upward jet (``protected``), a closure that leaves the old gas or makes a knife-edge angle at a
@@ -410,3 +417,122 @@ def groove_fill_geometry(chain: str, points, end_types, pair, *, width: float, e
                       z_c=z_c, V_gas_before=V_gas_before, V_gas_after=V_gas_after, U_max=U_max,
                       h_arc=float(np.min(np.hypot(*np.diff(Pw[i_s:j_s + 1], axis=0).T))),
                       checks=checks)
+
+
+# --- the side of a fold: a groove of gas, or a sheet of liquid ------------------------------------
+
+
+def side_folds(points, *, loop: bool, ratio: float, stop: float, stop_elements: float,
+               search_factor: float) -> dict:
+    """The fold of a chain or of the ring's loop on each side of the free surface, selected as
+    ``selfcontact.fold_gap`` (``ring.loop_fold_gap`` for a loop) selects the fold of the whole
+    chain, among the pairs whose pocket (the arc between them, the shorter way round a loop, and
+    the chord) is gas and among those whose pocket is liquid, apart: ``{"gas": ..., "liquid":
+    ...}``, each ``{"fold": FoldGap, "h_fine": ...}`` with ``h_fine`` the element length of the
+    finer side of its pair (twice the smaller node spacing; NaN without a fold). The gas lies on the
+    left of every chain as the project orders them (the open chain from the axis to the wall, the
+    bubble upwards, the ring counter-clockwise), so a pocket is gas where its polygon, the arc in
+    the chain's direction closed by the chord, is counter-clockwise (its signed area, from prefix
+    sums of the chords' cross products, not negative). The fold of the whole chain is the one of
+    the two closer to its limit, so that a sheet of liquid, met apart, hides no groove of gas.
+    ``crossed`` is left False: the caller reads it from the fold of the whole chain."""
+    from scipy.spatial import cKDTree
+
+    from .ring import loop_spacing, loop_steps
+    from .selfcontact import NO_FOLD, FoldGap
+
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    n = len(P)
+    empty = {side: {"fold": NO_FOLD, "h_fine": math.nan} for side in ("gas", "liquid")}
+    if n < (4 if loop else 3):
+        return empty
+    if loop:
+        ds = loop_steps(P)
+        s = np.concatenate([[0.0], np.cumsum(ds)[:-1]])
+        S = float(ds.sum())
+        spacing = loop_spacing(P)
+    else:
+        ds = np.hypot(*np.diff(P, axis=0).T)
+        s = np.concatenate([[0.0], np.cumsum(ds)])
+        S = float(s[-1])
+        spacing = np.empty(n)
+        spacing[0], spacing[-1] = ds[0], ds[-1]
+        spacing[1:-1] = 0.5 * (ds[:-1] + ds[1:])
+    r, z = P[:, 0], P[:, 1]
+    cross = r * np.roll(z, -1) - np.roll(r, -1) * z  # chord k to k + 1, the closing one last
+    C = np.concatenate([[0.0], np.cumsum(cross[:-1])])  # C[k]: the chords before node k
+    A_loop = 0.5 * float(cross.sum())
+    radii = search_factor * np.maximum(stop, 2.0 * stop_elements * spacing)
+    tree = cKDTree(P)
+    best = {"gas": (math.inf, None), "liquid": (math.inf, None)}
+    for start in range(0, n, 128):
+        nodes = np.arange(start, min(start + 128, n))
+        near = tree.query_ball_point(P[nodes], radii[nodes])
+        i = np.repeat(nodes, [len(x) for x in near])
+        j = np.concatenate(near).astype(int) if len(i) else np.zeros(0, dtype=int)
+        unique = (spacing[i] > spacing[j]) | ((spacing[i] == spacing[j]) & (i < j))
+        i, j = i[unique], j[unique]
+        D = np.hypot(*(P[i] - P[j]).T)
+        A = np.abs(s[i] - s[j])
+        lo, hi = np.minimum(i, j), np.maximum(i, j)
+        area = 0.5 * (C[hi] - C[lo] + (r[hi] * z[lo] - r[lo] * z[hi]))
+        if loop:
+            back = A > S - A  # the shorter way round runs through the seam
+            A = np.minimum(A, S - A)
+            area = np.where(back, A_loop - area, area)
+        fold = ratio * D < A
+        if not fold.any():
+            continue
+        score = D / np.maximum(stop, stop_elements * (spacing[i] + spacing[j]))
+        gas = area >= 0.0
+        for side, mask in (("gas", fold & gas), ("liquid", fold & ~gas)):
+            if mask.any():
+                k = np.flatnonzero(mask)[np.argmin(score[mask])]
+                if score[k] < best[side][0]:
+                    best[side] = (float(score[k]), (int(i[k]), int(j[k])))
+    out = {}
+    for side, (_, pair) in best.items():
+        if pair is None:
+            out[side] = empty[side]
+            continue
+        a, b = sorted(pair)
+        m = 0.5 * (P[a] + P[b])
+        arc = abs(float(s[b] - s[a]))
+        if loop:
+            arc = min(arc, S - arc)
+        out[side] = {"fold": FoldGap(float(np.hypot(*(P[a] - P[b]))), float(m[0]), float(m[1]),
+                                     (a, b), arc, float(spacing[a] + spacing[b]), False),
+                     "h_fine": 2.0 * float(min(spacing[a], spacing[b]))}
+    return out
+
+
+def sheet_reading(points, pair, *, loop: bool) -> dict:
+    """What the record of a sheet holds of the pocket of liquid a fold pair closes off (the arc
+    between the pair, the shorter way round a loop, and the chord): its thickness at the pair (the
+    pair's distance), the arc, the length beyond the pair (half the arc, and the distance of its
+    tip, the node of the pocket farthest from the pair's midpoint), its area, mean thickness (the
+    area over half the arc), volume of revolution and centroid, the tip's place."""
+    from .reconnect import revolved_volume
+
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    n = len(P)
+    a, b = sorted(int(k) for k in pair)
+    Q = P[a:b + 1]
+    if loop:
+        back = np.vstack([P[b:], P[:a + 1]])
+        if np.sum(np.hypot(*np.diff(back, axis=0).T)) < np.sum(np.hypot(*np.diff(Q, axis=0).T)):
+            Q = back
+    arc = float(np.sum(np.hypot(*np.diff(Q, axis=0).T)))
+    m = 0.5 * (P[a] + P[b])
+    k = int(np.argmax(np.hypot(Q[:, 0] - m[0], Q[:, 1] - m[1])))
+    x, y = Q[:, 0], Q[:, 1]
+    cross = x * np.roll(y, -1) - np.roll(x, -1) * y
+    A = 0.5 * float(cross.sum())
+    rc = float(np.sum((x + np.roll(x, -1)) * cross) / (6.0 * A)) if A else math.nan
+    zc = float(np.sum((y + np.roll(y, -1)) * cross) / (6.0 * A)) if A else math.nan
+    return {"pair": [a, b], "nodes": int(len(Q)), "thickness": float(np.hypot(*(P[a] - P[b]))),
+            "r": float(m[0]), "z": float(m[1]), "arc": arc, "length": 0.5 * arc,
+            "tip_distance": float(np.hypot(Q[k, 0] - m[0], Q[k, 1] - m[1])),
+            "tip_r": float(Q[k, 0]), "tip_z": float(Q[k, 1]), "area": abs(A),
+            "mean_thickness": abs(A) / (0.5 * arc) if arc > 0.0 else math.nan,
+            "volume": revolved_volume(Q), "r_c": rc, "z_c": zc, "n_chain": n}

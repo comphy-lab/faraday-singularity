@@ -798,11 +798,14 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
        guard last. Not tested: the piercing (no bubble), the bridge (the axis is liquid up to the
        cavity's tip) and the bubble emptying. The ring's own events have no handler but the
        removal's, and with the block's ``groove.enabled`` the fill of a groove for ``RF`` (its
-       request then names it, ``handler`` ``groove-fill``): each other is a resumable stop. With ``pinch.enabled`` the open chain's necks land
+       request then names it, ``handler`` ``groove-fill``): each other is a resumable stop. With
+       ``groove.sheets`` ``log`` the folds of the open chain and of the ring are those of each side
+       apart (``groove.side_folds``): a sheet of liquid is no event unless its faces close to the
+       scale of the mesh (``sheet-contact``, without a handler). With ``pinch.enabled`` the open chain's necks land
        only when they close, as in ``events.post_cut_events`` (``pinch``, the driver's history)."""
     from shapely.geometry import LineString
 
-    from .events import (GROOVE_HANDLER, _neck_fields, _pinch_field, _request,
+    from .events import (GROOVE_HANDLER, SHEET_CONTACT, _neck_fields, _pinch_field, _request,
                          closing_readings, fold_stop_after_cut, head_fold, head_lands,
                          head_of_fold, lands, liquid_necks)
     from .reconnect import (Chain, adjacent_shoulders, chain_necks, edge_reading, fold_contact,
@@ -922,27 +925,45 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
             return _request("liquid-neck", "L-unhandled", detected_by="secondary-pinch", **found)
     closing = {}
 
-    def offer(name, f):
+    def offer(name, f, side=None, h_fine=math.nan):
         fold_limit = max(stop_abs, fold_stop_elements * f.h_elem)
         if math.isfinite(f.gap) and f.gap < fold_limit:
-            closing.setdefault((name, tuple(f.pair)), (f.gap / fold_limit, name, f, fold_limit))
+            closing.setdefault((name, tuple(f.pair)), (f.gap / fold_limit, name, f, fold_limit,
+                                                       side, h_fine))
 
-    offer("open", fold)
+    # with groove.sheets log the fold of the open chain and of the ring on each side apart
+    # (groove.side_folds), so that a sheet of liquid hides no groove of gas
+    sheets = events.groove.sheets == "log"
+    fold_kw = {"ratio": fold_ratio, "stop": stop_abs, "stop_elements": fold_stop_elements,
+               "search_factor": fold_search}
+    if sheets:
+        from .groove import side_folds
+
+        for side, x in side_folds(cavity.points, loop=False, **fold_kw).items():
+            offer("open", x["fold"], side, x["h_fine"])
+    else:
+        offer("open", fold)
     for x in necks:
         if x.get("head") is not None:
             offer("open", head_fold(cavity.points, x["head"], x["index"], ratio=fold_ratio,
                                     stop=stop_abs, stop_elements=fold_stop_elements,
                                     search_factor=fold_search))
     if L is not None:
-        offer("ring", loop_fold_gap(L, ratio=fold_ratio, stop=stop_abs,
-                                    stop_elements=fold_stop_elements,
-                                    search_factor=fold_search))
+        if sheets:
+            for side, x in side_folds(L, loop=True, **fold_kw).items():
+                offer("ring", x["fold"], side, x["h_fine"])
+        else:
+            offer("ring", loop_fold_gap(L, ratio=fold_ratio, stop=stop_abs,
+                                        stop_elements=fold_stop_elements,
+                                        search_factor=fold_search))
     landing, kinks, grooves = [], [], []
-    for score, name, f, fold_limit in closing.values():
+    for score, name, f, fold_limit, side, h_fine in closing.values():
         rec = {"chain": name, "contact": fold_contact(f.arc, f.h_elem), "fold_gap": f.gap,
                "fold_r": f.r, "fold_z": f.z, "fold_arc": f.arc, "fold_h_elem": f.h_elem,
                "fold_limit": fold_limit, "fold_pair": list(f.pair),
                "kappa_g": events.gap.kappa_g}
+        if side is not None:
+            rec["side"] = side
         jet = None
         if name == "open":
             a, b = f.pair
@@ -956,6 +977,13 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
         if rec["contact"] == "kink":
             reason = "self-contact-approach" if jet is None else "annular-contact-approach"
             kinks.append((score, {"reason": reason, "trigger": "fold-gap", **rec}))
+            continue
+        if side == "liquid":  # a sheet: no event, unless its faces close to the scale of the mesh
+            contact_limit = events.groove.sheet_contact * h_fine
+            if f.gap < contact_limit:
+                grooves.append((score, "RF" if name == "ring" else "A-groove",
+                                {**rec, "h_fine": h_fine, "sheet_contact_limit": contact_limit,
+                                 "sheet_contact": True}))
             continue
         if name == "ring":
             grooves.append((score, "RF", rec))
@@ -975,6 +1003,10 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
         return min(kinks, key=lambda x: x[0])[1]
     if grooves:
         _, cls, rec = min(grooves, key=lambda x: x[0])
+        if rec.pop("sheet_contact", False):  # a sheet whose faces meet: no handler
+            req = _request(SHEET_CONTACT, cls, **rec)
+            req["handler"] = None
+            return req
         req = _request("groove" if cls == "A-groove" else "ring-fold", cls, **rec)
         if cls == "RF" and events.groove.enabled:  # its handler, the fill of a groove, made
             req["handler"] = GROOVE_HANDLER

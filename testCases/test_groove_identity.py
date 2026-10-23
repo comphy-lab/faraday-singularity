@@ -11,8 +11,9 @@ Without the part ``groove`` every run is 89f7f49's to the byte:
 * the finite-element run of the synthetic pierced state with ``ring.enabled``
   (``test_ring_identity.py``): the ring cut made by the driver and the steps of the ring stage.
 
-With ``groove.enabled`` and no groove met, the same finite-element runs have the same solution to
-the byte: only the records hold the part (the block's settings and its hash).
+With ``groove.enabled`` (and ``groove.sheets`` ``log``, the side-aware fold test) and no groove
+or sheet met, the same finite-element runs have the same solution to the byte: only the records
+hold the part (the block's settings and its hash).
 """
 
 from __future__ import annotations
@@ -121,12 +122,15 @@ def _same_solution(ref: Path, head: Path) -> list[str]:
 def test_with_groove_enabled_and_no_groove_the_finite_element_run_is_89f7f49s(tmp_path):
     ref = _reference_src(tmp_path, BASE)
     runs = {"ref": _run_fem(ref, tmp_path / "ref", _spec()),
-            "head": _run_fem(ROOT / "src", tmp_path / "head", _spec(groove={"enabled": True}))}
+            "head": _run_fem(ROOT / "src", tmp_path / "head",
+                             _spec(groove={"enabled": True, "sheets": "log"}))}
     _same_solution(runs["ref"], runs["head"])
     result = json.loads((runs["head"] / "result.json").read_text())
     assert result["steps"] == 6 and result["events"]["made"] == 0
     meta = json.loads(next((runs["head"] / "states").glob("state_*.json")).read_text())
     assert meta["events_settings"]["groove"]["enabled"] is True
+    assert meta["events_settings"]["groove"]["sheets"] == "log"
+    assert not (runs["head"] / "sheets.txt").exists()
 
 
 RING_RUN_GROOVE = RING_RUN.replace(
@@ -134,7 +138,7 @@ RING_RUN_GROOVE = RING_RUN.replace(
                                              "sigma_KE": 1e-6}})''',
     '''block = ev.EventSettings.from_dict({"ring": {"enabled": True, "sigma_V": 1e-6, "sigma_Pz": 1e-6,
                                              "sigma_KE": 1e-6},
-                                    **({"groove": {"enabled": True}}
+                                    **({"groove": {"enabled": True, "sheets": "log"}}
                                        if hasattr(ev, "GrooveEventSettings") else {})})''')
 assert RING_RUN_GROOVE != RING_RUN
 
