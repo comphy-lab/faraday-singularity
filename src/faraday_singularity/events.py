@@ -31,14 +31,17 @@ The block has four parts and a few keys of its own:
   core, ``jetcore.py``) as before and meshes and steps the rest of the free surface (the far
   region) under simplifying assumptions; ``pinch`` (:class:`PinchSettings`): when a tracked neck
   with a head is cut. Both are off by default and written into the block only where they differ
-  from their defaults, as ``ring`` is;
+  from their defaults, as ``ring`` is; ``groove`` (:class:`GrooveEventSettings`): the fill of a
+  closing gas groove of a chain or of the ring (``groovesurgery.groove_fill``, the handler of the
+  classes ``A-groove`` and ``RF``), off by default and written likewise;
 * of its own: the most events a run makes (``max_events``) and the test of a cascade of events at
   one tip (``cascade_min_interval``, ``cascade_ratio``, ``cascade_count``).
 
 Which keys a restart may change: the keys of ``liquid``, ``gap`` and ``ring`` are the keys of their
-class of events (:meth:`EventSettings.class_keys`), and those of ``pinch`` keys of the class
-``liquid`` (:data:`EventSettings.CLASS_OF_PART`), fixed once an event of the class has been made
-(for ``ring``, the cut of the piercing or the ring's removal), except in a restart from the state
+class of events (:meth:`EventSettings.class_keys`), those of ``pinch`` keys of the class ``liquid``
+and those of ``groove`` keys of the class ``gap`` (:data:`EventSettings.CLASS_OF_PART`), fixed once
+an event of the class has been made (for ``ring``, the cut of the piercing or the ring's removal;
+for ``gap``, the fill of a groove), except in a restart from the state
 before an event (``precut_e<k>``), from which they apply anew; every other key is a key of the leg,
 which any restart may change (:meth:`EventSettings.refused_changes`), ``ring.after_removal`` and
 every key of ``jetcore`` among them (:data:`EventSettings.LEG_KEYS_OF_CLASSES`). Lengths and times
@@ -98,6 +101,12 @@ CAP_FILLS = ("sample", "transfer")  # the velocity of its nodes: the old bulk's,
 RING_FILLS = ("blend", "zero")
 RING_AFTER_REMOVAL = ("stop", "continue")
 RING_RHO_MAX = 0.8
+# the fill of a closing gas groove (GrooveEventSettings, groovesurgery.groove_fill): the velocity of
+# the new liquid (the blend, as the ring cut's default, or zero), the classes of the events it is the
+# handler of (a fold of the open chain or the bubble, a fold of the ring's loop) and its name
+GROOVE_FILLS = ("blend", "zero")
+GROOVE_CLASSES = ("A-groove", "RF")
+GROOVE_HANDLER = "groove-fill"
 # the kinds of the events a run makes, by class: the keys of a class are fixed after its first event
 EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head", "far-head"), "gap": ("groove-fill",),
                  "ring": ("piercing", "ring-collapse")}
@@ -507,6 +516,64 @@ class PinchSettings:
         _pending(self)
 
 
+@dataclass(frozen=True)
+class GrooveEventSettings:
+    """``groove``: the fill of a closing gas groove (``groovesurgery.groove_fill``), the handler of
+    the classes ``A-groove`` (a fold of the open chain or the bubble) and ``RF`` (a fold of the
+    ring's loop). Off by default, when both stay events without a handler, and written into the
+    block only where it differs from its defaults, as ``ring`` is; its keys are keys of the class
+    ``gap`` (:data:`EventSettings.CLASS_OF_PART`), fixed once a fill has been made, so that the
+    triple of the fill's length scale is ``gap.kappa_g`` (the trigger ``kappa_g delta``) run as
+    branches from the state before the first fill.
+
+    The gas beyond the groove's mouth becomes liquid (``groove.groove_fill_geometry``): of the
+    pocket the fold pair closes off (gas only: a pocket of liquid, a thin sheet, is refused) every
+    part narrower than ``mouth`` times the fold's limit, closed by a cubic curve C1 with both walls
+    at the splices, its handles ``cap_height`` times those of a circular arc (tried once more at
+    ``CAP_RETRY_HEIGHT``), ``cut_elements`` points per mouth width (the run's elements per scale
+    when null). The velocity of the new liquid is pyoomph's nearest-node blend (``fill``
+    ``blend``) or ``zero``; with ``projection`` the pressure-impulse projection follows, its first
+    step ``restart`` (``reconnect.restart`` when null). The budgets are taken within ``max(box_radius
+    delta, 2 L_fill)`` of the filled region, their hard limits floored at ``sigma_V``, ``sigma_Pz``
+    and ``sigma_KE`` (the solver's units, none until set). A fill takes at most ``max_fill`` of the
+    bubble's volume at the gas cut (``V_b``), the share below which the ring itself is removed by
+    default; a larger pocket (a lobe of the ring, a bubble pinching in two) is refused."""
+    enabled: bool = False
+    mouth: float = 1.5
+    cap_height: float = 1.0
+    cut_elements: float | None = None
+    fill: str = "blend"
+    projection: bool = True
+    restart: str | None = None
+    box_radius: float = 4.0
+    sigma_V: float = 0.0
+    sigma_Pz: float = 0.0
+    sigma_KE: float = 0.0
+    max_fill: float = 0.01
+
+    def __post_init__(self):
+        from .reconnect import RESTARTS
+
+        _flag("groove", "enabled", self.enabled)
+        _flag("groove", "projection", self.projection)
+        if not (_number(self.mouth) and self.mouth >= 1.0):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.groove.mouth must be at least one (the "
+                             "fill's width in fold limits)")
+        for name in ("cap_height", "max_fill"):
+            value = getattr(self, name)
+            if not (_number(value) and 0.0 < value <= 1.0):
+                raise ValueError(f"collapse.{EVENTS_BLOCK}.groove.{name} must lie in (0, 1]")
+        _positive("groove", "cut_elements", self.cut_elements, optional=True)
+        _positive("groove", "box_radius", self.box_radius)
+        for name in ("sigma_V", "sigma_Pz", "sigma_KE"):
+            _non_negative("groove", name, getattr(self, name))
+        if self.fill not in GROOVE_FILLS:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.groove.fill must be one of {GROOVE_FILLS}")
+        if self.restart is not None and self.restart not in RESTARTS:
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.groove.restart must be one of {RESTARTS}, "
+                             "or null")
+
+
 def event_dump_policy(value) -> tuple[int, int] | None:
     """``post.keep_event_dumps`` as ``(N, M)`` for ``first<N>-last<M>``, None for ``all``. Raises
     ``ValueError`` for any other value."""
@@ -557,33 +624,37 @@ class EventSettings:
     (:class:`CascadeMonitor`: ``cascade_min_interval`` in ``delta^2``, ``cascade_ratio``,
     ``cascade_count``).
 
-    The parts ``ring`` (:class:`RingEventSettings`), ``jetcore`` (:class:`JetCoreSettings`) and
-    ``pinch`` (:class:`PinchSettings`) are written into the block (:meth:`to_dict`, and so into its
-    hash, every leg and every dump) only where they differ from their defaults: a block without
-    them, as every block recorded before they existed, is the same to the byte, and a record without
-    them reads as the defaults (:meth:`_completed`)."""
+    The parts ``ring`` (:class:`RingEventSettings`), ``jetcore`` (:class:`JetCoreSettings`),
+    ``pinch`` (:class:`PinchSettings`) and ``groove`` (:class:`GrooveEventSettings`) are written
+    into the block (:meth:`to_dict`, and so into its hash, every leg and every dump) only where they
+    differ from their defaults: a block without them, as every block recorded before they existed,
+    is the same to the byte, and a record without them reads as the defaults (:meth:`_completed`)."""
     liquid: LiquidEventSettings = field(default_factory=LiquidEventSettings)
     gap: GapSettings = field(default_factory=GapSettings)
     post: PostCutSettings = field(default_factory=PostCutSettings)
     ring: RingEventSettings = field(default_factory=RingEventSettings)
     jetcore: JetCoreSettings = field(default_factory=JetCoreSettings)
     pinch: PinchSettings = field(default_factory=PinchSettings)
+    groove: GrooveEventSettings = field(default_factory=GrooveEventSettings)
     max_events: int = 1000
     cascade_min_interval: float = 0.25
     cascade_ratio: float = 0.7
     cascade_count: int = 3
 
     PARTS = {"liquid": LiquidEventSettings, "gap": GapSettings, "post": PostCutSettings,
-             "ring": RingEventSettings, "jetcore": JetCoreSettings, "pinch": PinchSettings}
+             "ring": RingEventSettings, "jetcore": JetCoreSettings, "pinch": PinchSettings,
+             "groove": GrooveEventSettings}
     CLASSES = ("liquid", "gap", "ring")  # the parts whose keys are the keys of a class of events
-    # the class of events whose keys a part's keys are: its own for a part of CLASSES, and those of
-    # pinch (when a neck is cut) the class liquid's; the parts not here are of the leg
-    CLASS_OF_PART = {"liquid": "liquid", "gap": "gap", "ring": "ring", "pinch": "liquid"}
+    # the class of events whose keys a part's keys are: its own for a part of CLASSES, those of
+    # pinch (when a neck is cut) the class liquid's and those of groove (how a groove is filled) the
+    # class gap's; the parts not here are of the leg
+    CLASS_OF_PART = {"liquid": "liquid", "gap": "gap", "ring": "ring", "pinch": "liquid",
+                     "groove": "gap"}
     # keys of a part of a class that are keys of the leg all the same: what the run does after the
     # ring's removal, which a continuation from the state the window ended on may change
     LEG_KEYS_OF_CLASSES = ("ring.after_removal",)
     # the parts written into the block only where they differ from their defaults (to_dict)
-    OPTIONAL_PARTS = ("ring", "jetcore", "pinch")
+    OPTIONAL_PARTS = ("ring", "jetcore", "pinch", "groove")
     KEYS = ("max_events", "cascade_min_interval", "cascade_ratio", "cascade_count")  # of the leg
 
     def __post_init__(self):
@@ -655,8 +726,8 @@ class EventSettings:
 
     def class_keys(self, kind: str) -> dict:
         """The keys of a class of events (``liquid``, ``gap`` or ``ring``), those of its own part;
-        the keys of the class of a part beside it (``pinch``, of the class ``liquid``) are
-        :meth:`class_of`'s."""
+        the keys of the class of a part beside it (``pinch``, of the class ``liquid``; ``groove``,
+        of the class ``gap``) are :meth:`class_of`'s."""
         if kind not in self.CLASSES:
             raise ValueError(f"no class of events {kind!r}; the classes are {self.CLASSES}")
         return asdict(getattr(self, kind))
@@ -891,16 +962,17 @@ RING_HANDLERS = ("ring", "ring-removal")
 # from which a run resumes: an event without a handler; a cascade of events that shrink (the
 # CascadeMonitor); the most events (max_events); a liquid cut refused before anything changed;
 # one whose hard budgets do not close (surgery.BudgetUnclosed), which leaves the problem holding a
-# cut that is not accepted, so that the state before it is the run's end state; the ring cut or
-# the ring's removal refused before anything changed
+# cut that is not accepted, so that the state before it is the run's end state; the ring cut, the
+# ring's removal or the fill of a groove refused before anything changed
 EVENT_CASCADE = "event-cascade"
 EVENT_LIMIT = "max-events"
 LIQUID_CUT_REFUSED = "liquid-cut-refused"
 EVENT_UNCLOSED = "event-unclosed"
 RING_CUT_REFUSED = "ring-cut-refused"
 RING_REMOVAL_REFUSED = "ring-removal-refused"
+GROOVE_FILL_REFUSED = "groove-fill-refused"
 EVENT_STOPS = (EVENT_UNHANDLED, EVENT_CASCADE, EVENT_LIMIT, LIQUID_CUT_REFUSED, EVENT_UNCLOSED,
-               RING_CUT_REFUSED, RING_REMOVAL_REFUSED)
+               RING_CUT_REFUSED, RING_REMOVAL_REFUSED, GROOVE_FILL_REFUSED)
 # the outcome in the record of an event the run stops on before any handler is made for it
 # (events/event_<k>.json, written by the driver); a cut refused or unclosed writes its own record
 STOP_OUTCOMES = {EVENT_UNHANDLED: "unhandled", EVENT_CASCADE: "cascade", EVENT_LIMIT: "max-events"}

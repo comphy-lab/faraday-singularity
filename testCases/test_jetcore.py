@@ -203,7 +203,7 @@ def test_the_parts_at_their_defaults_leave_every_block_and_its_hash_as_it_was():
         assert s.sha256() == ev.EventSettings.from_dict(
             {**block, "jetcore": {"enabled": False}}).sha256()
         assert s.changed_keys(s.to_dict()) == []
-    assert ev.EventSettings.OPTIONAL_PARTS == ("ring", "jetcore", "pinch")
+    assert ev.EventSettings.OPTIONAL_PARTS == ("ring", "jetcore", "pinch", "groove")
 
 
 def test_keys_not_made_yet_are_refused():

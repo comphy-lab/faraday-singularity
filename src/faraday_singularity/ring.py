@@ -50,7 +50,8 @@ This module needs no finite-element problem (numpy and shapely only):
   and its stops and events (:func:`ring_stage_events`: the open chain read as before the ring, the
   ring's emptying below ``bubble_stop`` of ``V_b`` the request of its removal, class ``W2``, its
   approach to the axis, ``RA``, its folds, ``RF``, and its approach to the open chain, ``X``, each
-  without a handler but the removal's, and so a resumable stop).
+  without a handler but the removal's and, with ``groove.enabled``, the fill of a groove for
+  ``RF`` (``groovesurgery.groove_fill``), and so a resumable stop).
 
 Lengths are in the solver's units (``1/k``).
 """
@@ -796,13 +797,14 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
        ``3 h_min`` of the open chain (``chain-contact``, ``X``); on a mesh a step has run on, the
        guard last. Not tested: the piercing (no bubble), the bridge (the axis is liquid up to the
        cavity's tip) and the bubble emptying. The ring's own events have no handler but the
-       removal's: each is a resumable stop. With ``pinch.enabled`` the open chain's necks land
+       removal's, and with the block's ``groove.enabled`` the fill of a groove for ``RF`` (its
+       request then names it, ``handler`` ``groove-fill``): each other is a resumable stop. With ``pinch.enabled`` the open chain's necks land
        only when they close, as in ``events.post_cut_events`` (``pinch``, the driver's history)."""
     from shapely.geometry import LineString
 
-    from .events import (_neck_fields, _pinch_field, _request, closing_readings,
-                         fold_stop_after_cut, head_fold, head_lands, head_of_fold, lands,
-                         liquid_necks)
+    from .events import (GROOVE_HANDLER, _neck_fields, _pinch_field, _request,
+                         closing_readings, fold_stop_after_cut, head_fold, head_lands,
+                         head_of_fold, lands, liquid_necks)
     from .reconnect import (Chain, adjacent_shoulders, chain_necks, edge_reading, fold_contact,
                             interface_guard, revolved_volume, spline_contact_stop)
     from .selfcontact import InterfaceSelfIntersection, fold_gap
@@ -973,7 +975,10 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
         return min(kinks, key=lambda x: x[0])[1]
     if grooves:
         _, cls, rec = min(grooves, key=lambda x: x[0])
-        return _request("groove" if cls == "A-groove" else "ring-fold", cls, **rec)
+        req = _request("groove" if cls == "A-groove" else "ring-fold", cls, **rec)
+        if cls == "RF" and events.groove.enabled:  # its handler, the fill of a groove, made
+            req["handler"] = GROOVE_HANDLER
+        return req
     found = secondary("gas")
     if found is not None:
         return _request("gas-neck", "G", **found)
