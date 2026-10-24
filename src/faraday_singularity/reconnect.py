@@ -96,7 +96,9 @@ from .selfcontact import (
 AXIS, FIXED = "axis", "fixed"
 FILLS = ("blend", "zero")
 RESTARTS = ("bdf1", "impulsive")
-BUBBLE_MODELS = ("constant-pressure",)
+# the bubble after the cut: the passive constant pressure (the zero-density limit), or the gas the
+# coupled neck gas hands over on a polytrope, adiabatic (kappa 1.4) or isothermal (neckgas.bubble)
+BUBBLE_MODELS = ("constant-pressure", "polytropic", "isothermal")
 CAPS = ("arc",)
 REBUILD_SPLINES = ("nodes", "vertices")
 LANDING_RATIO = 1.05  # a landing state for cut radius delta: the first with delta / r_n >= this

@@ -80,7 +80,7 @@ with pb:
         gas_file = state.with_suffix(".gas.npz")
         driver.restore(json.loads(state.with_suffix(".json").read_text()),
                        gas_file=gas_file if gas_file.is_file() else None)
-        if recon is not None:  # a cut of the landing state, as a cut restart makes it
+        if recon is not None and not spec.get("post_cut"):  # a cut of the landing state
             from faraday_singularity import surgery
             surgery.cut(pb, recon, out, driver=driver, log=lambda *_: None)
             result_r, result_z, result_T = pb.gas_traction()
@@ -90,6 +90,15 @@ with pb:
     result = driver.run(1e-8)
     driver.close()
     pb.close_diagnostics()
+    if spec.get("traction_out"):  # the traction the last step held, by chain
+        from scipy.spatial import cKDTree
+        r, z, T = pb.gas_traction()
+        by = {}
+        for c in pb.interface_segments():
+            d, _ = cKDTree(np.column_stack([c["r"], c["z"]])).query(np.column_stack([r, z]))
+            on = d <= 1e-12
+            by["open" if c["open"] else "bubble"] = [float(x) for x in T[on]]
+        (out / "traction_end.json").write_text(json.dumps(by))
 (out / "result.json").write_text(json.dumps(result, default=float))
 """
 

@@ -398,6 +398,9 @@ from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, E
 from .mesh import Focus, FocusRegion
 from .neckgas.coupler import COLUMNS as GAS_COLUMNS
 from .neckgas.coupler import STOPS as GAS_STOPS
+from .neckgas.bubble import COLUMNS as BUBBLE_COLUMNS
+from .neckgas.bubble import KAPPA as BUBBLE_KAPPA
+from .neckgas.bubble import BubbleGas
 from .neckgas.coupler import (GAS_FILE_SUFFIX, GasSettings, NeckGas, chain_sha256,
                               read_state_file, write_state_file)
 from .neckgas.geometry import GasGeometryError
@@ -898,6 +901,13 @@ class CollapseDriver:
         self.gas: NeckGas | None = None
         self._gas_rows = None
         self._gas_stop: dict | None = None
+        # after a cut with a polytropic bubble (reconnect.bubble_model, neckgas.bubble): the gas
+        # the coupled gas handed over, and bubble_gas.txt
+        self._bubble: BubbleGas | None = None
+        self._bubble_rows = None
+        if reconnect is not None and reconnect.bubble_model in BUBBLE_KAPPA and gas is None:
+            raise ValueError(f"reconnect.bubble_model {reconnect.bubble_model!r} takes the bubble's "
+                             "gas from the coupled gas in the neck: it needs a collapse.gas block")
         if gas is not None:
             if not getattr(problem, "gas", False):
                 raise ValueError("collapse.gas needs a problem made with gas (FaradayProblem(gas="
@@ -936,7 +946,8 @@ class CollapseDriver:
         if self._chains is not None:
             self._chains.close()
         for f in (self._event_rows, self._drops, self._budget, self._noise, self._ring_rows,
-                  self._timing, self._jetcore_rows, self._sheet_rows, self._gas_rows):
+                  self._timing, self._jetcore_rows, self._sheet_rows, self._gas_rows,
+                  self._bubble_rows):
             if f is not None:
                 f.close()
         if self._nets_armed:  # the detection is process-wide (pyoomph); later problems start clean
@@ -2752,6 +2763,8 @@ class CollapseDriver:
                     meta["neck_history"] = json.loads(json.dumps(st.neck_history))
         if getattr(self, "gas", None) is not None:  # only with the block: other dumps keep keys
             meta["gas"] = self._write_gas_state(path)
+            if self._bubble is not None:  # after a cut with a polytropic bubble only
+                meta["bubble_gas"] = self._bubble.state_dict()
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -2858,6 +2871,12 @@ class CollapseDriver:
         st = self.state
         if getattr(self, "gas", None) is not None:
             self._restore_gas(meta, gas_file)
+            if meta.get("bubble_gas") is not None:  # a state after a cut with a polytropic bubble
+                if self.reconnect is None or self.reconnect.bubble_model not in BUBBLE_KAPPA:
+                    raise ValueError("the state holds a polytropic bubble: continuing it needs "
+                                     "the cut's reconnect.bubble_model")
+                self._bubble = BubbleGas.from_dict(meta["bubble_gas"])
+                self._open_bubble_rows()
         if meta.get("cut") is not None:
             self._check_events_meta(meta)
         for k in self._STATE_FIELDS:
@@ -3767,6 +3786,9 @@ class CollapseDriver:
         with the traction applied, the traction at every node of the free surface. Returns the
         ``gas-geometry`` stop of a chain that is no duct of the gas."""
         gas, st = self.gas, self.state
+        if self._bubble is not None:  # after the cut: the bubble's polytropic gas
+            self._bubble_before_step(t)
+            return None
         if gas.status not in ("dormant", "active"):
             return None
         r, z, ur, uz = m["profile"]
@@ -3787,6 +3809,9 @@ class CollapseDriver:
         """After a converged step, before any rebuild: the gas advanced over it on the stepped
         chain, its rows written, its stop kept for the stop checks of the step."""
         gas, st = self.gas, self.state
+        if self._bubble is not None:  # after the cut: the bubble's polytropic gas
+            self._bubble_after_step()
+            return
         if gas.status not in ("pending", "active"):
             return
         starting = gas.status == "pending"
@@ -3872,12 +3897,104 @@ class CollapseDriver:
                "gas_status": gas.status, "gas_time": gas.t, "t_on": gas.t_on,
                "settings_sha256": gas.s.sha256(),
                "handover": gas.handover(z_n=record.get("z_neck")) if gas.active else {}}
+        model = self.reconnect.bubble_model if self.reconnect is not None else None
+        if model in BUBBLE_KAPPA:
+            # the bubble's gas: the applied variant's partition at the cut's neck on a polytrope
+            name = gas.variants[0].spec.name
+            if name not in out["handover"]:
+                raise RuntimeError(f"reconnect.bubble_model {model!r} needs the coupled gas active "
+                                   f"at the cut (its status is {gas.status!r})")
+            stage, V, _ = self._bubble_surface()
+            if stage != "bubble":
+                raise RuntimeError("the cut made no bubble whose gas the coupled gas can hand over")
+            self._bubble = BubbleGas.from_handover(model, out["handover"][name], V, t=self._t(),
+                                                   step=self.state.step)
+            out["bubble"] = {"model": model, "variant": name, **self._bubble.summary()}
         (self.outdir / "gas_cut.json").write_text(json.dumps(out, indent=1, default=float) + "\n")
         gas.retire()
         self.pb.set_gas_traction(0.0)
         self._events.write(json.dumps({"event": "gas-retired", "time": self._t(),
                                        "step": self.state.step, "status_before": out[
                                            "gas_status"]}, default=float) + "\n")
+        if self._bubble is not None:
+            self._open_bubble_rows()
+            tr = self._bubble.transitions[0]
+            self._events.write(json.dumps({"event": "bubble-gas", "time": self._t(),
+                                           "step": self.state.step, "model": model,
+                                           "kappa": self._bubble.kappa, "m": self._bubble.m,
+                                           "V_ref": tr["V_before"], "V": tr["V_after"],
+                                           "p_ref": tr["p_before"], "p": tr["p_after"],
+                                           "p0": self._bubble.p0}, default=float) + "\n")
+
+    # --- the polytropic bubble after the cut (reconnect.bubble_model, neckgas.bubble) ----------
+
+    def _open_bubble_rows(self):
+        if self._bubble_rows is None:
+            self._bubble_rows = open(self.outdir / "bubble_gas.txt", "w", buffering=1)
+            self._bubble_rows.write("# " + "\t".join(BUBBLE_COLUMNS) + "\n")
+
+    def _bubble_surface(self):
+        """The surface that bounds the bubble's gas on the current mesh: ``(stage, V, (r, z))``,
+        the bubble's chain (from the axis to the axis) before the ring's cut, the ring's loop after
+        it, ``("gone", None, None)`` once the ring is removed, and ``(None, None, None)`` where
+        neither can be read (a changed topology, which the stops record)."""
+        from .reconnect import revolved_volume
+
+        ring = self._ring()
+        if ring is not None:
+            loops = self.pb.interface_loops()
+            if ring.get("removed") is not None or not loops:
+                return ("gone", None, None) if ring.get("removed") is not None else \
+                    (None, None, None)
+            if len(loops) != 1:
+                return None, None, None
+            r, z = np.asarray(loops[0]["r"]), np.asarray(loops[0]["z"])
+            return "ring", revolved_volume(np.column_stack([r, z])), (r, z)
+        closed = [c for c in self.pb.interface_segments() if not c["open"]]
+        if len(closed) != 1:
+            return None, None, None
+        r, z = np.asarray(closed[0]["r"]), np.asarray(closed[0]["z"])
+        return "bubble", revolved_volume(np.column_stack([r, z])), (r, z)
+
+    def _bubble_before_step(self, t: float):
+        """Before a step after the cut: the bubble's pressure on its surface (the traction
+        ``p(V) - p0`` at the nodes of the bubble's chain or the ring's loop, zero elsewhere: the
+        cavity vents to the atmosphere), held over the step."""
+        stage, V, coords = self._bubble_surface()
+        if stage is None:  # unreadable: the traction of the last step stands until the stops end it
+            return
+        before = self._bubble.stage
+        T = self._bubble.before_step(t, self.state.step, stage, V)
+        if self._bubble.stage != before:  # the ring's cut, the removal
+            tr = dict(self._bubble.transitions[-1])
+            self._events.write(json.dumps({"event": "bubble-gas-" + tr.pop("kind"), **tr},
+                                          default=float) + "\n")
+        if coords is None:
+            self.pb.set_gas_traction(0.0)
+            self._bubble_nodes = 0
+            return
+        from scipy.spatial import cKDTree
+
+        tree = cKDTree(np.column_stack(coords))
+        tol = 1e-12 * max(1.0, float(self.pb.nd.radius))
+
+        def values(r, z):
+            d, _ = tree.query(np.column_stack([r, z]), distance_upper_bound=tol)
+            on = np.isfinite(d)
+            self._bubble_nodes = int(on.sum())
+            return np.where(on, T, 0.0)
+
+        self.pb.set_gas_traction(values)
+
+    def _bubble_after_step(self):
+        """After a converged step after the cut, before any rebuild: the row of the bubble's gas
+        on the stepped surface (``bubble_gas.txt``)."""
+        stage, V, _ = self._bubble_surface()
+        row = self._bubble.after_step(self._t(), self.state.step, V if stage else None,
+                                      nodes=getattr(self, "_bubble_nodes", 0))
+        if row is not None:
+            self._bubble_rows.write("\t".join(_table_cell(row.get(c)) for c in BUBBLE_COLUMNS)
+                                    + "\n")
 
     def _gas_summary(self) -> dict:
         gas = self.gas
@@ -4173,6 +4290,8 @@ class CollapseDriver:
             out["landing"] = self._landing_summary()
         if self.gas is not None:  # only with the block: other results keep their keys
             out["gas"] = self._gas_summary()
+            if self._bubble is not None:
+                out["bubble_gas"] = self._bubble.summary()
         if r is not None:
             t_cut, t_p = self._cut_times()
             out["cut"] = {"t_cut": t_cut, "t_p": t_p, "tau_end": r.tau_end, **self._taus(self._t()),
