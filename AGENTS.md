@@ -124,7 +124,8 @@ add a second top-level `cases/` tree.
   carried across and projected by a
   pressure impulse, refused unless the projection converges and the discrete energy identity holds
   (`strong_divergence_L2` is an order-`h` diagnostic, not a test); the bubble keeps the passive
-  constant gas pressure (the zero-density limit). A refused or failed cut, whatever failed in it,
+  constant gas pressure (the zero-density limit), unless `bubble_model` is `polytropic` or
+  `isothermal` (the gas in the neck, below). A refused or failed cut, whatever failed in it,
   ends the run as `failed` with its partial record and `failed_at` in `cut_diagnostics.json` and
   under `cut` in `run_status.json` (with the precut dump once written); never load the precut state
   back into that problem, and an interruption is never turned into an outcome of the cut. After
@@ -519,7 +520,18 @@ add a second top-level `cases/` tree.
   `gas.txt`, `gas_profiles/`, the side file `<dump>.gas.npz` of every dump (deterministic bytes;
   `restore(meta, gas_file)`; the runner hashes it as `gas_sha256` and copies it) and the hand-over
   (`gas_handover` in landing states, `gas_cut.json` at a cut, after which the gas is retired), and
-  stops resumably on `neckgas.coupler.STOPS`. A dormant block differs from no block at round-off
+  stops resumably on `neckgas.coupler.STOPS`. With `reconnect.bubble_model` `polytropic` (κ 1.4) or
+  `isothermal` (κ 1) the cut hands the applied variant's partition over to the bubble
+  (`neckgas.bubble.BubbleGas`, `CollapseDriver._retire_gas`; refused without the block or an active
+  gas): `p V^κ = C` from the partition's mass, volume and mixed pressure, moved to the cut bubble's
+  volume; before every step `CollapseDriver._bubble_before_step` reads the gas's surface
+  (`_bubble_surface`: the bubble's chain, the ring's loop after the ring's cut, which keeps all of
+  the gas on the same polytrope, none after the removal) and sets `p(V) - p0` on its nodes and zero
+  on the open chain, after it `_bubble_after_step` writes `bubble_gas.txt`
+  (`neckgas.bubble.COLUMNS`); events `bubble-gas`, `bubble-gas-bubble-to-ring`,
+  `bubble-gas-removed`; `bubble_gas` in the dumps after the cut and the result
+  (`test_bubble_gas.py`, `test_bubble_gas_fem.py`, `test_bubble_gas_ring_fem.py`). Runs without the
+  gas block are 3e00e92's to the byte (`test_gascut_identity.py`). A dormant block differs from no block at round-off
   (the compiled code changes); one-way coupling is the dormant trajectory to the byte. A restart of
   this pyoomph release restores the finite-element state to round-off, not to the byte, with or
   without the gas, so restart tests compare to round-off (`test_neckgas_restart_fem.py`). The heights

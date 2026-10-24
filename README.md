@@ -74,9 +74,12 @@ and test:
   zone at the cavity's bottom and the atmosphere above the neck, with a separated-flow limit and
   laminar wall friction as options. Its pressure over the ambient acts on the free surface as a
   normal traction, set before each step from the gas at the start of the step (staggered
-  coupling), and the gas is advanced over each step on the two positions of the free surface. The
-  gas acts before a cut only: at the cut its partition at the neck is recorded and the bubble keeps
-  the passive pressure after it.
+  coupling), and the gas is advanced over each step on the two positions of the free surface. At
+  the cut its partition at the neck is recorded, and the bubble either keeps the passive pressure
+  or, with `collapse.reconnect.bubble_model` `polytropic` (or `isothermal`), takes that gas, its
+  mass and pressure, on a polytrope `p V^κ = C` (κ = 1.4, or 1) whose pressure acts on the bubble's
+  surface at every step, through the ring of a pierced bubble, which keeps all of its gas, until the
+  ring's removal; the cavity above vents to the atmosphere.
 - The step size and the mesh near the axis follow the local scale of the collapse: the apex radius
   of curvature, the jet-base radius or the narrowest neck, whichever is smallest. The scale may
   grow by at most a fixed factor per step, and each rebuild of the mesh coarsens it near the axis
@@ -243,7 +246,17 @@ between the gas's lowest face and `z_hi`, a budget does not close, the neck stal
 turns into a long thread, or the throat leaves the continuum range. Every dump of an active gas
 has its state beside it (`<dump>.gas.npz`), which a restart copies and restores; a landing state
 records the partition of the gas at its neck (`gas_handover`), and a cut from it writes the
-partition at the cut's neck to `gas_cut.json` and retires the gas. The block is no derived key: a
+partition at the cut's neck to `gas_cut.json` and retires the gas. With
+`collapse.reconnect.bubble_model` `polytropic` (κ = 1.4) or `isothermal` (κ = 1), which needs the
+block and a landing state whose gas is active, that partition becomes the bubble's gas
+(`neckgas.bubble`): its mass, and its pressure at rest at the partition's volume on `p V^κ = C`,
+moved at the cut to the volume of the bubble the cut built. Before every step after the cut the
+traction `p(V) - p0` at the volume of the gas's surface (the bubble's chain, then the ring's loop,
+which keeps all of the gas on the same polytrope) is set on that surface's nodes and none on the
+open chain; `bubble_gas.txt` holds a row per step (volumes and pressures at the start and end, the
+mass, the energy, the work of the gas on the liquid as the lagged traction and along the polytrope,
+the jumps of the rebuilds and surgeries between steps), events record the hand-over, the ring's cut
+and the removal, and the dumps after the cut carry the bubble's state. The block is no derived key: a
 restart, a cut or a continuation carries the parent's block unchanged. A dump of a problem with
 the block loads only into one with it, and the reverse.
 
@@ -327,7 +340,8 @@ across and projected onto a weakly divergence-free field by a pressure impulse t
 the free surfaces; the cut is refused unless the projection converges and the discrete energy
 identity holds (the pointwise divergence of the velocity, `strong_divergence_L2`, is an order-`h`
 discretisation diagnostic, not a test). The bubble keeps the passive constant gas pressure, the
-limit of zero gas density. The run writes `cut_diagnostics.json` (the planner attempts, the replaced
+limit of zero gas density, unless `bubble_model` is `polytropic` or `isothermal` (next section,
+the gas in the neck). The run writes `cut_diagnostics.json` (the planner attempts, the replaced
 caps, the volumes, the kinetic energy and axial momentum before and after the transfer and the
 projection, also within 20 cut radii of the neck, the nodes the transfer could not locate in the
 old mesh, the landing and cut foci, and the pinch time with its fit window) and keeps the
