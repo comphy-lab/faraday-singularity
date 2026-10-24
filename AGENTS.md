@@ -512,9 +512,12 @@ add a second top-level `cases/` tree.
   synthetic headed state, the pre-pierce refinement on the pierced state, the far-head cut) and
   `test_jetcore_identity.py` (without the parts every run of 4a6c999 to the byte; with `jetcore`
   at its defaults the same solution, `jetcore.txt` added) cover it, and for
-  `core_elements_per_scale` `test_core_res.py` (stand-ins, the runner's admission),
-  `test_core_res_fem.py` (the core's elements halved on the heads' state and none off it; a
-  restart under the key rebuilding at its sizes) and `test_core_res_identity.py` (runs without
+  `core_elements_per_scale` `test_jetcore_res.py` (stand-ins, the runner's admission),
+  `test_jetcore_res_fem.py` (the core's elements halved on the heads' state and none off it; a
+  restart under the key rebuilding at its sizes; named to run after `test_events_run_fem.py`,
+  whose two runs that restart from dumps differ at round-off after a module building
+  finite-element problems in the same process, as after `test_jetcore_fem.py`) and
+  `test_jetcore_res_identity.py` (runs without
   the key, the production block and its hash, 3e00e92's to the byte). After a cut the stops of a
   state are evaluated once (`CollapseDriver._stop_key`), and the runner's `--step-timing` writes
   `step_timing.txt` (`driver.STEP_TIMING_COLUMNS`); neither changes a value.

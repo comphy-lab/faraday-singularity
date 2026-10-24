@@ -12,7 +12,10 @@
   rebuilds at the first step it may from the twins, and the core holds about twice the nodes of
   the same restart without the key, the far region as many.
 
-Each problem compiles in seconds; the module takes a few minutes.
+Each problem compiles in seconds; the module takes a few minutes. Its name sorts it after
+``test_events_run_fem.py``, two of whose runs that restart from dumps differ at round-off when a
+module building finite-element problems in the same process runs before them (as
+``test_jetcore_fem.py`` or ``test_liquid_cut_fem.py`` does; an order dependence of that module).
 """
 
 from __future__ import annotations
