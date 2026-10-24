@@ -321,10 +321,11 @@ freshly built mesh of the ring (an element turning beyond ``edge_turn_stop_fresh
 floor) is met by rebuilding at once (:meth:`CollapseDriver._ring_refine`, at most
 ``RING_REFINE_TRIES`` times per state): every region at its size, the ring's far kink recentred on
 the element at the size its turn asks for (``min(1/2, edge_turn_refine/turn)`` of its chord, at
-least ``h_floor``), marked ``refined`` so that it keeps that size while the ring asks for one, a
-yield (``far_yields``); an event ``ring-refine`` each, with the base of the upward jet before and
-after (``base_guard``: beyond ``HEAD_FOLD_BASE_TOL`` the run stops, ``interface-unresolved``,
-trigger ``ring-refine-base``). A run whose ring never meets that stop is unchanged.
+least ``h_floor``), marked ``refined`` so that it keeps that size while the ring asks for one about
+that feature, a yield (``far_yields``); an event ``ring-refine`` each, with the base of the upward
+jet before and after (``base_guard``: beyond ``HEAD_FOLD_BASE_TOL`` the run stops,
+``interface-unresolved``, trigger ``ring-refine-base``). A run whose ring never meets that stop is
+unchanged.
 
 With the block's ``groove.enabled`` (``events.GrooveEventSettings``) a closing gas groove (class
 ``A-groove``, of the open chain or the bubble; ``RF``, a fold of the ring) is met by its fill
@@ -3856,14 +3857,15 @@ class CollapseDriver:
         (its radius at least four of its chords, and at least the radius of the region it lies in)
         at ``max(h_floor, f L)``, ``f = min(1/2, edge_turn_refine/turn)`` (one half for a midside
         node), the size at which an element of a circle would turn by ``edge_turn_refine``; the
-        region is marked ``refined``, so that it keeps that size while the ring asks for one
-        (``jetcore.far_kink_regions``), and counts as a yield (``far_yields``). At most
-        ``RING_REFINE_TRIES`` rebuilds per state, each an event ``ring-refine`` with the guard's
-        reading, the region and the base of the upward jet before and after it (``base_guard``;
-        ``checked`` false where no jet stood before it, whose base there is none to keep); a base
-        that moves beyond ``HEAD_FOLD_BASE_TOL`` stops the run (``interface-unresolved``, trigger
-        ``ring-refine-base``). The stops of the new mesh are checked again; a stop not met
-        is returned as it is. Returns the state the run goes on from and its stop."""
+        region is marked ``refined``, so that it keeps that size while the ring asks for one about
+        the same feature (``jetcore.far_kink_regions``), and counts as a yield (``far_yields``).
+        At most ``RING_REFINE_TRIES`` rebuilds per state, each an event ``ring-refine`` with the
+        guard's reading, the region and the base of the upward jet before and after it
+        (``base_guard``; ``checked`` false where no jet stood before it, whose base there is none to
+        keep); a base that moves beyond ``HEAD_FOLD_BASE_TOL`` stops the run
+        (``interface-unresolved``, trigger ``ring-refine-base``). The stops of the new mesh are
+        checked again; a stop not met is returned as it is. Returns the state the run goes on from
+        and its stop."""
         tries = 0
         while tries < RING_REFINE_TRIES and self._ring_refine_due(stop):
             tries += 1

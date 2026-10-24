@@ -28,7 +28,7 @@ landing. Where a freshly built mesh of the ring cannot represent a feature (the 
 limit, an element of the ring turning beyond ``edge_turn_stop_fresh``, but within
 ``edge_turn_stop``), the driver rebuilds the ring's far kink at once at the size the element's turn
 asks for (``CollapseDriver._ring_refine``), and that region keeps its size while the ring asks for
-one (``refined``).
+one about the same feature (``refined``).
 
 Before the piercing (:func:`prep_regions`), once the bubble is shorter than ``prep_gap delta``, its
 bottom and the downward jet's tip are refined so that the ring cut (``ring.ring_cut_geometry``,
@@ -230,8 +230,10 @@ def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, 
 
     A region the driver refined itself on a freshly built mesh (``refined``, the ring's
     ``CollapseDriver._ring_refine``: the rim of a thin sheet that a rebuild at the yielded size
-    could not represent) keeps its target, and the mark, while its chain still asks for one; it is
-    released by the hold as any other, and a region set after its release is an ordinary one."""
+    could not represent) keeps its target, and the mark, while its chain still asks for one about
+    the same feature (the new worst element's region, four of its chords, overlapping the refined
+    one); it is released by the hold as any other, and a region set after its release, or about an
+    element elsewhere, is an ordinary one."""
     out = {name: dict(v) for name, v in previous.items()}
     floors = floors or {}
     for chain, idx in refine.items():
@@ -247,7 +249,11 @@ def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, 
         target = max(0.25 * L, floor)
         g = out.get(key)
         yields, yield_t = (g.get("yields", 0), g.get("yield_t")) if g is not None else (0, None)
-        refined = g is not None and not g["released"] and bool(g.get("refined"))
+        # the driver's refinement follows its feature: the new worst element's region (four of its
+        # chords) overlaps the refined one; a jump elsewhere makes the region an ordinary one
+        refined = (g is not None and not g["released"] and bool(g.get("refined"))
+                   and math.hypot(r - float(g["r"]), z - float(g["z"]))
+                   <= float(g["radius"]) + 4.0 * L)
         if g is not None and not g["released"] and turn > yield_turn:
             last = float(g["target"])
             size = sizes.get(name)

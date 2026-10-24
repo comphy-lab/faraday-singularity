@@ -18,9 +18,10 @@ half the column's size, chord 9.4e-6).
   ``ring-refine-base``, a state without a born jet not checked; the stops of the new mesh;
 * at most ``RING_REFINE_TRIES`` rebuilds per state, the stop that stays carrying their count;
 * the far kink's rule: a ``refined`` region keeps its target and its mark while the ring asks for
-  one, yields past ``far_yield_turn`` as before, and is released by the hold, after which a new
-  request is an ordinary region at the floor, as is every region the driver did not refine
-  (the rule of e923ead);
+  one about the same feature (the new worst element's region overlapping it: the rim moving on),
+  yields past ``far_yield_turn`` as before, and is released by the hold, after which a new
+  request is an ordinary region at the floor, as is one about an element elsewhere on the ring and
+  every region the driver did not refine (the rule of e923ead);
 * ``base_guard``: the reading of ``_head_fold_check`` (e923ead's formula, value for value).
 """
 
@@ -265,6 +266,20 @@ def test_a_refined_kink_keeps_its_size_while_the_ring_asks_and_is_released_by_th
     # a refined region whose chain asks no more stays within its hold
     held = far_kink_regions(g, {}, {}, t=0.5, sizes={}, **kw)["ring_far"]
     assert not held["released"] and held["refined"] and held["target"] == 3.09e-6
+    # the rim moves on: the worst element's region (4 chords) still overlaps the refined one, which
+    # follows it; one step later the region is about the new element, of radius 4 of its chords
+    d = k["radius"] + 4.0 * 3e-6
+    moved = far_kink_regions(g, _ring_reading(44.0, 3e-6, (1.8e-4 + 0.99 * d, 4.6119)), ask,
+                             t=0.2, sizes={}, **kw)["ring_far"]
+    assert moved["refined"] and moved["target"] == 3.09e-6 and moved["r"] == 1.8e-4 + 0.99 * d
+    # the worst element elsewhere on the ring (the column's corner, 0.3 delta away): an ordinary
+    # region there, at the floor
+    jump = far_kink_regions(g, _ring_reading(35.0, 3e-5, (4.5e-4, 4.6115)), ask, t=0.2, sizes={},
+                            **kw)["ring_far"]
+    assert jump["target"] == H_COL and "refined" not in jump and jump["r"] == 4.5e-4
+    just = far_kink_regions(g, _ring_reading(44.0, 3e-6, (1.8e-4 + 1.01 * d, 4.6119)), ask,
+                            t=0.2, sizes={}, **kw)["ring_far"]
+    assert "refined" not in just and just["target"] == H_COL
 
 
 def test_base_guard_is_the_head_fold_checks_reading_value_for_value():

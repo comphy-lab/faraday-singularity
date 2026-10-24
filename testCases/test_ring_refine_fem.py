@@ -11,8 +11,9 @@ the production's jetcore sizing (far kinks recentred, the ring's kinks at the co
   rebuild of the ring's far kink at ``min(1/2, edge_turn_refine/turn)`` of the element's chord, the
   very state the stop was read on, until the fresh mesh holds the turn within the fresh limit (at
   most ``RING_REFINE_TRIES`` rebuilds, an event ``ring-refine`` each, a yield each), the ring's
-  volume kept to the rebuild's noise, and steps on to its limit; the far kink keeps its size
-  while the ring asks and is in the dumps, marked ``refined``;
+  volume kept to the rebuild's noise, and steps on to its limit; the far kink in the dumps after
+  it is the refined region about the same feature or, about an element elsewhere (as here, the
+  column's corner), an ordinary one;
 * without it (``RING_REFINE_TRIES`` 0, e923ead's behaviour) the same run stops there,
   ``interface-unresolved`` on the ring on the fresh mesh, with the reading the first rebuild met.
 
@@ -143,18 +144,33 @@ def test_the_refine_rebuilds_the_rings_far_kink_and_the_run_steps_on(runs):
     assert got["far_yields"] >= len(refines)
     k = got["kinks"]["ring_far"]
     assert k["name"] == "kink_ring_far" and k["far"]
-    if not k["released"]:
-        assert k["refined"] and k["target"] <= refines[-1]["target"] * (1 + 1e-12)
+    if not k["released"] and k.get("refined"):  # about the same feature: at most its size
+        assert k["target"] <= refines[-1]["target"] * (1 + 1e-12)
     rows = (got["run"] / "jetcore.txt").read_text().splitlines()
     cols = rows[0][2:].split("\t")
     assert int(float(rows[-1].split("\t")[cols.index("far_yields")])) == got["far_yields"]
 
 
-def test_the_refined_kink_is_in_the_dumps_of_the_ring_stage(runs):
-    run = runs["refine"]["run"]
+def test_the_far_kink_after_the_refine_follows_its_rule_in_the_dumps(runs):
+    """In every dump after the refine the ring's far kink is the refined region about the same
+    feature (the region of its worst element overlapping the refine's, at most its size, marked) or,
+    about an element elsewhere on the ring, an ordinary one at the column's size, unmarked (on this
+    state the worst element after the refine lies at the column's lower corner, far from the
+    thread's fillet); the dumps hold the yields."""
+    got = runs["refine"]
+    run = got["run"]
+    refine = [e for e in got["events"] if e["event"] == "ring-refine"][-1]
+    h_col = got["ring"]["sizing"]["h_col"]
     metas = [json.loads(p.read_text()) for p in sorted((run / "states").glob("state_*.json"))]
     assert metas
-    marked = [m["kinks"]["ring_far"] for m in metas if "ring_far" in (m.get("kinks") or {})]
-    assert marked and all(g["far"] for g in marked)
-    assert any(g.get("refined") for g in marked)
-    assert metas[-1]["far_yields"] == runs["refine"]["far_yields"]
+    for m in metas:
+        g = m["kinks"]["ring_far"]
+        L = g["radius"] / 4.0
+        same = math.hypot(g["r"] - refine["reading"]["r"], g["z"] - refine["reading"]["z"]) <= (
+            refine["radius"] + 4.0 * L)
+        assert g["far"] and g["yields"] >= 1
+        if g.get("refined"):
+            assert same and g["target"] <= refine["target"] * (1 + 1e-12)
+        elif not g["released"]:
+            assert not same and g["target"] >= h_col * (1 - 1e-12)
+    assert metas[-1]["far_yields"] == got["far_yields"]

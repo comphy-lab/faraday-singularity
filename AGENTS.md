@@ -482,9 +482,9 @@ add a second top-level `cases/` tree.
   beyond `edge_turn_stop_fresh` within `edge_turn_stop` or a midside node beyond `midside_stop`, is
   met by `CollapseDriver._ring_refine`: up to `driver.RING_REFINE_TRIES` rebuilds with the ring's
   far kink at `min(1/2, edge_turn_refine/turn)` of the element's chord, marked `refined` so that
-  `jetcore.far_kink_regions` keeps its size while the ring asks, event `ring-refine`, the upward
-  jet's base held within `HEAD_FOLD_BASE_TOL` by `driver.base_guard` or the stop
-  `ring-refine-base`; `test_ring_refine.py`, `test_ring_refine_fem.py`, and
+  `jetcore.far_kink_regions` keeps its size while the ring asks about that feature, event
+  `ring-refine`, the upward jet's base held within `HEAD_FOLD_BASE_TOL` by `driver.base_guard` or
+  the stop `ring-refine-base`; `test_ring_refine.py`, `test_ring_refine_fem.py`, and
   `test_ring_refine_identity.py`, runs that never meet it e923ead's), the edge-turn profiles
   from the core with `edge_turn_snapshots` `core`; `prep_gap` refines the bubble's bottom and
   the downward jet's tip before the piercing (`jetcore.prep_regions`) so that the ring cut

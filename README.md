@@ -714,7 +714,8 @@ by more than `reconnect.edge_turn_stop_fresh` (but within `edge_turn_stop`), or 
 lies beyond `midside_stop`, is not a stop at once: the mesh is rebuilt with the ring's far kink
 recentred on that element at the size its turn asks for (`min(1/2, edge_turn_refine/turn)` of its
 chord, never below `h_floor`), every other region as the mesh has it, at most three times per state
-(event `ring-refine`, a yield), and that kink keeps its size while the ring asks for one; the base of
+(event `ring-refine`, a yield), and that kink keeps its size while the ring asks for one about the
+same feature (the region of its new worst element overlapping it); the base of
 the upward jet must stay within `driver.HEAD_FOLD_BASE_TOL` across each such rebuild, or the run
 stops (`interface-unresolved`, trigger `ring-refine-base`). A thin sheet's rim, which a rebuild at
 the yielded size cannot represent, is so followed instead of ending the run. With
