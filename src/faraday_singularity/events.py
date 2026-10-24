@@ -126,7 +126,7 @@ SIZING_KEYS = ("post.h_floor", "post.neck_floor", "post.neck_elements_per_scale"
                "ring.cut_elements", "jetcore.enabled", "jetcore.core_radius",
                "jetcore.wall_radius", "jetcore.far_floor", "jetcore.far_kinks",
                "jetcore.far_yield_turn", "jetcore.ring_kink_floor", "jetcore.prep_gap",
-               "jetcore.prep_rho")
+               "jetcore.prep_rho", "jetcore.core_elements_per_scale")
 # the far kinks of jetcore (JetCoreSettings.far_kinks): grown as the core's, or recentred
 JETCORE_KINKS = ("grow", "recentre")
 # the elements of the open chain whose turn writes a profile at every step (edge_turn_snapshots)
@@ -436,6 +436,17 @@ class JetCoreSettings:
       box of radius ``liquid.box_radius delta`` about the core by at most ``box_gate_sigmas`` times
       ``liquid.sigma_V`` and ``liquid.sigma_Pz``; otherwise the run stops resumably with the state
       before the rebuild.
+    * ``core_elements_per_scale``: the elements per scale of the core (null: the run's after the
+      cut, ``reconnect.elements_per_scale`` or the collapse's, every size as without the key; at
+      least that number, ``driver.CollapseDriver``). Above it every rule's size on the core's nodes
+      is ``q = eps/core_elements_per_scale`` times what the rule asks for, ``eps`` the run's, every
+      other node's unchanged: each region of a rebuild whose ball holds core nodes has a twin
+      (``core_<name>``, ``jetcore.core_twins``) of its ball at ``q`` times its target whose
+      attractors are those core nodes, and the guard asks for a refinement of a core element whose
+      tangent turns by more than ``q reconnect.edge_turn_refine`` (``jetcore.core_turns``), the
+      element per scale of the guard's own rule; the core is still stepped at
+      ``reconnect.courant``. Written into the block only where it is set (:meth:`EventSettings.
+      to_dict`, ``LATE_KEYS``).
 
     A key of :data:`PENDING_KEYS` is refused away from its default until the driver makes it."""
     enabled: bool = False
@@ -453,13 +464,15 @@ class JetCoreSettings:
     profile_dt: float | None = None
     box_gate: bool = False
     box_gate_sigmas: float = 5.0
+    core_elements_per_scale: float | None = None
 
     def __post_init__(self):
         for name in ("enabled", "ring_kink_floor", "box_gate"):
             _flag("jetcore", name, getattr(self, name))
         for name in ("core_radius", "wall_radius", "box_gate_sigmas"):
             _positive("jetcore", name, getattr(self, name))
-        for name in ("far_courant", "far_floor", "prep_gap", "profile_dt"):
+        for name in ("far_courant", "far_floor", "prep_gap", "profile_dt",
+                     "core_elements_per_scale"):
             _positive("jetcore", name, getattr(self, name), optional=True)
         if not self.wall_radius >= self.core_radius:
             raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore.wall_radius must be at least "
@@ -674,6 +687,10 @@ class EventSettings:
     LEG_KEYS_OF_CLASSES = ("ring.after_removal",)
     # the parts written into the block only where they differ from their defaults (to_dict)
     OPTIONAL_PARTS = ("ring", "jetcore", "pinch", "groove")
+    # keys added to a part after blocks with the part were recorded (runs, dumps, the hashes of
+    # their legs): written only where they differ from their defaults, so that those blocks and
+    # their hashes are unchanged, and a record without them reads as their defaults (_completed)
+    LATE_KEYS = {"jetcore": ("core_elements_per_scale",)}
     KEYS = ("max_events", "cascade_min_interval", "cascade_ratio", "cascade_count")  # of the leg
 
     def __post_init__(self):
@@ -734,8 +751,17 @@ class EventSettings:
 
     def to_dict(self) -> dict:
         """The block as its records hold it: every part but those of ``OPTIONAL_PARTS`` at their
-        defaults, which are left out, and the keys of its own."""
-        return {**{name: asdict(getattr(self, name)) for name, part in self.PARTS.items()
+        defaults, which are left out, each without its ``LATE_KEYS`` at their defaults, and the
+        keys of its own."""
+        def part_dict(name: str, part) -> dict:
+            d = asdict(getattr(self, name))
+            defaults = asdict(part())
+            for key in self.LATE_KEYS.get(name, ()):
+                if d[key] == defaults[key]:
+                    del d[key]
+            return d
+
+        return {**{name: part_dict(name, part) for name, part in self.PARTS.items()
                    if name not in self.OPTIONAL_PARTS or getattr(self, name) != part()},
                 **{name: getattr(self, name) for name in self.KEYS}}
 
@@ -1846,14 +1872,18 @@ def event_focus_regions(regions, cap, *, k: int, chain: str, r_n: float,
     the features of the fresh mesh (``reconnect.feature_regions``) and sizes each from the region of
     its name in the current mesh (``driver.CollapseDriver._regions_focus``), then sizes the new tip
     from the cap, a rebuild for distortion keeping the cap's size there, and a new neck of the chain
-    from the spacing it measures, not from the cut neck's size; no two regions share a name.
-    Returns the regions and the names changed (old to new)."""
+    from the spacing it measures, not from the cut neck's size; no two regions share a name. The
+    core's twin of either (``jetcore.TWIN_PREFIX``, with ``jetcore.core_elements_per_scale``) is
+    renamed with it. Returns the regions and the names changed (old to new)."""
     from dataclasses import replace
+
+    from .jetcore import TWIN_PREFIX
 
     neck = f"neck_{chain}"
     renamed, out = {}, []
     for g in regions:
-        cut_feature = g.name == cap.name or (g.name == neck and math.hypot(
+        name = g.name[len(TWIN_PREFIX):] if g.name.startswith(TWIN_PREFIX) else g.name
+        cut_feature = name == cap.name or (name == neck and math.hypot(
             float(g.r) - float(r_n), float(g.z) - float(z_n)) <= float(g.radius))
         if cut_feature:
             renamed[g.name] = f"{g.name}_e{int(k):03d}"

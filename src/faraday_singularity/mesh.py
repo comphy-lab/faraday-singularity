@@ -87,26 +87,47 @@ class FocusRegion:
     """One feature of the free surface after a cut, meshed at its own element size.
 
     The interface nodes of every chain within ``radius`` of ``(r, z)`` are attractors of size
-    ``size`` (``axial``: those with ``r <= radius``, at any height, as a focus without regions)."""
+    ``size`` (``axial``: those with ``r <= radius``, at any height, as a focus without regions);
+    with ``core`` (the twin of a region on the core of the upward jet, ``jetcore.core_twins``) only
+    those of the open chain that the core's selection holds (``jetcore.core_select``)."""
     name: str
     size: float
     r: float
     z: float
     radius: float
     axial: bool = False
+    core: tuple | None = None  # left out of the records without it (to_dict)
 
     def __post_init__(self):  # plain numbers: they are written into gmsh field expressions
         for name in ("size", "r", "z", "radius"):
             object.__setattr__(self, name, float(getattr(self, name)))
         object.__setattr__(self, "axial", bool(self.axial))
+        if self.core is not None:
+            object.__setattr__(self, "core", tuple(float(x) for x in self.core))
         if not (self.size > 0 and self.radius > 0):
             raise ValueError("a focus region needs a positive size and radius")
 
-    def selects(self, P: np.ndarray) -> np.ndarray:
-        """Which of the points ``P`` (``(M, 2)``: r, z) are attractors of this region."""
+    def selects(self, P: np.ndarray, is_open: bool = True) -> np.ndarray:
+        """Which of the points ``P`` (``(M, 2)``: r, z; the nodes of one chain, the open chain where
+        ``is_open``) are attractors of this region."""
         if self.axial:
-            return P[:, 0] <= self.radius
-        return np.hypot(P[:, 0] - self.r, P[:, 1] - self.z) <= self.radius
+            inside = P[:, 0] <= self.radius
+        else:
+            inside = np.hypot(P[:, 0] - self.r, P[:, 1] - self.z) <= self.radius
+        if self.core is None:
+            return inside
+        if not is_open:
+            return np.zeros(len(P), dtype=bool)
+        from .jetcore import core_select
+
+        return inside & core_select(P, self.core)
+
+    def to_dict(self) -> dict:
+        """As a record holds it: every field, ``core`` only where it is set."""
+        out = asdict(self)
+        if self.core is None:
+            del out["core"]
+        return out
 
 
 @dataclass(frozen=True)
@@ -126,7 +147,7 @@ class Focus:
         """As a state dump or a record holds it: the three numbers, and the regions if any."""
         out = {"size": self.size, "radius": self.radius, "grading": self.grading}
         if self.regions:
-            out["regions"] = [asdict(g) for g in self.regions]
+            out["regions"] = [g.to_dict() for g in self.regions]
         return out
 
     def region(self, name: str) -> FocusRegion | None:
@@ -321,7 +342,7 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
             if focus is not None and not regions:
                 attractor_pts += [pt for pt, x in zip(pts, c.points[:, 0]) if x <= focus.radius]
             for sel, g in zip(region_pts, regions):
-                sel += [pt for pt, inside in zip(pts, g.selects(c.points)) if inside]
+                sel += [pt for pt, inside in zip(pts, g.selects(c.points, c.is_open)) if inside]
         lowest = tips[spans[0][1]]
         self.create_lines(wall_pt, "wall", (self.radius, 0.0), "bottom", (0.0, 0.0), "axis", lowest)
         bridges = [self.line(tips[a], tips[b], name="axis") for a, b in spans[1:]]
@@ -450,7 +471,7 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
             if focus is not None and not regions:
                 attractor_pts += [pt for pt, x in zip(pts, c.points[:, 0]) if x <= focus.radius]
             for sel, g in zip(region_pts, regions):
-                sel += [pt for pt, inside in zip(pts, g.selects(c.points)) if inside]
+                sel += [pt for pt, inside in zip(pts, g.selects(c.points, c.is_open)) if inside]
         holes = []
         for L in loops:
             pts = [self.point(x, y) for x, y in L.tolist()]
@@ -462,7 +483,7 @@ class FaradayCylinderMesh(TopologicalChangesGmshTemplate):
             ring_curves += halves
             nodes += list(zip(pts, L.tolist()))
             for sel, g in zip(region_pts, regions):
-                sel += [pt for pt, inside in zip(pts, g.selects(L)) if inside]
+                sel += [pt for pt, inside in zip(pts, g.selects(L, False)) if inside]
         lowest = tips[spans[0][1]]
         outer = curves + self.create_lines(wall_pt, "wall", (self.radius, 0.0), "bottom",
                                            (0.0, 0.0), "axis", lowest)

@@ -720,8 +720,19 @@ for distortion) may change the liquid volume and axial momentum of the box of ra
 `liquid.box_radius delta` about the core's base by at most `box_gate_sigmas` (5) times the
 calibrated floors `liquid.sigma_V` and `liquid.sigma_Pz`; beyond either the run stops (`box-gate`)
 on the state before the rebuild, dumped as `states/gate_<step>.dump`, from which a continuation
-resumes. `jetcore.txt` records per step what set the step, the split Courant limit (with the node
-of each class that sets its part) and the core, and each leg the resolved keys. The block's `pinch`
+resumes. With `core_elements_per_scale` (null for the run's elements per scale after the cut, and
+never below it) the core alone is meshed finer, for a test of its resolution: every rule's size on
+the core's nodes becomes `q = elements_per_scale/core_elements_per_scale` times what the rule asks
+for and every other node's is unchanged. Each region of a rebuild whose ball holds core nodes (the
+base of the jet, the neck of the jet, the cut's sizes about the open chain's tip, a far kink, of any
+class) has a twin of its ball, `core_<name>`, at `q` times its target (never below the run's
+`h_floor`, flagged `core_floored` where that clips it) whose attractors are those core nodes alone,
+and the guard asks for a refinement of a core element that turns by more than `q` times
+`reconnect.edge_turn_refine`, so that its own kink regions, sized from the elements they read,
+come where a coarser core asks for them; the core is still stepped at `reconnect.courant`. It is
+written into the block and its hash only where it is set. `jetcore.txt` records per step what set
+the step, the split Courant limit (with the node of each class that sets its part) and the core,
+and each leg the resolved keys. The block's `pinch`
 part (off by default, written only where it differs from its defaults; its keys are keys of the
 class `liquid`) decides when a tracked neck with a head is cut: with `enabled` only once it closes,
 `r_n <= r_c delta` (`r_c`, 0.2) with a quadratic fit of `r_n(t)` over the trailing `window

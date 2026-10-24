@@ -315,7 +315,11 @@ the downward jet's tip are refined (``jetcore.prep_regions``, ``pierce_bottom``,
 so that the ring cut admits the splice radius ``prep_rho s_t``, their nodes stepped at the core's
 Courant number; ``jetcore.txt`` holds a row per step (``jetcore.COLUMNS``: what
 set the step, the split limit, the core, the far regions) and every leg the resolved keys
-(``limits.jetcore``).
+(``limits.jetcore``). With ``core_elements_per_scale`` above the run's elements per scale every
+rule's size on the core's nodes is ``q`` times what it asks for (``jetcore.core_ratio``): each
+region whose ball holds core nodes has its twin on them (``jetcore.core_twins``, ``core_<name>``,
+its spacing and that of the region it splits read apart), and the guard reads the core's turns at
+``q`` times its limit (``jetcore.core_turns``).
 
 With the block's ``groove.enabled`` (``events.GrooveEventSettings``) a closing gas groove (class
 ``A-groove``, of the open chain or the bubble; ``RF``, a fold of the ring) is met by its fill
@@ -789,6 +793,11 @@ class CollapseDriver:
         if events is not None:  # oomph-lib's smallest step after the cut, against the floor then
             minimum_dt_after_cut(events.post, settings.dt_min if events.post.dt_min is None
                                  else events.post.dt_min)
+            from .jetcore import core_ratio  # the core refined, never coarsened
+
+            core_ratio(events.jetcore.core_elements_per_scale,
+                       settings.elements_per_scale if reconnect.elements_per_scale is None
+                       else reconnect.elements_per_scale)
         self._post_cut_cache: tuple | None = None
         # with jetcore.box_gate: the stop of a rebuild whose box changed beyond it (_gate_after)
         self._gate_stop: dict | None = None
@@ -983,6 +992,19 @@ class CollapseDriver:
         if jet is None or jet.far_courant is None:
             return self.reconnect.courant
         return jet.far_courant
+
+    def _core_ratio(self) -> float | None:
+        """With ``jetcore.core_elements_per_scale`` above the run's elements per scale after the cut
+        (``reconnect.elements_per_scale`` or the collapse's): the factor of every size on the core's
+        nodes (``jetcore.core_ratio``); None otherwise, every size as without the key."""
+        jet = self._jetcore()
+        if jet is None or jet.core_elements_per_scale is None:
+            return None
+        from .jetcore import core_ratio
+
+        eps = (self.s.elements_per_scale if self.reconnect.elements_per_scale is None
+               else self.reconnect.elements_per_scale)
+        return core_ratio(jet.core_elements_per_scale, eps)
 
     def _core_state(self, segs: list, apexes: dict, loops: list) -> dict | None:
         """With ``jetcore``: the core of the open chain (``jetcore.core_mask``, about the base of
@@ -1452,6 +1474,9 @@ class CollapseDriver:
             out["jetcore"] = {"core_courant": self.reconnect.courant,
                               "far_courant": self._far_courant(),
                               "core_radius": jet.core_radius, "wall_radius": jet.wall_radius}
+            if jet.core_elements_per_scale is not None:  # only where it is set: legs as before
+                out["jetcore"].update(core_elements_per_scale=jet.core_elements_per_scale,
+                                      core_ratio=self._core_ratio())
         return out
 
     def _neck_limit(self) -> float:
@@ -1522,6 +1547,16 @@ class CollapseDriver:
                                  h_floor=h_floor, refine_ratio=s.refine_ratio)["refine"]
         focus = self.pb.active_mesh_template().focus
         jet, core = self._jetcore(), pc.get("core")
+        q = self._core_ratio() if core is not None else None
+        if q is not None and "open" in pc["edges"]:
+            # the finer core's elements read at q times the guard's turn (jetcore.core_turns)
+            from .jetcore import core_turns
+
+            extra = core_turns(pc["edges"], core, turn=q * self.reconnect.edge_turn_refine,
+                               min_length=s.refine_ratio * h_floor)
+            if len(extra):
+                refine["open"] = np.union1d(refine.get("open", np.zeros(0, dtype=int)),
+                                            extra).astype(int)
         if jet is not None and core is not None and jet.far_kinks == "recentre":
             kinks = self._split_kinks(refine, pc, core, U, focus)
         else:
@@ -1537,6 +1572,13 @@ class CollapseDriver:
         if jet is not None and core is not None:
             regions += [dict(g) for g in core.get("prep") or ()]  # before the piercing
             self._far_sizing(regions, segs, core)
+            if q is not None:  # the core meshed finer: the twins on its nodes
+                from .jetcore import core_spec, core_twins
+
+                o = next(c for c in segs if c["open"])
+                P = np.column_stack([o["r"], o["z"]])
+                regions += core_twins(regions, P, core, core_spec(core, P, jet.wall_radius),
+                                      ratio=q, h_floor=h_floor)
         for g in regions:
             current = focus.region(g["name"]) if focus is not None else None
             g["size"] = current.size if current is not None else math.nan
@@ -1546,6 +1588,7 @@ class CollapseDriver:
             from .ring import loop_segment
 
             spaced = segs + [loop_segment(x) for x in pc["loops"]]
+        split = self._twin_selection(regions, core)
         for g in regions:
             if g.get("frozen"):
                 g["h_max"] = g["h_min"] = math.nan
@@ -1554,11 +1597,35 @@ class CollapseDriver:
             finer = []
             for f in regions:
                 other = f["size"] if math.isfinite(f["size"]) else f["target"]
-                if f is not g and other < own:
+                if f is not g and other < own and (split is None
+                                                   or ("twin_of" in f) == ("twin_of" in g)):
                     finer.append((f["r"], f["z"], f["radius"] + (own - other) / grading))
             g["h_max"], g["h_min"] = region_spacing(spaced, g, axis_tips, cut.get("sizing"), own,
-                                                    finer)
+                                                    finer, select=None if split is None
+                                                    else split(g))
         return regions, kinks
+
+    @staticmethod
+    def _twin_selection(regions: list[dict], core: dict | None):
+        """With the core's twins (``jetcore.core_twins``): the nodes each region's spacing reads
+        (``reconnect.region_spacing``'s ``select``), a function of the region: a twin's the core's
+        nodes of the open chain, a region with a twin its other nodes, any other region every node;
+        a twin's finer regions are twins and a region's finer regions other regions, so that each
+        rule reads its own nodes as without the twins. None without twins."""
+        twinned = {g["twin_of"] for g in regions if "twin_of" in g}
+        if not twinned:
+            return None
+        mask = np.asarray(core["mask"], dtype=bool)
+
+        def select(g):
+            if "twin_of" in g:
+                return lambda c: (mask if c.get("open")
+                                  else np.zeros(len(c["r"]), dtype=bool))
+            if g["name"] in twinned:
+                return lambda c: ~mask if c.get("open") else np.ones(len(c["r"]), dtype=bool)
+            return None
+
+        return select
 
     def _split_kinks(self, refine: dict, pc: dict, core: dict, U: float, focus) -> dict:
         """With ``jetcore.far_kinks`` ``recentre``: the guard's kink regions split between the core
@@ -1699,7 +1766,8 @@ class CollapseDriver:
                     size = min(size, s.max_coarsen_factor * bound)
                 if g.get("kept") is not None:
                     size = min(size, g["kept"])
-            out.append(FocusRegion(g["name"], size=size, r=g["r"], z=g["z"], radius=g["radius"]))
+            out.append(FocusRegion(g["name"], size=size, r=g["r"], z=g["z"], radius=g["radius"],
+                                   core=g.get("core")))
         return Focus(size=min(x.size for x in out), radius=max(x.radius for x in out),
                      grading=s.focus_grading, regions=tuple(out))
 
@@ -1712,7 +1780,8 @@ class CollapseDriver:
             out.append({k: g[k] for k in ("name", "target", "size", "h_max", "h_min", "r", "z",
                                           "radius")}
                        | ({"new_size": new.size} if new is not None else {})
-                       | ({"class": g["class"]} if "class" in g else {}))
+                       | ({"class": g["class"]} if "class" in g else {})
+                       | {k: g[k] for k in ("twin_of", "core_nodes", "core_floored") if k in g})
         return out
 
     def _write_chain_row(self, m: dict, dt: float):

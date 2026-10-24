@@ -32,6 +32,20 @@ which needs the splice radius ``rho`` at least ``ring.RHO_MIN_NODES`` element le
 splices) admits ``rho = prep_rho s_t``, ``s_t`` the radius of the jet's shoulder, with a margin of
 ``PREP_MARGIN``; these regions are exempt from the far floor and their nodes are stepped at the
 core's Courant number (:func:`prep_mask`).
+
+The core alone can be meshed finer (``core_elements_per_scale``, :func:`core_ratio`): every rule's
+size on the core's nodes ``q`` times what it asks for, every other node's unchanged. The core's
+nodes are sized by regions of every class: the base of the jet (``jet_base_cavity_tip``) within
+``max(apex_extent R_apex, 4 target)`` of it, but beyond that, on the walls to ``wall_radius L``
+and up the stem to its neck, by the region of the jet's tracked neck and by the cut's focus size
+about the open chain's tip, whatever their class. So each region whose ball holds core nodes has a
+twin (:func:`core_twins`, ``core_<name>``) of its ball at ``q`` times its target, never below the
+run's ``h_floor`` (``core_floored`` where that clips it), whose attractors are those core nodes
+alone (:func:`core_spec`, :func:`core_select`; ``mesh.FocusRegion.core``), the region itself
+unchanged and its spacing read off the core; the guard's own kink regions have none, their target a
+quarter of the chord of the bending element of the finer core, which the guard reads at ``q`` times
+its turn (:func:`core_turns`), so that a core kink is asked for where the coarser core asks for
+one.
 """
 
 from __future__ import annotations
@@ -296,3 +310,103 @@ def prep_mask(seg, regions: list[dict]) -> np.ndarray | None:
     for g in regions:
         out |= np.hypot(r - g["r"], z - g["z"]) <= g["radius"]
     return out
+
+
+# --- the core meshed finer: core_elements_per_scale ------------------------------------------------
+
+TWIN_PREFIX = "core_"  # the name of a region's twin on the core's nodes: core_<name>
+
+
+def core_ratio(core_elements_per_scale: float | None, elements_per_scale: float) -> float | None:
+    """``q = elements_per_scale / core_elements_per_scale``, the factor of every size on the core's
+    nodes (module docstring), ``elements_per_scale`` the run's after the cut; None without the key
+    or at the run's own number, every size then as without it. A smaller number than the run's,
+    which would coarsen the core, is refused."""
+    if core_elements_per_scale is None or core_elements_per_scale == elements_per_scale:
+        return None
+    if not core_elements_per_scale > elements_per_scale:
+        raise ValueError(f"jetcore.core_elements_per_scale {core_elements_per_scale!r} must be at "
+                         f"least the run's elements per scale after the cut, {elements_per_scale!r} "
+                         "(it refines the core, it does not coarsen it)")
+    return float(elements_per_scale) / float(core_elements_per_scale)
+
+
+def core_spec(core: dict, points, wall_radius: float) -> tuple:
+    """The core of :func:`core_mask` (``core``, on the open chain ``points``) as a rebuild selects
+    its nodes again (:func:`core_select`, ``mesh.FocusRegion.core``): ``(A_r, A_z, R_K, W, a_r, a_z,
+    n_r, n_z)``, the base ``A``, ``R_K``, the walls' reach ``W = wall_radius L``, the apex's node
+    and the capping neck's node (NaN without a neck); ``A`` NaN for a whole open chain."""
+    nan = math.nan
+    if core["whole"]:
+        return (nan,) * 8
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    a = P[int(core["apex_index"])]
+    neck = core["neck"]
+    n = P[int(neck["index"])] if neck is not None else (nan, nan)
+    return (float(core["A_r"]), float(core["A_z"]), float(core["R_K"]),
+            float(wall_radius * core["L"]), float(a[0]), float(a[1]), float(n[0]), float(n[1]))
+
+
+def core_select(points, spec) -> np.ndarray:
+    """The core nodes of an open chain ``points`` (its nodes from the tip on the axis to the wall)
+    by the ``spec`` of :func:`core_spec`: within ``R_K`` of the base and at or after the node nearest
+    the neck's, or after the node nearest the apex's and within ``W`` of the base; on the nodes the
+    spec was read from, :func:`core_mask`'s mask exactly; every node for a whole open chain."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    A_r, A_z, R_K, W, a_r, a_z, n_r, n_z = (float(x) for x in spec)
+    if not math.isfinite(A_r):
+        return np.ones(len(P), dtype=bool)
+    idx = np.arange(len(P))
+    i_a = nearest_node(P, a_r, a_z)
+    i_n = nearest_node(P, n_r, n_z) if math.isfinite(n_r) else 0
+    d = np.hypot(P[:, 0] - A_r, P[:, 1] - A_z)
+    return ((d <= R_K) & (idx >= i_n)) | ((idx > i_a) & (d <= W))
+
+
+def core_kink(name: str) -> bool:
+    """Whether a region is one of the guard's own kink regions (``kink_<chain>``, not the far
+    region's ``kink_<chain>_far``), sized from the elements of the mesh it reads."""
+    return name.startswith("kink_") and not name.endswith("_far")
+
+
+def core_twins(regions: list[dict], open_points, core: dict, spec: tuple, *, ratio: float,
+               h_floor: float) -> list[dict]:
+    """The twins of the regions of a rebuild on the core's nodes (module docstring): for each region
+    whose ball holds a node of the core (``core["mask"]`` on ``open_points``), but the ring's frozen
+    regions, the pre-pierce regions and the guard's own kinks (:func:`core_kink`), ``core_<name>``
+    of its ball at ``max(ratio target, h_floor)`` (``core_floored`` where the floor clips it; its
+    ``kept`` at ``ratio`` times the region's), class ``CORE``, ``twin_of`` its name, ``core`` the
+    selection of its attractors (``spec``) and ``core_nodes`` the core nodes in its ball."""
+    P = np.asarray(open_points, dtype=float).reshape(-1, 2)
+    mask = np.asarray(core["mask"], dtype=bool)
+    out = []
+    for g in regions:
+        if g.get("frozen") or g.get("class") in (PREP, FROZEN) or core_kink(g["name"]):
+            continue
+        inside = mask & (np.hypot(P[:, 0] - g["r"], P[:, 1] - g["z"]) <= g["radius"])
+        if not inside.any():
+            continue
+        target = ratio * float(g["target"])
+        twin = {"name": TWIN_PREFIX + g["name"], "target": max(target, h_floor), "r": g["r"],
+                "z": g["z"], "radius": g["radius"], "ell": g.get("ell", math.inf),
+                "floor": h_floor, "class": CORE, "twin_of": g["name"], "core": spec,
+                "core_nodes": int(inside.sum())}
+        if target < h_floor:
+            twin["core_floored"] = True
+        if g.get("kept") is not None:
+            twin["kept"] = ratio * float(g["kept"])
+        out.append(twin)
+    return out
+
+
+def core_turns(readings: dict, core: dict, *, turn: float, min_length: float) -> np.ndarray:
+    """The elements of the open chain (indices into its ``edges``, ``reconnect.p2_edges``) whose
+    midside node is a core node and whose tangent turns by more than ``turn`` degrees, longer than
+    ``min_length`` (shorter ones the rule cannot refine): the guard's refinement of the finer core
+    (module docstring)."""
+    e = readings["open"]["edges"]
+    mask = np.asarray(core["mask"], dtype=bool)
+    mid = np.clip(np.asarray(e["index"], dtype=int), 0, len(mask) - 1)
+    with np.errstate(invalid="ignore"):
+        bad = mask[mid] & (np.asarray(e["turn"]) > turn) & (np.asarray(e["L"]) > min_length)
+    return np.flatnonzero(bad)

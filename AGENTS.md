@@ -484,6 +484,17 @@ add a second top-level `cases/` tree.
   (reason `window`); `box_gate` stops the run (`box-gate`, on `states/gate_<step>.dump`, the state
   before the rebuild) where an ordinary rebuild changes the liquid volume or axial momentum of the
   box about the core's base by more than `box_gate_sigmas` times `liquid.sigma_V`, `sigma_Pz`;
+  `core_elements_per_scale` (null: the run's elements per scale after the cut; never below it,
+  `jetcore.core_ratio`, refused by the driver and the runner) meshes the core alone finer, every
+  rule's size on its nodes `q = eps/core_elements_per_scale` times what it asks for: each region
+  whose ball holds core nodes has a twin `core_<name>` of its ball at `q` times its target, floored
+  at `h_floor` (`core_floored`), whose attractors are those core nodes (`jetcore.core_twins`,
+  `core_spec`, `core_select`, `mesh.FocusRegion.core`, written into the focus records only where
+  set), the twin's spacing and its region's read apart (`CollapseDriver._twin_selection`,
+  `reconnect.region_spacing`'s `select`), the guard's turn on the core read at `q` times
+  `edge_turn_refine` (`jetcore.core_turns`; its own kinks have no twin), a liquid cut renaming a
+  twin with its region (`events.event_focus_regions`); the key is in the block and its hash only
+  where it is set (`EventSettings.LATE_KEYS`), so every block recorded before it hashes as it did;
   `jetcore.txt` a row per step (`jetcore.COLUMNS`), `limits.jetcore` in each leg. The `pinch`
   part (`events.PinchSettings`, keys of the class `liquid`, `EventSettings.CLASS_OF_PART`) lands a
   tracked neck only when it closes (`events.closing_neck`, from the driver's per-neck history,
@@ -500,8 +511,12 @@ add a second top-level `cases/` tree.
   `testCases/test_jetcore.py` (stand-ins), `test_jetcore_fem.py` (the far floor and kinks on the
   synthetic headed state, the pre-pierce refinement on the pierced state, the far-head cut) and
   `test_jetcore_identity.py` (without the parts every run of 4a6c999 to the byte; with `jetcore`
-  at its defaults the same solution, `jetcore.txt` added) cover it. After a cut the stops of a state
-  are evaluated once (`CollapseDriver._stop_key`), and the runner's `--step-timing` writes
+  at its defaults the same solution, `jetcore.txt` added) cover it, and for
+  `core_elements_per_scale` `test_core_res.py` (stand-ins, the runner's admission),
+  `test_core_res_fem.py` (the core's elements halved on the heads' state and none off it; a
+  restart under the key rebuilding at its sizes) and `test_core_res_identity.py` (runs without
+  the key, the production block and its hash, 3e00e92's to the byte). After a cut the stops of a
+  state are evaluated once (`CollapseDriver._stop_key`), and the runner's `--step-timing` writes
   `step_timing.txt` (`driver.STEP_TIMING_COLUMNS`); neither changes a value.
 - Element distortion (`RemeshWhen` at pyoomph's defaults: size ratio below 0.6 or above 1.75,
   quality ratio below 0.2, against the element at its build; never checked on the first solve on a

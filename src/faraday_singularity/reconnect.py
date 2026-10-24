@@ -1250,21 +1250,25 @@ def feature_regions(segs, cavity: dict, tips: dict, necks: dict, cut: dict,
 
 
 def region_spacing(segs, region: dict, axis_tips: Sequence[float], sizing: dict | None,
-                   size: float, finer: Sequence[tuple[float, float, float]] = ()
-                   ) -> tuple[float, float]:
+                   size: float, finer: Sequence[tuple[float, float, float]] = (),
+                   select=None) -> tuple[float, float]:
     """``(h_max, h_min)``: the longest and the shortest element (twice the node spacing; the elements
     are quadratic) of the chains within ``region`` (a ball of ``radius`` about ``(r, z)``), the
     shortest only where the cut's sizing (:func:`cut_size_field`) asks for at least
     ``CUT_SIZING_MARGIN`` times ``size``, since no focus can coarsen what it refines, and outside
     the balls ``finer`` (``(r, z, reach)``: the regions of a finer size within this one, with the
     reach of their grading), whose elements are theirs to coarsen; NaN where the region holds no
-    such element."""
+    such element. ``select`` (a function of a chain, None for every node) restricts the nodes read
+    to those it returns true for (the core's twins and the regions they split,
+    ``jetcore.core_twins``)."""
     longest, shortest = [], []
     for c in segs:
         r, z = np.asarray(c["r"], dtype=float), np.asarray(c["z"], dtype=float)
         if len(r) < 2:
             continue
         inside = np.hypot(r - region["r"], z - region["z"]) <= region["radius"]
+        if select is not None:
+            inside = inside & select(c)
         edges = inside[:-1] & inside[1:]
         if not edges.any():
             continue

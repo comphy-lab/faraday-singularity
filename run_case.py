@@ -91,7 +91,9 @@ made, that event (``event``).
 An unknown key of the ``collapse`` block is refused with a message before any output, as is an
 invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
 or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
-step-size floor after the cut (``events.minimum_dt_after_cut``).
+step-size floor after the cut (``events.minimum_dt_after_cut``), or a
+``jetcore.core_elements_per_scale`` below the run's elements per scale after the cut
+(``jetcore.core_ratio``).
 """
 
 from __future__ import annotations
@@ -611,6 +613,12 @@ def main() -> int:
             try:
                 minimum_dt_after_cut(events.post, settings.dt_min if events.post.dt_min is None
                                      else events.post.dt_min)
+                # the core's elements per scale, at least the run's (jetcore.core_ratio)
+                from faraday_singularity.jetcore import core_ratio
+
+                core_ratio(events.jetcore.core_elements_per_scale,
+                           settings.elements_per_scale if reconnect.elements_per_scale is None
+                           else reconnect.elements_per_scale)
             except ValueError as exc:
                 raise SystemExit(f"{args.case}: {exc}")
 
