@@ -97,7 +97,10 @@ drops or changes it is refused as a different case. A dump of an active gas has 
 it (``<dump>.gas.npz``), which the restart record hashes (``gas_sha256``) and the restart copies
 and restores with it. A landing state of an active gas records the partition of the gas at the neck
 (``gas_handover``), and a cut from it writes that partition at the cut's neck to
-``gas_cut.json`` and retires the gas: after the cut the bubble keeps the passive pressure.
+``gas_cut.json`` and retires the gas: after the cut the bubble keeps the passive pressure, or with
+``collapse.reconnect.bubble_model`` ``polytropic`` (``isothermal``) takes that partition's gas on a
+polytrope of exponent 1.4 (1) whose pressure acts on its surface (``neckgas.bubble``); such a model
+needs the block and, at a cut, a state whose gas is active.
 An unknown key of the ``collapse`` block is refused with a message before any output, as is an
 invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
 or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
@@ -150,8 +153,6 @@ from faraday_singularity.events import (EVENT_SCHEMA, EVENTS_BLOCK, PRECUT_EVENT
                                         EventSettings, events_done, minimum_dt_after_cut,
                                         split_events_block)
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
-from faraday_singularity.neckgas.coupler import (GAS_BLOCK, GasSettings,  # noqa: E402
-                                                 split_gas_block)
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import create_run_manifest, pyoomph_revision  # noqa: E402
 from faraday_singularity.reconnect import (CONTINUATION_KEYS, ReconnectSettings,  # noqa: E402
@@ -597,6 +598,10 @@ def main() -> int:
     dt = period / ts["steps_per_forcing_period"]  # fixed step, or the largest step of a collapse
     dt_out = period * float(case["output"]["cadence"])
     t_end = periods * period
+    # the gas in the neck (collapse.gas), imported here: the module-level names of this runner are
+    # those of every source the tests import it against
+    from faraday_singularity.neckgas.coupler import GAS_BLOCK, GasSettings, split_gas_block
+
     settings = None
     reconnect = None
     events = None
@@ -669,6 +674,15 @@ def main() -> int:
         if args.outdir.resolve().is_relative_to(parent_root):
             raise SystemExit("restart output cannot be inside its parent run")
         args.restart = source_state
+    if reconnect is not None and reconnect.bubble_model != "constant-pressure":
+        # the polytropic bubble takes its gas from the coupled gas in the neck at the cut
+        if gas is None:
+            raise SystemExit(f"{args.case}: collapse.reconnect.bubble_model "
+                             f"{reconnect.bubble_model!r} needs a collapse.{GAS_BLOCK} block")
+        if restart_mode == CUT and (restart_meta.get("gas") or {}).get("status") != "active":
+            raise SystemExit(f"{args.case}: collapse.reconnect.bubble_model "
+                             f"{reconnect.bubble_model!r} cuts only a state whose gas is active "
+                             "(its hand-over is the bubble's gas)")
     if events is not None and restart_mode not in (CUT, POST_CUT):
         raise SystemExit(f"{args.case}: collapse.{EVENTS_BLOCK} applies after a cut: only a cut "
                          "or post-cut restart takes it")

@@ -53,7 +53,9 @@ def test_a_gas_block_is_checked_before_any_output(tmp_path):
 
 
 def test_the_gas_block_is_no_key_of_the_driver_settings(tmp_path):
-    rest, block = run_case.split_gas_block({"gas": GAS, "neck_stop": 1e-4})
+    from faraday_singularity.neckgas.coupler import split_gas_block
+
+    rest, block = split_gas_block({"gas": GAS, "neck_stop": 1e-4})
     assert block == GAS and rest == {"neck_stop": 1e-4}
     settings = run_case.CollapseSettings.from_dict(rest, t_end=1.0, dt_max=0.1)
     assert "gas" not in run_case.asdict(settings)
