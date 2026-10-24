@@ -495,7 +495,15 @@ add a second top-level `cases/` tree.
   curls back past its neck's height, every node beyond it outside the neck's radius and its
   half-section simple, is a head (`events.head_sides`, `curled` and `curl_depth` in its neck's
   record and request; `testCases/test_curled_head.py`), the head the chain from its tip to that
-  root neck.
+  root neck. A closing groove from the upward jet's head onto the core (one node of the pair on the
+  head from the tip, the other a core node, the wall or the stem beside the base) is the cut of
+  that head at its root neck too (`head_fold` in the request), the head's nodes but its neck off
+  the core, and the cut is checked against the jet's base, read before and after on the fresh mesh
+  (`surgery.liquid_cut`'s `base_check`, `CollapseDriver._head_fold_check`, `base_guard` in the
+  record): `r_j`, `V_j`, `Q_j` within `driver.HEAD_FOLD_BASE_TOL` (1e-3) relative and `z_b` within
+  that times `r_j`, or the hard closure `F_base` (`event-unclosed`); `test_head_fold.py`,
+  `test_head_fold_fem.py`, and `test_head_fold_identity.py` (runs meeting none of it are
+  3e00e92's).
   A key whose behaviour the driver does not make is refused (`events.PENDING_KEYS`).
   `testCases/test_jetcore.py` (stand-ins), `test_jetcore_fem.py` (the far floor and kinks on the
   synthetic headed state, the pre-pierce refinement on the pierced state, the far-head cut) and

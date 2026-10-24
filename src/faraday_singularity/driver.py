@@ -335,7 +335,13 @@ of the mesh a resumable stop (``sheet-contact``, never the fill).
 With the block's ``pinch.far_head`` an event without a handler (a gas neck, a closing groove)
 whose site lies on the head of a tracked neck in the far region is met by the liquid cut of that
 neck (``events.far_head_request``, kind ``far-head``, class ``F-head``, an event ``far-head``;
-its budgets the cut's hard closures). With ``jetcore.box_gate`` every ordinary rebuild may change
+its budgets the cut's hard closures). A closing groove from the upward jet's head onto the core (the
+cavity's wall or the stem beside the base; ``head_fold`` in the request) is the cut of that head
+too, its nodes but the neck off the core, and the cut is checked against the jet's base: read
+before and after it (:meth:`CollapseDriver._head_fold_check`, ``base_guard`` in the record), a base
+whose ``r_j``, ``V_j`` or ``Q_j`` moves by more than ``HEAD_FOLD_BASE_TOL`` relative, or ``z_b`` by
+more than that times ``r_j``, is the hard closure ``F_base`` (``event-unclosed``). With
+``jetcore.box_gate`` every ordinary rebuild may change
 the liquid volume and axial momentum in the box of radius ``liquid.box_radius delta`` about the
 core's base by at most ``box_gate_sigmas`` times ``liquid.sigma_V`` and ``liquid.sigma_Pz``
 (:meth:`CollapseDriver._gate_before`, :meth:`CollapseDriver._gate_after`, ``box_gate`` in the
@@ -483,6 +489,10 @@ MAX_CURVATURE_KIND = "trough-episode"
 # a dump kept within a step, after its stop checks and before its snapshot and remesh checks
 RESUME_REMESH_CHECK = "remesh-check"
 NECK_SAMPLES = 100  # (t, r_n) samples of the closing neck the driver keeps for the pinch time
+# the cut of the upward jet's head folding onto the core (events.far_head_request's head_fold) must
+# leave the jet's base as it was: r_j, V_j and Q_j within this relative change, z_b within this
+# times r_j (CollapseDriver._head_fold_check; r1's cut of its curled head changed them by 2-3e-4)
+HEAD_FOLD_BASE_TOL = 1e-3
 PINCH_FIT_SPAN = 1.5  # the pinch time is fitted to the latest samples with r_n <= this * the last
 
 
@@ -3112,9 +3122,11 @@ class CollapseDriver:
         dt_prev = st.dt_prev if st.dt_prev else float(self._cut_record()["settings"]["dt0"])
         self._event_before, self._event_after = (m, tip, verdict), None
         try:
+            check = {"base_check": self._head_fold_check(m)} if request.get("head_fold") \
+                else {}
             made = liquid_cut(self.pb, self.events, r, self.outdir, request, k=k,
                               dt_prev=dt_prev, elements_per_scale=eps, h_floor=self._h_floor(),
-                              driver=self, on_made=self._on_event_made)
+                              driver=self, on_made=self._on_event_made, **check)
         except (CutRefused, BudgetUnclosed) as e:
             rec = getattr(e, "record", None) or {}
             reason = LIQUID_CUT_REFUSED if isinstance(e, CutRefused) else EVENT_UNCLOSED
@@ -3133,6 +3145,30 @@ class CollapseDriver:
         self._drop_event_dumps()
         self._prune_meshes()
         return m, None
+
+    def _head_fold_check(self, m: dict):
+        """The check of the upward jet's base for the cut of its head folding onto the core
+        (``events.far_head_request``'s ``head_fold``, ``surgery.liquid_cut``'s ``base_check``):
+        a callable that measures the fresh mesh and compares the base (``r_j``, ``z_b``, ``V_j``,
+        ``Q_j`` of the open chain's jet) with its reading ``m`` before the cut, ``ok`` where
+        ``r_j``, ``V_j`` and ``Q_j`` change by at most ``HEAD_FOLD_BASE_TOL`` relative and
+        ``z_b`` by at most that times ``r_j`` (decision 22: the base, its walls and the stem stay
+        as resolved)."""
+        keys = ("r_j", "z_b", "V_j", "Q_j")
+        before = {k: float(m.get(k, math.nan)) for k in keys}
+
+        def check() -> dict:
+            after_m = self.measure()
+            after = {k: float(after_m.get(k, math.nan)) for k in keys}
+            r_j = before["r_j"]
+            change = {k: (after[k] - before[k]) / abs(before[k]) if before[k] else math.nan
+                      for k in ("r_j", "V_j", "Q_j")}
+            change["z_b"] = (after["z_b"] - before["z_b"]) / r_j if r_j > 0.0 else math.nan
+            ok = all(math.isfinite(v) and abs(v) <= HEAD_FOLD_BASE_TOL for v in change.values())
+            return {"before": before, "after": after, "change": change,
+                    "tol": HEAD_FOLD_BASE_TOL, "ok": bool(ok)}
+
+        return check
 
     def _far_head(self, request: dict) -> dict | None:
         """With ``pinch.far_head`` (and ``jetcore``): the request of the cut of the far head an

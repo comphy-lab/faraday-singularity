@@ -694,11 +694,11 @@ a handler (a resumable stop).
 
 The block's `jetcore` part (off by default, and written into the block and its hash only where it
 differs from its defaults; every key a key of the leg, its sizing keys among `events.SIZING_KEYS`)
-sets a resolution policy for the run after the cut that resolves the upward jet as before and
-meshes and steps the rest of the free surface under simplifying assumptions, every feature kept in
-the domain (`jetcore.py`). The core is the part of the open chain about the base of the upward jet,
-the apex of the groove around it: its nodes within `max(core_radius L, apex_extent R_apex)` of the
-base (`L = max(r_j, delta)`; `core_radius`, 2), but not above the jet's tracked liquid neck, and the
+sets a resolution policy for the run after the cut that resolves the upward jet as before and meshes
+and steps the rest of the free surface under simplifying assumptions, every feature kept in the
+domain (`jetcore.py`). The core is the part of the open chain about the base of the upward jet, the
+apex of the groove around it: its nodes within `max(core_radius L, apex_extent R_apex)` of the base
+(`L = max(r_j, delta)`; `core_radius`, 2), but not above the jet's tracked liquid neck, and the
 walls beyond the base within `wall_radius L` (10); without a base of a jet the whole open chain.
 Every other node of the free surface is far. The step's Courant limit is split, `reconnect.courant`
 on the core and `far_courant` on the far nodes (by default the same number, which leaves the step
@@ -720,8 +720,8 @@ for distortion) may change the liquid volume and axial momentum of the box of ra
 `liquid.box_radius delta` about the core's base by at most `box_gate_sigmas` (5) times the
 calibrated floors `liquid.sigma_V` and `liquid.sigma_Pz`; beyond either the run stops (`box-gate`)
 on the state before the rebuild, dumped as `states/gate_<step>.dump`, from which a continuation
-resumes. `jetcore.txt` records per step what set the step, the split Courant limit (with the node
-of each class that sets its part) and the core, and each leg the resolved keys. The block's `pinch`
+resumes. `jetcore.txt` records per step what set the step, the split Courant limit (with the node of
+each class that sets its part) and the core, and each leg the resolved keys. The block's `pinch`
 part (off by default, written only where it differs from its defaults; its keys are keys of the
 class `liquid`) decides when a tracked neck with a head is cut: with `enabled` only once it closes,
 `r_n <= r_c delta` (`r_c`, 0.2) with a quadratic fit of `r_n(t)` over the trailing `window
@@ -736,9 +736,13 @@ any node of the head but its neck may lie in the upward jet's core. A head whose
 the height of its neck (the root neck, the narrowest point of the stem below it), every node beyond
 that height outside the neck's radius and its half-section a simple polygon, is a head too
 (`curled`, with `curl_depth` in neck radii, in its neck's record): the head is the chain from its
-tip to the root neck, the curled rim included. At their defaults neither part changes a value;
-whether a given set of keys leaves the upward jet unchanged is a question for replays against runs
-without the parts.
+tip to the root neck, the curled rim included. A closing groove from the upward jet's head onto its
+core (the cavity's wall or the stem beside the base) is the cut of that head at its root neck too,
+the head's nodes but its neck off the core, and the cut must leave the jet's base as it was: its
+radius, speed and flux read before and after on the fresh mesh within a relative 1e-3 (its height
+within that times its radius), or the cut is the hard closure `F_base` and the run stops resumably.
+At their defaults neither part changes a value; whether a given set of keys leaves the upward jet
+unchanged is a question for replays against runs without the parts.
 
 `postProcess/event_table.py` tabulates the events of such runs, one row per event and one per run
 and tip (`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event, made or the one
