@@ -1,6 +1,7 @@
-"""The fall-back of a failing fill to the far-head cut against 8407091, the commit before it: the
-source of this commit and that of 8407091, each in a fresh process with MKL on one thread. Runs
-that meet no failing fill on a far head are 8407091's to the byte:
+"""The far-head cut first, before any fill, and the curled head, against cb12382, the commit before
+them: the source of this commit and that of cb12382, each in a fresh process with MKL on one
+thread. Runs that meet no groove and no unhandled event on a far head, and no curled head, are
+cb12382's to the byte:
 
 * the stops of the events branch on every synthetic state of ``test_events_gasneck.py``'s battery;
 * the finite-element run after the cut of the synthetic necked cavity with the block and
@@ -9,8 +10,7 @@ that meet no failing fill on a far head are 8407091's to the byte:
 * the finite-element run of the synthetic pierced state with ``ring.enabled`` and
   ``groove.enabled``: the ring cut made by the driver and the steps of the ring stage;
 * the far-head cut of ``test_jetcore_fem.py``'s heads' state made by the driver (a gas neck on the
-  bubble's head, ``pinch.far_head``), with and without ``groove.enabled``, and the steps after it:
-  the liquid cut's path in the driver, which the fall-back shares.
+  bubble's head, ``pinch.far_head``), with and without ``groove.enabled``, and the steps after it.
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ from test_groove_identity import RING_RUN_GROOVE  # noqa: E402
 from test_jetcore_identity import _run_fem, _spec  # noqa: E402
 from test_ring_identity import _drop_wall_column  # noqa: E402
 
-BASE = "8407091"  # the commit before the fall-back
+BASE = "cb12382"  # the commit before the far-head cut first and the curled head
 
 
-def test_the_stops_are_8407091s(tmp_path):
+def test_the_stops_are_cb12382s(tmp_path):
     ref = _reference_src(tmp_path, BASE)
     out = {name: json.loads(_run(BATTERY, src, tmp_path / name).read_text())
            for name, src in (("ref", ref), ("head", ROOT / "src"))}
@@ -40,7 +40,7 @@ def test_the_stops_are_8407091s(tmp_path):
     assert len(out["head"]) > 40
 
 
-def test_a_finite_element_run_with_groove_enabled_and_its_restart_are_8407091s(tmp_path):
+def test_a_finite_element_run_with_groove_enabled_and_its_restart_are_cb12382s(tmp_path):
     ref = _reference_src(tmp_path, BASE)
     spec = _spec(groove={"enabled": True, "sheets": "log"})
     runs = {name: _run_fem(src, tmp_path / name, spec) for name, src in
@@ -56,7 +56,7 @@ def test_a_finite_element_run_with_groove_enabled_and_its_restart_are_8407091s(t
     fem_pins._same_outputs(again["ref"], again["head"])
 
 
-def test_a_ring_run_with_groove_enabled_is_8407091s(tmp_path):
+def test_a_ring_run_with_groove_enabled_is_cb12382s(tmp_path):
     ref = _reference_src(tmp_path, BASE)
     runs = {name: _run(RING_RUN_GROOVE, src, tmp_path / name) for name, src in
             (("ref", ref), ("head", ROOT / "src"))}
@@ -109,7 +109,7 @@ with J.heads_problem(Path("pb"), recon) as pb:
 """
 
 
-def test_the_far_head_cut_made_by_the_driver_is_8407091s(tmp_path):
+def test_the_far_head_cut_made_by_the_driver_is_cb12382s(tmp_path):
     ref = _reference_src(tmp_path, BASE)
     for label, groove in (("plain", "{}"), ("groove", '{"groove": {"enabled": True}}')):
         script = FAR_HEAD_RUN % groove

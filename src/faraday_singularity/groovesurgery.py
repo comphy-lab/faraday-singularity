@@ -51,10 +51,10 @@ The fill is a rebuild the project owns, as the ring surgeries are (``ringsurgery
    record, the driver's bookkeeping (``on_made``), ``postcut_e<k>`` and ``events/event_<k>.json``
    (kind ``groove-fill``) with the filled region, the closure and the pocket.
 
-A refusal leaves the problem unchanged; a fill whose hard closures miss leaves it rebuilt, wholly,
-under a state that is not accepted. On a far head the driver then falls back to the far-head cut of
-that head from the state before the event, which it loads back from ``precut_e<k>`` after a miss
-(``driver.CollapseDriver._groove_fallback``); elsewhere either is a resumable stop.
+A refusal leaves the problem unchanged, and a fill whose hard closures miss leaves it holding a
+rebuilt state that is not accepted: either is a resumable stop. A groove on the head of a tracked
+neck in the far region is not filled: the driver cuts that head first (``driver.CollapseDriver.
+_meet_event``, the far-head cut of ``pinch.far_head``).
 """
 
 from __future__ import annotations

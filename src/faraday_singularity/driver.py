@@ -324,13 +324,10 @@ mouth becomes liquid, the run goes on from the fresh mesh (:meth:`CollapseDriver
 reset_after_groove`), the fill a negative removal in ``events.txt`` and in the totals of
 ``budget.txt``; a fill refused (a pocket of liquid, a sheet, among the refusals; one on the base or
 the core of the upward jet; one beyond ``groove.max_fill V_b``) is a resumable stop
-(``groove-fill-refused``). It comes before the far-head cut of ``pinch.far_head``, which then
-meets the gas necks alone, and the fill of a groove on a far head that is refused or whose hard
-budgets do not close (the downward jet's head, any head off the upward jet's core) falls back to
-the far-head cut of that head as the same event, from the state before it, loaded back from its
-``precut_e<k>`` after an unclosed fill (:meth:`CollapseDriver._groove_fallback`, event
-``groove-fallback``, the fill's record ``event_<k>_fill.json``, ``fallback`` in the cut's
-request); a fill failing elsewhere stays its stop. With ``groove.sheets`` ``log`` a fold whose
+(``groove-fill-refused``). A groove on the head of a tracked neck in the far region (the
+downward jet's head, any head off the upward jet's core) is never filled: with ``pinch.far_head``
+the far-head cut of that head comes first (decision 22), the fill only off the far heads. With
+``groove.sheets`` ``log`` a fold whose
 pocket is liquid, a thin sheet, is no event (``groove.side_folds``) but a row of ``sheets.txt``
 at most once per rebuild (:meth:`CollapseDriver._log_sheets`), and its faces closing to the scale
 of the mesh a resumable stop (``sheet-contact``, never the fill).
@@ -375,7 +372,7 @@ from .collapse import (Profile, axis_curvature, cone_angles, cone_fit, gauss_dis
 from .episodes import ETA_HYS, EpisodeTracker
 from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, EVENT_SCHEMA,
                      EVENT_STOPS, EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, GROOVE_CLASSES,
-                     GROOVE_FILL_REFUSED, GROOVE_HANDLER, IMPLEMENTED_HANDLERS, SHEET_CONTACT,
+                     GROOVE_FILL_REFUSED, IMPLEMENTED_HANDLERS, SHEET_CONTACT,
                      LIQUID_CUT_REFUSED, PRECUT_EVENT, RING_CUT_REFUSED, RING_HANDLERS,
                      RING_REMOVAL_REFUSED, SIZING_KEYS, STOP_OUTCOMES, CascadeMonitor,
                      EventSettings, event_dump_policy, event_dumps_kept, event_neck, event_tip,
@@ -3070,18 +3067,24 @@ class CollapseDriver:
 
         With the block's ``ring.enabled`` the ring's handlers (``events.RING_HANDLERS``) are made
         too (:meth:`_meet_ring`), and with ``groove.enabled`` the fill of a closing gas groove
-        (``events.GROOVE_CLASSES``, :meth:`_meet_groove`). In the ring stage the liquid cut of the
-        open chain is made as
-        before, through the ring stage's own rebuild and transfer by projection, which keep the
-        ring (``surgery.liquid_cut``; its record ``stage`` ``ring``), not through pyoomph's parked
-        plan, whose open chart cannot carry the ring's loop."""
+        (``events.GROOVE_CLASSES``, :meth:`_meet_groove`), but not on a far head: with
+        ``pinch.far_head`` an event without a handler the driver makes whose site lies on the head
+        of a tracked neck in the far region (:meth:`_far_head`; a gas neck, a closing groove, a
+        sheet's contact; the head may be curled, ``events.head_sides``) is met by the far-head cut
+        of that head first, before any fill (decision 22: the heads are nuisances, the cut's
+        volume and momentum hard checks), the fill made only off the far heads. In the ring stage
+        the liquid cut of the open chain is made as before, through the ring stage's own rebuild
+        and transfer by projection, which keep the ring (``surgery.liquid_cut``; its record
+        ``stage`` ``ring``), not through pyoomph's parked plan, whose open chart cannot carry the
+        ring's loop."""
         if request.get("handler") in RING_HANDLERS and self.events.ring.enabled:
             return self._meet_ring(m, request)
-        if self.events.groove.enabled and request.get("class") in GROOVE_CLASSES and \
-                request.get("kind") != SHEET_CONTACT:
+        far = self._far_head(request) if request.get("handler") not in IMPLEMENTED_HANDLERS \
+            else None
+        if far is None and self.events.groove.enabled and \
+                request.get("class") in GROOVE_CLASSES and request.get("kind") != SHEET_CONTACT:
             return self._meet_groove(m, request)
         if request.get("handler") not in IMPLEMENTED_HANDLERS:
-            far = self._far_head(request)
             if far is None:
                 return m, self._unhandled_event(request)
             self._event("far-head", m, far_kind=request.get("kind"),
@@ -3091,9 +3094,9 @@ class CollapseDriver:
         return self._liquid_cut_event(m, request)
 
     def _liquid_cut_event(self, m: dict, request: dict) -> tuple[dict, dict | None]:
-        """Steps 2-3 of :meth:`_meet_event` for a request the liquid cut makes (a landed neck, a
-        far head, or the far head a groove's fill fell back to, :meth:`_groove_fallback`): the
-        event after ``max_events`` made, the cascade, the cut and its bookkeeping."""
+        """Steps 2-3 of :meth:`_meet_event` for a request the liquid cut makes (a landed neck or a
+        far head): the event after ``max_events`` made, the cascade, the cut and its
+        bookkeeping."""
         if len(self._made_events()) >= self.events.max_events:
             return m, self._event_stop(EVENT_LIMIT, request, max_events=self.events.max_events)
         neck = event_neck(request)
@@ -3203,13 +3206,8 @@ class CollapseDriver:
         refusal, which leaves the problem unchanged, is a resumable stop (``groove-fill-refused``),
         and so are hard budgets that do not close (``event-unclosed``); any other failure ends the
         run as a failed one, raised. Made: its row of ``events.txt``, the dumps the policy drops,
-        the meshes pruned, and the run goes on from the fresh mesh.
-
-        With ``pinch.far_head`` (and ``jetcore``) a groove on the head of a tracked neck in the far
-        region (the downward jet's head, or any head off the core of the upward jet: ``events.
-        far_head_request``, found on the state before the fill) whose fill is refused or does not
-        close falls back to the far-head cut of that head (:meth:`_groove_fallback`), from the same
-        state before the event; a groove elsewhere stops as above."""
+        the meshes pruned, and the run goes on from the fresh mesh. A groove on a far head never
+        comes here: :meth:`_meet_event` cuts that head first."""
         if len(self._made_events()) >= self.events.max_events:
             return m, self._event_stop(EVENT_LIMIT, request, max_events=self.events.max_events)
         from .groovesurgery import groove_fill
@@ -3222,11 +3220,6 @@ class CollapseDriver:
         core = self._post_cut_state().get("core")
         fold = {"ratio": s.fold_ratio, "stop": self._fold_stop(),
                 "stop_elements": s.fold_stop_elements}
-        # the far head the groove lies on, read on the state before the fill (whose chains a fill
-        # that does not close replaces), and what a reload of that state puts back
-        far = self._far_head(request)
-        before = {"focus": self.pb.active_mesh_template().focus,
-                  "remesh_count": self.pb.remesh_count, "stepped_rc": self._stepped_rc}
         self._event_after = None
         try:
             made = groove_fill(self.pb, self.events, r, self.outdir, request, k=k,
@@ -3236,8 +3229,6 @@ class CollapseDriver:
         except (CutRefused, BudgetUnclosed) as e:
             rec = getattr(e, "record", None) or {}
             reason = EVENT_UNCLOSED if isinstance(e, BudgetUnclosed) else GROOVE_FILL_REFUSED
-            if far is not None:
-                return self._groove_fallback(m, request, far, e, reason, k, before)
             extra = {"hard": (rec.get("closures") or {}).get("hard")} if reason == \
                 EVENT_UNCLOSED else {}
             return m, self._event_stop(reason, request, precut=e.precut,
@@ -3249,79 +3240,6 @@ class CollapseDriver:
         self._drop_event_dumps()
         self._prune_meshes()
         return m, None
-
-    def _groove_fallback(self, m: dict, request: dict, far: dict, error, reason: str, k: int,
-                         before: dict) -> tuple[dict, dict | None]:
-        """The fall-back of a groove's fill refused or unclosed (``reason`` its stop) on a far head
-        (``far``, the request of the far-head cut of :meth:`_far_head`, found on the state before
-        the fill) to the liquid cut of that head (decision 22: the head is a nuisance; D-1 B), the
-        ``k``-th event as the fill would have been, from the same state before the event: a refusal
-        has left the problem unchanged; a fill whose hard budgets did not close holds a rebuilt
-        problem that is not accepted, into which the state before the event, its ``precut_e<k>``,
-        is loaded back (:meth:`_reload_event_state`). The fill's record is kept as
-        ``events/event_<k>_fill.json`` (the cut writes ``event_<k>.json``), an event
-        ``groove-fallback`` is written, and the cut's request carries ``fallback`` (the fill's
-        outcome, stage, error, hard closures with their values and limits, record, and whether the
-        state was loaded back) beside ``far_event``, the groove's request; the cut then goes as a
-        far-head cut does (:meth:`_liquid_cut_event`), its refusal or unclosed budgets the cut's
-        own resumable stops."""
-        rec = getattr(error, "record", None) or {}
-        closures = rec.get("closures") or {}
-        limits = closures.get("limits") or {}
-        hard = closures.get("hard")
-        folder = self.outdir / "events"
-        src, kept = folder / f"event_{k:03d}.json", folder / f"event_{k:03d}_fill.json"
-        if src.is_file():
-            src.replace(kept)
-        reload = reason == EVENT_UNCLOSED
-        info = {"from": GROOVE_HANDLER, "reason": reason,
-                "outcome": rec.get("outcome", "unclosed" if reload else "refused"),
-                "failed_at": rec.get("failed_at"),
-                "error": rec.get("error", f"{type(error).__name__}: {error}"),
-                "hard": hard,
-                "closures": {x: {"value": _finite(closures.get(x)), "limit": _finite(limits.get(x))}
-                             for x in hard or ()},
-                "record": f"events/{kept.name}" if kept.is_file() else None,
-                "precut": error.precut, "reloaded": reload}
-        if reload:
-            if not error.precut:  # nothing to load back: the fill's own stop
-                return m, self._event_stop(reason, request, precut=error.precut,
-                                           failed_at=rec.get("failed_at"), error=info["error"],
-                                           record=info["record"], hard=hard)
-            self._reload_event_state(Path(error.precut), before)
-        self._event("groove-fallback", m, k=k, far_class=request.get("class"),
-                    far_kind=request.get("kind"), chain=far.get("chain"), r_n=far.get("r_n"),
-                    s=far.get("s"), z_n=far.get("z_n"), fill_reason=reason,
-                    fill_outcome=info["outcome"], failed_at=info["failed_at"], hard=hard,
-                    reloaded=reload, record=info["record"])
-        return self._liquid_cut_event(m, dict(far, fallback=info))
-
-    def _reload_event_state(self, path: Path, before: dict):
-        """Put the state before an event back into the problem from its dump (``path``,
-        ``precut_e<k>``) after a surgery that rebuilt the problem and was not accepted (a groove's
-        fill whose hard budgets do not close, :meth:`_groove_fallback`), as a restart from that
-        dump holds it (:meth:`restore`): the solution with its history, the time and the mesh
-        (pyoomph's ``load_state``, which builds the stored mesh), the focus (``before``, as the
-        surgery found it), the cut's sizing and chart (``surgery.restore_cut``), the ring's sizing
-        in its stage (``ringsurgery.restore_ring``), the rebuild count and whether a step has run on
-        the mesh, both as before the surgery (``before``). The driver's bookkeeping, which a surgery
-        not accepted does not touch, is kept; the caches of the state's stops are dropped."""
-        from .surgery import restore_cut
-
-        pb = self.pb
-        pb.load_state(str(path))
-        pb.active_mesh_template().focus = before["focus"]
-        restore_cut(pb, pb.cut)
-        if getattr(pb, "ring", None) is not None:
-            from .ringsurgery import restore_ring
-
-            restore_ring(pb, pb.ring)
-        pb.remesh_count = before["remesh_count"]
-        self._stepped_rc = before["stepped_rc"]
-        self._post_cut_cache = self._stop_cache = None
-        invalidate = getattr(pb, "invalidate_cached_mesh_data", None)
-        if invalidate is not None:
-            invalidate()
 
     def _on_groove_made(self, rec: dict):
         """The driver's bookkeeping of a fill made (``groovesurgery.groove_fill``'s ``on_made``,

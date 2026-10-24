@@ -54,7 +54,8 @@ makes the cut of a landed liquid neck within the run (:data:`IMPLEMENTED_HANDLER
 ``driver.CollapseDriver._meet_event``) and stops on every other event, resumably
 (``event-unhandled``, with the dump of the state before it, ``precut_e<k>``), so that a run
 continues from it once its handler exists. A liquid neck
-is followed from ``liquid.track_depth`` on (:func:`liquid_necks`, :func:`head_sides`) and lands at
+is followed from ``liquid.track_depth`` on (:func:`liquid_necks`, :func:`head_sides`; a head whose
+rim curls back past its neck's height, radially outside the neck, is a head) and lands at
 ``r_n <= liquid.eps_d s``, ``s`` the largest radius of its head; a fold of either chain closes at
 ``max(gap.kappa_g delta, fold_stop_elements h_elem)``, and one that reaches the head of a tracked
 neck lands that neck once ``r_n <= liquid.eps_max s`` (:func:`head_of_fold`), before any groove,
@@ -923,9 +924,10 @@ def far_head_request(request: dict, necks: list[dict], open_core=None) -> dict |
     ``far_event``), or None. The event is of a class of :data:`FAR_EVENT_CLASSES`; its site, the
     gas neck's node (``index``) or the fold pair's nodes (``fold_pair``) on its ``chain``, lies on
     the head of a tracked neck of that chain with a single head (``necks``, :func:`liquid_necks`,
-    status ``head``), beside the neck itself, and in the far region: no node of the site a core
-    node of the open chain (``open_core``, ``jetcore.core_mask``'s mask; every node of another
-    chain is far). Of several heads, that of the narrowest ``r_n/s``."""
+    status ``head``, a curled head among them), beside the neck itself, and in the far region: no
+    node of the site, nor of the head but its neck, a core node of the open chain (``open_core``,
+    ``jetcore.core_mask``'s mask; every node of another chain is far), so that the cut never takes
+    a node of the upward jet's core. Of several heads, that of the narrowest ``r_n/s``."""
     if request.get("class") not in FAR_EVENT_CLASSES:
         return None
     chain = request.get("chain")
@@ -944,6 +946,15 @@ def far_head_request(request: dict, necks: list[dict], open_core=None) -> dict |
     hits = [x for x in necks if x["chain"] == chain and x.get("status") == "head"
             and x.get("head") is not None
             and any(x["head"][0] <= k <= x["head"][1] and k != x["index"] for k in site)]
+    if chain == "open":  # the head itself off the core, its neck at the core's edge at most
+        def clear(x):
+            lo, hi = (int(k) for k in x["head"])
+            on = mask[max(lo, 0):min(hi, len(mask) - 1) + 1].copy()
+            if lo <= int(x["index"]) <= hi and int(x["index"]) < len(mask):
+                on[int(x["index"]) - max(lo, 0)] = False
+            return not on.any()
+
+        hits = [x for x in hits if clear(x)]
     if not hits:
         return None
     x = min(hits, key=lambda x: x["r_n"] / x["s"])
@@ -1011,11 +1022,16 @@ def head_sides(points, end_types, index: int, *, is_bubble: bool,
     side's far end lies on the axis (``axis_end``); it does not hold the widest node of the bubble
     chain (``holds_widest``; on the open chain the wall end, which no axis end is, rules the other
     side out); its nodes lie on the side of the neck's height ``z_n`` that its tip lies on, to
-    within ``tol r_n`` (``one_sided``, with ``direction`` the sign of ``z_tip - z_n``); and its
-    half-section, the side from the neck to its tip closed along the axis and by the chord at
-    ``z_n``, is a simple polygon (``simple``). ``qualifies`` when all hold. Each side also gives its
-    node range (``lo``, ``hi``, the neck included), its largest radius ``s``, the volume of its
-    half-section revolved (``volume``) and its tip's height (``z_tip``)."""
+    within ``tol r_n`` (``one_sided``, with ``direction`` the sign of ``z_tip - z_n``), or those
+    beyond it all lie outside the neck's radius (``curled``: the head's rim curls back past the
+    height of its root neck, the narrowest point of the stem below it, as a cut-born head's rim
+    curling down and back towards its stem does; ``curl_depth`` the deepest node beyond ``z_n`` in
+    units of ``r_n``); and its half-section, the side from the neck to its tip closed along the axis
+    and by the chord at ``z_n``, is a simple polygon (``simple``), which a curled rim that reached
+    the chord would break. ``qualifies`` when all hold, a curled head as a head. Each side also
+    gives its node range (``lo``, ``hi``, the neck included), its largest radius ``s``, the volume
+    of its half-section revolved (``volume``, the curled rim included) and its tip's height
+    (``z_tip``)."""
     from shapely.geometry import LinearRing
 
     from .reconnect import AXIS, revolved_volume
@@ -1029,19 +1045,23 @@ def head_sides(points, end_types, index: int, *, is_bubble: bool,
         side = P[lo:hi + 1]
         z_tip = float(P[0, 1] if end == 0 else P[-1, 1])
         direction = float(np.sign(z_tip - z_n))
+        height = direction * (side[:, 1] - z_n)  # above the neck, towards the side's tip
+        beyond = height < -tol * r_n
         rec = {"side": name, "lo": lo, "hi": hi, "axis_end": end_types[end] == AXIS,
                "holds_widest": bool(is_bubble and lo <= widest <= hi),
                "direction": direction, "z_tip": z_tip, "s": float(side[:, 0].max()),
-               "one_sided": bool(direction != 0.0
-                                 and np.all(direction * (side[:, 1] - z_n) >= -tol * r_n)),
+               "one_sided": bool(direction != 0.0 and not beyond.any()),
+               "curled": bool(direction != 0.0 and beyond.any()
+                              and np.all(side[beyond, 0] > r_n)),
+               "curl_depth": float(-height.min() / r_n) if beyond.any() else 0.0,
                "simple": False, "volume": math.nan}
         if rec["axis_end"]:
             path = side[::-1] if end == 0 else side  # from the neck to the tip on the axis
             section = np.vstack([path, [[0.0, z_n]]])
             rec["simple"] = bool(LinearRing(section).is_simple)
             rec["volume"] = revolved_volume(section)
-        rec["qualifies"] = bool(rec["axis_end"] and not rec["holds_widest"] and rec["one_sided"]
-                                and rec["simple"])
+        rec["qualifies"] = bool(rec["axis_end"] and not rec["holds_widest"]
+                                and (rec["one_sided"] or rec["curled"]) and rec["simple"])
         out.append(rec)
     return out
 
@@ -1056,7 +1076,8 @@ def liquid_necks(named, ls: LiquidEventSettings) -> list[dict]:
     node range), ``s`` its largest radius, ``direction``, ``z_tip`` and ``head_volume``, with
     ``status`` ``head``, or ``head-too-large`` beyond ``ls.max_head_volume s^3``; where none or both
     do, ``status`` ``no-head`` or ``two-heads``, ``head`` None and ``s`` the shoulder. The neck has
-    landed (``landed``) once ``r_n <= eps_d s`` (``ratio``, ``r_n/(eps_d s)``, at most one)."""
+    landed (``landed``) once ``r_n <= eps_d s`` (``ratio``, ``r_n/(eps_d s)``, at most one). A
+    curled head (:func:`head_sides`) is a head, its record with ``curled`` and ``curl_depth``."""
     from .reconnect import chain_necks
 
     out = []
@@ -1080,6 +1101,8 @@ def liquid_necks(named, ls: LiquidEventSettings) -> list[dict]:
                            head_volume_over_s3=h["volume"] / s**3,
                            status="head" if h["volume"] <= ls.max_head_volume * s**3
                            else "head-too-large")
+                if not h["one_sided"]:  # a curled head: its record says so (no key otherwise)
+                    rec.update(curled=True, curl_depth=h["curl_depth"])
             else:
                 rec.update(head=None, s=rec["shoulder"],
                            status="no-head" if not heads else "two-heads")
@@ -1150,7 +1173,8 @@ def head_fold(points, head, exclude: int, *, ratio: float, stop: float, stop_ele
 
 def _neck_fields(x: dict) -> dict:
     keys = ("chain", "index", "r_n", "z_n", "depth", "shoulder", "h_loc", "s", "ratio", "status",
-            "head", "side", "direction", "z_tip", "head_volume", "head_volume_over_s3")
+            "head", "side", "direction", "z_tip", "head_volume", "head_volume_over_s3",
+            "curled", "curl_depth")  # the last two of a curled head only
     return {k: x[k] for k in keys if k in x}
 
 

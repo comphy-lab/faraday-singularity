@@ -641,60 +641,56 @@ momentum and the noise of the rebuild still enter them, as at a liquid cut), the
 record of the stage (`ring`) and `run_status.json` the events of the ring (`events.ring`: the event
 of the cut, that of the removal and its time).
 
-The block's `groove` part (off by default, written into the block and its hash only where it
-differs from its defaults; its keys are keys of the class `gap`, fixed once a fill is made except
-from the state before an event) makes the fill of a closing gas groove, the handler of `A-groove`
-(a fold of the open chain or the bubble) and of `RF` (a fold of the ring), before the far-head cut
-of `pinch.far_head` (`groovesurgery.groove_fill`, `groove.py`). The pocket the fold pair closes off
-(on the ring, the side of the smaller volume) must be gas: a pocket of liquid, a thin liquid sheet
-between two faces of gas that the fold test meets alike, is refused. Every part of the groove
-narrower than `groove.mouth` times the fold's limit (1.5) is filled at once: each wall is walked
-from the pair away from the pocket until it lies that far from the other wall or has turned out
-of the groove (75 degrees from its tangent at the pair), and the two nodes reached are the
-splices. The closure is a cubic curve C1 with both walls at the splices, its handles
-`groove.cap_height` times those of a circular arc turning by the angle between the walls' tangents
-(1, tried once more at 0.5 if refused), at `groove.cut_elements` points per mouth width (null for
-the run's elements per scale). A fill is refused before anything changes where the pair lies at a
-chain's end, where no mouth is found within the chain, where the closure leaves the old gas or
-makes a knife-edge angle, where the filled region is not simple or not inside the old gas, where the
-new chains or the new loop are not a mesh's, where it would take a node of the upward jet's core
-(`jetcore`) or straddle the base of that jet, and where it would take more than `groove.max_fill`
-of the bubble's volume at the gas cut (0.01, the share below which the ring is removed): a fill
-never splits the ring or a chain, and a larger pocket (a lobe of the ring, a bubble pinching in
-two) waits for a handler of its own. The rebuild is the project's own, before the ring as in its
-stage, the transfer by projection onto the old interface checked against the nodes the geometry
-predicts it cannot locate (on the closure, inside the filled region), then the velocity of the new
-liquid (`groove.fill`: `blend`, pyoomph's nearest-node blend, or `zero`) and the pressure-impulse
-projection (`groove.projection`, `groove.restart`). Its budgets within `max(groove.box_radius
-delta, 2 L_fill)` of the filled region's centroid, a disc at the site (G1-G6): the liquid volume
-gained against the filled volume, the axial momentum the transfer carried against the filled
-region's, the identity of the disc's cutoff in the projection's weak form and the disc's change of
-momentum by the projection are hard checks, the kinetic energies and the area flags, each limit
-floored at a multiple of the part's noise floors (`groove.sigma_V`, `sigma_Pz`, `sigma_KE`, 0 until
-set). The disc's change of momentum beyond its limit (0.05 `V_fill U`) is only a flag where the
-identity holds and resolves it, its larger side at least half the change and at the momentum
-floor or above: a fill joins liquid that moved at different velocities across the gas it removes,
-and the projection is the inelastic impulse of that merge, which near free surfaces moves momentum
-out of any disc about the site, balanced at the container's bottom, so that the identity, not the
-disc's change, is the momentum balance (`G3_merge` in the closures). A hard miss is a resumable
-stop (`event-unclosed`), a refusal `groove-fill-refused`. With
-`pinch.far_head` (and `jetcore`) a fill refused or unclosed on the head of a tracked neck in the far
-region (the downward jet's head, any head off the upward jet's core) falls back to the far-head cut
-of that head as the same event, from the state before it (loaded back from `precut_e<k>` after an
-unclosed fill): the fill's record is kept as `events/event_<k>_fill.json`, the cut's request
-carries `fallback` (the fill's outcome, stage, hard closures and record) and the run writes an
-event `groove-fallback`; a fill failing elsewhere stays its stop. A fill
-made is an event of kind `groove-fill` (`events/event_<k>.json` with the filled region, the closure
-and the pocket), a row of `events.txt` (its fill a negative removal, its closures in `F1`-`F6`) and
-a fill in the totals of `budget.txt`, which stay net of it. The triple of its length scale is
-`gap.kappa_g` (the trigger `kappa_g delta`), run as branches from the state before the first fill.
-The fold test meets a thin liquid sheet between two faces of gas as it meets a groove; with
-`groove.sheets` `log` (`event` by default) the stops select the fold of each chain and of the ring
-on each side apart, so that a sheet hides no groove of gas: a fold whose pocket is liquid is no
-event but a row of `sheets.txt` (its thickness at the pair, its length beyond it, its tip, area,
-mean thickness and volume) at most once per rebuild, and only its faces closing below
-`groove.sheet_contact` element lengths of the finer side (1) is one, `sheet-contact`, without a
-handler (a resumable stop).
+The block's `groove` part (off by default, written into the block and its hash only where it differs
+from its defaults; its keys are keys of the class `gap`, fixed once a fill is made except from the
+state before an event) makes the fill of a closing gas groove, the handler of `A-groove` (a fold of
+the open chain or the bubble) and of `RF` (a fold of the ring) (`groovesurgery.groove_fill`,
+`groove.py`), but never on a far head: with `pinch.far_head` a groove on the head of a tracked neck
+in the far region (the downward jet's head, any head off the upward jet's core) is met by the
+far-head cut of that head first, the heads being nuisances whose cut has hard volume and momentum
+checks, and only a groove off the far heads is filled. The pocket the fold pair closes off (on the
+ring, the side of the smaller volume) must be gas: a pocket of liquid, a thin liquid sheet between
+two faces of gas that the fold test meets alike, is refused. Every part of the groove narrower than
+`groove.mouth` times the fold's limit (1.5) is filled at once: each wall is walked from the pair
+away from the pocket until it lies that far from the other wall or has turned out of the groove (75
+degrees from its tangent at the pair), and the two nodes reached are the splices. The closure is a
+cubic curve C1 with both walls at the splices, its handles `groove.cap_height` times those of a
+circular arc turning by the angle between the walls' tangents (1, tried once more at 0.5 if
+refused), at `groove.cut_elements` points per mouth width (null for the run's elements per scale). A
+fill is refused before anything changes where the pair lies at a chain's end, where no mouth is
+found within the chain, where the closure leaves the old gas or makes a knife-edge angle, where the
+filled region is not simple or not inside the old gas, where the new chains or the new loop are not
+a mesh's, where it would take a node of the upward jet's core (`jetcore`) or straddle the base of
+that jet, and where it would take more than `groove.max_fill` of the bubble's volume at the gas cut
+(0.01, the share below which the ring is removed): a fill never splits the ring or a chain, and a
+larger pocket (a lobe of the ring, a bubble pinching in two) waits for a handler of its own. The
+rebuild is the project's own, before the ring as in its stage, the transfer by projection onto the
+old interface checked against the nodes the geometry predicts it cannot locate (on the closure,
+inside the filled region), then the velocity of the new liquid (`groove.fill`: `blend`, pyoomph's
+nearest-node blend, or `zero`) and the pressure-impulse projection (`groove.projection`,
+`groove.restart`). Its budgets within `max(groove.box_radius delta, 2 L_fill)` of the filled
+region's centroid, a disc at the site (G1-G6): the liquid volume gained against the filled volume,
+the axial momentum the transfer carried against the filled region's, the identity of the disc's
+cutoff in the projection's weak form and the disc's change of momentum by the projection are hard
+checks, the kinetic energies and the area flags, each limit floored at a multiple of the part's
+noise floors (`groove.sigma_V`, `sigma_Pz`, `sigma_KE`, 0 until set). The disc's change of momentum
+beyond its limit (0.05 `V_fill U`) is only a flag where the identity holds and resolves it, its
+larger side at least half the change and at the momentum floor or above: a fill joins liquid that
+moved at different velocities across the gas it removes, and the projection is the inelastic impulse
+of that merge, which near free surfaces moves momentum out of any disc about the site, balanced at
+the container's bottom, so that the identity, not the disc's change, is the momentum balance
+(`G3_merge` in the closures). A hard miss is a resumable stop (`event-unclosed`), a refusal
+`groove-fill-refused`. A fill made is an event of kind `groove-fill` (`events/event_<k>.json` with
+the filled region, the closure and the pocket), a row of `events.txt` (its fill a negative removal,
+its closures in `F1`-`F6`) and a fill in the totals of `budget.txt`, which stay net of it. The
+triple of its length scale is `gap.kappa_g` (the trigger `kappa_g delta`), run as branches from the
+state before the first fill. The fold test meets a thin liquid sheet between two faces of gas as it
+meets a groove; with `groove.sheets` `log` (`event` by default) the stops select the fold of each
+chain and of the ring on each side apart, so that a sheet hides no groove of gas: a fold whose
+pocket is liquid is no event but a row of `sheets.txt` (its thickness at the pair, its length beyond
+it, its tip, area, mean thickness and volume) at most once per rebuild, and only its faces closing
+below `groove.sheet_contact` element lengths of the finer side (1) is one, `sheet-contact`, without
+a handler (a resumable stop).
 
 The block's `jetcore` part (off by default, and written into the block and its hash only where it
 differs from its defaults; every key a key of the leg, its sizing keys among `events.SIZING_KEYS`)
@@ -729,15 +725,20 @@ of each class that sets its part) and the core, and each leg the resolved keys. 
 part (off by default, written only where it differs from its defaults; its keys are keys of the
 class `liquid`) decides when a tracked neck with a head is cut: with `enabled` only once it closes,
 `r_n <= r_c delta` (`r_c`, 0.2) with a quadratic fit of `r_n(t)` over the trailing `window
-r_n^(3/2)` (0.05, at least `min_samples`, 8) closing at a constant or growing rate and a time to
-the pinch at that rate, `(2/3) r_n / |dr_n/dt|`, at most `kappa r_n^(3/2)` (3), read from the
-history of each tracked neck that the driver keeps across its steps and in its dumps
-(`neck_history`), neither `liquid.eps_d` nor `liquid.eps_max` landing a neck; with `far_head` an
-event without a handler (a gas neck, a closing groove) whose site lies on the head of a tracked neck
-in the far region is met by the liquid cut of that neck (kind `far-head`, class `F-head`), with the
-cut's hard closures of the volume and the momentum removed. At their defaults neither part changes
-a value; whether a given set of keys leaves the upward jet unchanged is a question for replays
-against runs without the parts.
+r_n^(3/2)` (0.05, at least `min_samples`, 8) closing at a constant or growing rate and a time to the
+pinch at that rate, `(2/3) r_n / |dr_n/dt|`, at most `kappa r_n^(3/2)` (3), read from the history of
+each tracked neck that the driver keeps across its steps and in its dumps (`neck_history`), neither
+`liquid.eps_d` nor `liquid.eps_max` landing a neck; with `far_head` an event without a handler (a
+gas neck, a closing groove, before any fill, a sheet's contact) whose site lies on the head of a
+tracked neck in the far region is met by the liquid cut of that neck (kind `far-head`, class
+`F-head`), with the cut's hard closures of the volume and the momentum removed; neither the site nor
+any node of the head but its neck may lie in the upward jet's core. A head whose rim curls back past
+the height of its neck (the root neck, the narrowest point of the stem below it), every node beyond
+that height outside the neck's radius and its half-section a simple polygon, is a head too
+(`curled`, with `curl_depth` in neck radii, in its neck's record): the head is the chain from its
+tip to the root neck, the curled rim included. At their defaults neither part changes a value;
+whether a given set of keys leaves the upward jet unchanged is a question for replays against runs
+without the parts.
 
 `postProcess/event_table.py` tabulates the events of such runs, one row per event and one per run
 and tip (`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event, made or the one

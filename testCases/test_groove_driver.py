@@ -12,12 +12,13 @@ finite-element problem.
   ``F1``-``F6``), the totals of ``budget.txt`` net of the fill, the steps after it;
 * a refusal is the resumable stop ``groove-fill-refused`` and hard budgets that do not close
   ``event-unclosed``, each with the state before the event;
-* with ``pinch.far_head`` too, the groove is filled, not cut as a far head; a fill refused or
-  unclosed on a tracked far head (the bubble's head of ``test_jetcore.HeadProblem``) falls back to
-  the far-head cut of that head (the stand-in cut of ``test_events_run.fake_surgery``), from the
-  state before the event (loaded back after an unclosed fill, not after a refusal), the fill's
-  record kept as ``event_<k>_fill.json``, an event ``groove-fallback`` and the cut's request
-  carrying ``fallback``; a fill failing off every head stops as before.
+* with ``pinch.far_head`` too, a groove off every head is filled, not cut; a groove on a tracked
+  far head (the bubble's head of ``test_jetcore.HeadProblem``) is met by the far-head cut of that
+  head first (the stand-in cut of ``test_events_run.fake_surgery``), the fill never asked for, an
+  event ``far-head`` with the groove's kind and class; without ``pinch.far_head`` the groove on the
+  head is filled as before, and a fill failing off every head stops as before;
+* a gas neck (``G``) at the pocket of a curled head of the bubble (``test_curled_head``, its rim
+  curling up past its root neck) is met by the far-head cut of that root neck.
 """
 
 from __future__ import annotations
@@ -252,109 +253,113 @@ def test_the_event_table_reads_a_fill_as_a_negative_removal_with_its_closures():
     assert phi == pytest.approx(2e-4)
 
 
-# --- the fall-back of a fill that fails on a far head to the far-head cut ------------------------
+# --- a groove, or a gas neck, on a far head: the far-head cut first -------------------------------
 
 FAR_BLOCK = {"liquid": {"enabled": True}, "post": {"open_neck_stop": False, "neck_floor": 2e-6},
              "jetcore": {"enabled": True}, "pinch": {"far_head": True},
              "groove": {"enabled": True}}
 
 
-def _fallback_run(tmp_path, monkeypatch, fail, *, on_head=True, block=FAR_BLOCK):
-    """A run of ``test_jetcore.HeadProblem`` (the bubble's head tracked) whose stops request a
-    closing groove of the bubble, its fold pair on that head beside the neck (``on_head``) or at
-    the bubble's bottom, on no head; the fill stood in for, failing with ``fail`` (``G3_box`` its
-    hard miss), the liquid cut by ``test_events_run.fake_surgery``'s, which makes it; the
-    stand-in's ``load_state`` records the dumps loaded back."""
+def _far_run(tmp_path, monkeypatch, *, request_at, pb=None, fail=None, block=FAR_BLOCK):
+    """A run of a stand-in with a tracked head on its bubble (``test_jetcore.HeadProblem`` by
+    default) whose stops request what ``request_at(drv, neck)`` returns until the driver meets it;
+    the fill stood in for (``fake_fill``, failing with ``fail``), the liquid cut by
+    ``test_events_run.fake_surgery``'s, which makes it, and the cut's requests recorded."""
     from test_events_run import fake_surgery
     from test_jetcore import HeadProblem
 
     from faraday_singularity import groovesurgery, surgery
 
-    calls, loaded = [], []
+    fills, requests = [], []
     cut = fake_surgery()
-    monkeypatch.setattr(groovesurgery, "groove_fill", fake_fill(calls, fail, hard=("G3_box",)))
-    requests = []
 
     def liquid_cut(pb, events, reconnect, outdir, request, **kw):
         requests.append(json.loads(json.dumps(request)))
         return cut.liquid_cut(pb, events, reconnect, outdir, request, **kw)
 
+    monkeypatch.setattr(groovesurgery, "groove_fill", fake_fill(fills, fail, hard=("G3_box",)))
     monkeypatch.setattr(surgery, "liquid_cut", liquid_cut)
-    monkeypatch.setattr(surgery, "restore_cut", cut.restore_cut)  # no mesh sizing to restore
-    pb = HeadProblem.make(r_n=0.3)
-    pb.load_state = lambda path: loaded.append(Path(path).name)
+    pb = HeadProblem.make(r_n=0.3) if pb is None else pb
     events = ev.EventSettings.from_dict(block)
     drv = _events_driver(tmp_path, pb, RECON, events=events, state_dt=0.0, state_keep=10)
     named = drv._named_post_cut_chains()
     neck = next(x for x in ev.liquid_necks(named, events.liquid)
                 if x["chain"] == "bubble" and x["status"] == "head")
-    i = neck["head"][1] - 2 if on_head else 4
-    request = dict(groove_request("bubble"), fold_pair=[i - 2, i])
-    focus = pb.active_mesh_template().focus
+    request = request_at(drv, neck)
     orig = drv._post_cut_stop
-    drv._post_cut_stop = lambda: dict(request) if not calls else orig()
+    drv._post_cut_stop = lambda: dict(request) if not (fills or requests) else orig()
     out = drv.run(1e-9)
     drv.close()
-    return {"drv": drv, "out": out, "fills": calls, "cuts": cut.calls, "requests": requests,
-            "loaded": loaded,
-            "neck": neck, "focus": focus, "run": tmp_path}
+    return {"drv": drv, "out": out, "fills": fills, "cuts": cut.calls, "requests": requests,
+            "neck": neck, "run": tmp_path}
 
 
-@pytest.mark.parametrize("fail", ["BudgetUnclosed", "CutRefused"])
-def test_a_fill_failing_on_a_far_head_falls_back_to_the_cut_of_that_head(tmp_path, monkeypatch,
-                                                                         fail):
-    """The fill of a groove on the bubble's tracked head refused or unclosed: the driver makes the
-    far-head cut of that head as the same event (k 1), from the state before it (loaded back from
-    ``precut_e001`` after the unclosed fill, the focus and the rebuild count as before the fill;
-    nothing loaded after a refusal), the fill's record kept as ``event_001_fill.json``, an event
-    ``groove-fallback``, the cut's request with ``fallback`` and the groove as ``far_event``, and
-    the run goes on to its step limit."""
-    res = _fallback_run(tmp_path / fail, monkeypatch, fail)
-    out, drv, unclosed = res["out"], res["drv"], fail == "BudgetUnclosed"
-    reason = ev.EVENT_UNCLOSED if unclosed else ev.GROOVE_FILL_REFUSED
-    assert len(res["fills"]) == 1 and [c["kind"] for c in res["cuts"]] == ["far-head"]
-    assert [c["k"] for c in res["cuts"]] == [1]
-    assert res["loaded"] == (["precut_e001.dump"] if unclosed else [])
-    assert out["stop"]["reason"] == "max-steps" and out["steps"] == 3
-    assert out["events"]["made"] == 1 and out["events"]["by_kind"] == {"far-head": 1}
-    rec = drv.pb.events[-1]
-    assert (rec["kind"], rec["class"], rec["chain"]) == ("far-head", "F-head", "bubble")
+def _groove_on_head(drv, neck):
+    i = neck["head"][1] - 2
+    return dict(groove_request("bubble"), fold_pair=[i - 2, i])
+
+
+def _groove_off_head(drv, neck):
+    return dict(groove_request("bubble"), fold_pair=[2, 4])  # the bubble's bottom, on no head
+
+
+def test_a_groove_on_a_far_head_is_cut_first_and_never_filled(tmp_path, monkeypatch):
+    """Decision 22: the head is a nuisance, its cut's volume and momentum hard checks; a groove on
+    it is met by the far-head cut of its neck as the event, with no fill asked for."""
+    res = _far_run(tmp_path, monkeypatch, request_at=_groove_on_head)
+    out = res["out"]
+    assert res["fills"] == [] and [c["kind"] for c in res["cuts"]] == ["far-head"]
     req, = res["requests"]
     assert (req["kind"], req["class"]) == ("far-head", "F-head")
     assert req["index"] == res["neck"]["index"] and req["far_event"]["class"] == "A-groove"
-    fb = req["fallback"]
-    assert fb["from"] == ev.GROOVE_HANDLER and fb["reason"] == reason
-    assert fb["outcome"] == ("unclosed" if unclosed else "refused")
-    assert fb["hard"] == ["G3_box"] and fb["reloaded"] is unclosed
-    assert fb["closures"]["G3_box"] == {"value": 5.8e-9, "limit": 2.28e-9}
-    assert fb["record"] == "events/event_001_fill.json"
-    assert Path(fb["precut"]).name == "precut_e001.dump"
-    kept = json.loads((res["run"] / "events" / "event_001_fill.json").read_text())
-    assert kept["kind"] == "groove-fill" and kept["outcome"] == fb["outcome"]
-    assert json.loads((res["run"] / "events" / "event_001.json").read_text())["kind"] == \
-        "far-head"
-    lines = [e for e in _events(res["run"]) if e["event"] == "groove-fallback"]
-    assert len(lines) == 1 and lines[0]["fill_reason"] == reason and lines[0]["k"] == 1
-    assert lines[0]["reloaded"] is unclosed and lines[0]["chain"] == "bubble"
-    if unclosed:  # put back before the cut, which then counts its own rebuild
-        assert drv.pb.remesh_count == 2
-    _, rows = _table(res["run"] / "events.txt")
-    assert [r["kind"] for r in rows] == ["far-head"]
+    assert "fallback" not in req
+    assert out["stop"]["reason"] == "max-steps" and out["steps"] == 3
+    assert out["events"]["made"] == 1 and out["events"]["by_kind"] == {"far-head": 1}
+    far = [e for e in _events(res["run"]) if e["event"] == "far-head"]
+    assert len(far) == 1 and far[0]["far_class"] == "A-groove" and far[0]["far_kind"] == "groove"
+    assert not (res["run"] / "events" / "event_001_fill.json").exists()
 
 
-def test_a_fill_failing_off_every_head_or_without_the_far_head_cut_stops(tmp_path, monkeypatch):
-    """A failing fill of a groove on no tracked head (the bubble's bottom), or on the head without
-    ``pinch.far_head``, stays the resumable stop of the fill, with nothing loaded back and no
-    cut."""
+def test_a_groove_off_every_head_is_filled_and_its_failure_stops(tmp_path, monkeypatch):
+    """With ``pinch.far_head`` a groove on no tracked head is filled, and a fill that fails there
+    is its resumable stop, no cut; without ``pinch.far_head`` a groove on the head is filled."""
+    res = _far_run(tmp_path / "made", monkeypatch, request_at=_groove_off_head)
+    assert len(res["fills"]) == 1 and res["cuts"] == []
+    assert res["out"]["events"]["by_kind"] == {"groove-fill": 1}
+    for fail, reason in (("BudgetUnclosed", ev.EVENT_UNCLOSED),
+                         ("CutRefused", ev.GROOVE_FILL_REFUSED)):
+        res = _far_run(tmp_path / fail, monkeypatch, request_at=_groove_off_head, fail=fail)
+        out = res["out"]
+        assert len(res["fills"]) == 1 and res["cuts"] == [] and out["steps"] == 0
+        assert out["stop"]["reason"] == reason and out["events"]["made"] == 0
+        assert Path(out["stop"]["precut"]).name == "precut_e001.dump"
     without = {k: v for k, v in FAR_BLOCK.items() if k != "pinch"}
-    for name, kw in (("off", {"on_head": False}), ("plain", {"block": without})):
-        for fail, reason in (("BudgetUnclosed", ev.EVENT_UNCLOSED),
-                             ("CutRefused", ev.GROOVE_FILL_REFUSED)):
-            res = _fallback_run(tmp_path / name / fail, monkeypatch, fail, **kw)
-            out = res["out"]
-            assert out["stop"]["reason"] == reason and out["steps"] == 0, (name, fail)
-            assert res["cuts"] == [] and res["loaded"] == []
-            assert Path(out["stop"]["precut"]).name == "precut_e001.dump"
-            assert out["events"]["made"] == 0
-            assert not (res["run"] / "events" / "event_001_fill.json").exists()
-            assert not any(e["event"] == "groove-fallback" for e in _events(res["run"]))
+    res = _far_run(tmp_path / "plain", monkeypatch, request_at=_groove_on_head, block=without)
+    assert len(res["fills"]) == 1 and res["cuts"] == []
+
+
+def test_a_gas_neck_at_the_pocket_of_a_curled_head_is_the_cut_of_its_root_neck(tmp_path,
+                                                                                monkeypatch):
+    from test_bookkeeping import CutProblem
+    from test_curled_head import _lip_node, bubble_with_curled_head
+
+    P = np.asarray(bubble_with_curled_head()[0].points)
+
+    class Curled(CutProblem):
+        def interface_segments(self):
+            segs = super().interface_segments()
+            segs[0] = self._chain("bubble", P[:, 0].copy(), P[:, 1].copy(), ("axis", "axis"))
+            return segs
+
+    def gas_neck(drv, neck):
+        assert neck.get("curled") is True
+        k = _lip_node(P, which="bubble")
+        return {"reason": ev.EVENT_REQUEST, "kind": "gas-neck", "class": "G",
+                "handler": ev.HANDLERS["G"], "chain": "bubble", "index": k}
+
+    res = _far_run(tmp_path, monkeypatch, request_at=gas_neck, pb=Curled())
+    assert res["fills"] == [] and [c["kind"] for c in res["cuts"]] == ["far-head"]
+    req, = res["requests"]
+    assert req["index"] == res["neck"]["index"] and req["curled"] is True
+    assert req["far_event"]["class"] == "G"
+    assert res["out"]["events"]["by_kind"] == {"far-head": 1}

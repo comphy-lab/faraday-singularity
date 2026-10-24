@@ -429,10 +429,12 @@ add a second top-level `cases/` tree.
 - The events block's `groove` part (`events.GrooveEventSettings`, `groove.py`,
   `groovesurgery.py`; off by default, written into the block and its hash only where it differs
   from its defaults, its keys keys of the class `gap`, `EventSettings.CLASS_OF_PART`) makes the fill
-  of a closing gas groove (`groovesurgery.groove_fill`, `CollapseDriver._meet_groove`, before the
-  far-head route of `pinch.far_head`) for `A-groove` (the open chain or the bubble, and the open
-  chain in the ring stage) and `RF` (the ring's loop; its request names `groove-fill` only with the
-  part): the pocket of the fold pair must be gas (`groove.side_of`; a liquid sheet is refused), the
+  of a closing gas groove (`groovesurgery.groove_fill`, `CollapseDriver._meet_groove`) for
+  `A-groove` (the open chain or the bubble, and the open chain in the ring stage) and `RF` (the
+  ring's loop; its request names `groove-fill` only with the part), but never on a far head: with
+  `pinch.far_head` a groove on the head of a tracked neck in the far region is met by the far-head
+  cut of that head first (`CollapseDriver._meet_event`; decision 22), the fill only off the far
+  heads: the pocket of the fold pair must be gas (`groove.side_of`; a liquid sheet is refused), the
   mouth where the walls lie `mouth` fold limits apart or have turned out of the groove
   (`groove.MOUTH_TURN`), a cubic closure C1 at the splices, the filled region at most `max_fill V_b`
   and never on the core or the base of the upward jet; the rebuild through the template's
@@ -446,14 +448,8 @@ add a second top-level `cases/` tree.
   `groovesurgery.merge_impulse`, `G3_merge` in the closures): the projection of a fill is the
   inelastic impulse of the merge it makes, which moves momentum out of any disc about the site
   physically, so the disc's change against `P_ref = V_fill U` tests no balance
-  (`test_groove_closures.py`); `groove-fill-refused` a resumable stop; with `pinch.far_head` a
-  fill refused or unclosed on a far head (`events.far_head_request`, found on the state before the
-  fill) falls back to the far-head cut of that head as the same event
-  (`CollapseDriver._groove_fallback`; after an unclosed fill the state before the event is loaded
-  back into the problem from `precut_e<k>`,
-  `CollapseDriver._reload_event_state`, as a restart holds it: the only state loaded back within a
-  run), the fill's record `events/event_<k>_fill.json`, `fallback` in the cut's request, an event
-  `groove-fallback`; the record kind `groove-fill` (`EVENT_CLASSES["gap"]`),
+  (`test_groove_closures.py`); `groove-fill-refused` a resumable stop, as is a fill whose hard
+  closures miss (`event-unclosed`); the record kind `groove-fill` (`EVENT_CLASSES["gap"]`),
   a row of `events.txt`, `budget.txt` net of it (`CollapseDriver._filled`),
   `CollapseDriver.reset_after_groove`. With `groove.sheets` `log` (default `event`) the stops'
   chain and ring folds are selected per side (`groove.side_folds`, `side` in the request): a
@@ -464,10 +460,11 @@ add a second top-level `cases/` tree.
   without the part, or with it and no groove met, are
   those of 89f7f49 (`testCases/test_groove_identity.py`), besides every earlier pin;
   `test_groove_settings.py`, `test_groove_geometry.py`, `test_groove_driver.py` (stand-ins, the
-  fall-back among them), `test_groove_fem.py` (a finger of gas of a ring and a slot of the open
-  chain filled, the refusals unchanged) and `test_groove_fallback_fem.py` (the fall-back on the
-  heads' state: the cut after a reload equals the cut without one) cover it, and
-  `test_groove_fallback_identity.py` pins runs without a failing fill on a far head to 8407091.
+  far-head cut first among them), `test_groove_fem.py` (a finger of gas of a ring and a slot of the
+  open chain filled, the refusals unchanged) and `test_far_head_first_fem.py` (a groove on the
+  heads' state's downward head cut with the head, never filled) cover it, and
+  `test_far_head_first_identity.py` pins runs that meet no groove or unhandled event on a far head
+  and no curled head to cb12382.
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,
   its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest
@@ -491,8 +488,14 @@ add a second top-level `cases/` tree.
   part (`events.PinchSettings`, keys of the class `liquid`, `EventSettings.CLASS_OF_PART`) lands a
   tracked neck only when it closes (`events.closing_neck`, from the driver's per-neck history,
   `neck_history` in the dumps, `events.match_neck`), the request carrying the trigger and the liquid
-  cut's admission reading it again, and with `far_head` meets an event without a handler on a far
-  head by the liquid cut of its neck (`events.far_head_request`, kind `far-head`, class `F-head`).
+  cut's admission reading it again, and with `far_head` meets an event without a handler the
+  driver makes on a far head (a gas neck, a closing groove, before any fill, a sheet's contact) by
+  the liquid cut of its neck (`events.far_head_request`, kind `far-head`, class `F-head`; neither
+  the site nor any node of the head but its neck a core node of the open chain). A head whose rim
+  curls back past its neck's height, every node beyond it outside the neck's radius and its
+  half-section simple, is a head (`events.head_sides`, `curled` and `curl_depth` in its neck's
+  record and request; `testCases/test_curled_head.py`), the head the chain from its tip to that
+  root neck.
   A key whose behaviour the driver does not make is refused (`events.PENDING_KEYS`).
   `testCases/test_jetcore.py` (stand-ins), `test_jetcore_fem.py` (the far floor and kinks on the
   synthetic headed state, the pre-pierce refinement on the pierced state, the far-head cut) and
