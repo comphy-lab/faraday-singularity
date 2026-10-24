@@ -30,6 +30,16 @@ discretisation diagnostic rather than a test of the projection, the change made 
 pressure on the free surface). It adds no field, degree of freedom or global parameter, so state dumps
 of either kind of problem load into the other. Without ``reconnect`` the problem is the one above.
 
+A problem made with ``gas`` (a case's ``collapse.gas`` block, ``neckgas``) carries a pinned scalar
+field ``gas_traction`` on the free surface (:class:`GasTraction`, in the coordinate space, never a
+degree of freedom) and passes it to the free surface as ``additional_normal_traction``, so that the
+dynamic condition reads ``sigma_l . n = -(T + kappa) n``: ``T`` is the gas pressure over the passive
+ambient, in ``sigma k``, positive pushing into the liquid (a uniform ``T`` on the liquid at rest
+raises its pressure by ``T``). The driver sets it at every node before each step
+(:meth:`FaradayProblem.set_gas_traction`); it is zero until then. The field adds a value to every
+node of the free surface: a dump of a problem with ``gas`` loads only into a problem with ``gas``,
+and a dump of one without only into one without (the promise above holds within each kind).
+
 The free surface's chart (:class:`RingTolerantArclength`) also charts the ring of a pierced bubble
 (``ring.py``, ``ringsurgery.py``), a closed loop of the free surface's own boundary that carries
 the same equations, and :meth:`FaradayProblem.interface_loops` reads it apart from the chains,
@@ -49,6 +59,7 @@ from pyoomph.equations.ALE import HyperelasticSmoothedMesh
 from pyoomph.equations.generic import (AxisymmetryBC, DirichletBC, IntegralObservables,
                                        RemeshingOptions, RemeshWhen)
 from pyoomph.equations.navier_stokes import NavierStokesEquations, NavierStokesFreeSurface
+from pyoomph.generic.codegen import InterfaceEquations
 from pyoomph.expressions import (cos, div, dot, double_dot, evaluate_in_past, grad, transpose, var,
                                  vector)
 from pyoomph.meshes.zeta import (AssignZetaCoordinatesByArclength,
@@ -70,6 +81,22 @@ AXIS_MIDSIDE_LIMIT = 0.1
 # driver's row of it both read
 CACHED_INTEGRALS = {"liquid": ("volume", "kinetic_energy", "dissipation"),
                     "liquid/interface": ("area", "amp")}
+
+
+GAS_FIELD = "gas_traction"  # the pinned field of the gas's normal traction (problems with gas)
+
+
+class GasTraction(InterfaceEquations):
+    """The pinned scalar field :data:`GAS_FIELD` on the free surface, in the coordinate space: a
+    value per node that the driver sets before each step (the pattern of pyoomph's preCICE read
+    data), never solved for, carried in the dumps and interpolated by a rebuild, after which the
+    driver sets it again."""
+
+    def define_fields(self):
+        self.define_scalar_field(GAS_FIELD, self.get_current_code_generator()._coordinate_space)
+
+    def define_residuals(self):
+        self.set_Dirichlet_condition(GAS_FIELD, True)
 
 
 class RingTolerantArclength(AssignZetaCoordinatesByArclength):
@@ -166,9 +193,12 @@ class FaradayProblem(Problem):
     mesh_class = FaradayCylinderMesh
 
     def __init__(self, nd: Dimensionless, *, mesh: MeshSettings, remesh: bool = True,
-                 mesh_output: bool = False, reconnect: ReconnectSettings | None = None):
+                 mesh_output: bool = False, reconnect: ReconnectSettings | None = None,
+                 gas: bool = False):
         super().__init__()
         self.nd = nd
+        # the gas's normal traction on the free surface (GasTraction), only with a gas block
+        self.gas = bool(gas)
         self.mesh_settings = mesh
         self.remesh = remesh
         self.mesh_output = mesh_output
@@ -246,7 +276,12 @@ class FaradayProblem(Problem):
         n = var("normal")
         norm = math.pi * nd.radius**2 * float(j0(nd.radius)) ** 2
         j0_r = j0_polynomial(r, terms_for_radius(nd.radius))
-        surf = NavierStokesFreeSurface(surface_tension=1)
+        if self.gas:  # the gas pressure over the ambient, a pinned field the driver sets
+            surf = NavierStokesFreeSurface(surface_tension=1,
+                                           additional_normal_traction=var(GAS_FIELD))
+            surf += GasTraction()
+        else:
+            surf = NavierStokesFreeSurface(surface_tension=1)
         surf += IntegralObservables(area=1, amp=(z - nd.depth) * j0_r * n[1] / norm)
         surf += IntegralObservableOutput()
         surf += TextFileOutput(sort_along_axis="x+")
@@ -267,6 +302,38 @@ class FaradayProblem(Problem):
         eqs += surf @ "interface"
 
         self.add_equations(eqs @ "liquid")
+
+    # --- the gas's normal traction (problems with gas) -----------------------------------------
+
+    def _gas_nodes(self):
+        if not self.gas:
+            raise RuntimeError("the problem was made without gas: it has no gas traction")
+        m = self.get_mesh("liquid/interface")
+        index = m.has_interface_dof_id(GAS_FIELD)
+        if index < 0:
+            raise RuntimeError(f"the free surface carries no {GAS_FIELD} field")
+        return [(n, n.additional_value_index(index)) for n in m.nodes()]
+
+    def set_gas_traction(self, values) -> int:
+        """Set the gas traction at every node of the free surface: ``values`` a number, or a
+        function of the arrays ``(r, z)`` of the nodes returning their values. Returns the nodes
+        set."""
+        nodes = self._gas_nodes()
+        if callable(values):
+            r = np.array([n.x(0) for n, _ in nodes])
+            z = np.array([n.x(1) for n, _ in nodes])
+            v = np.asarray(values(r, z), dtype=float)
+        else:
+            v = np.full(len(nodes), float(values))
+        for (n, i), x in zip(nodes, v):
+            n.set_value(i, float(x))
+        return len(nodes)
+
+    def gas_traction(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``(r, z, T)`` of the nodes of the free surface, in the mesh's order."""
+        nodes = self._gas_nodes()
+        return (np.array([n.x(0) for n, _ in nodes]), np.array([n.x(1) for n, _ in nodes]),
+                np.array([n.value(i) for n, i in nodes]))
 
     # --- per-step diagnostics -------------------------------------------------------------------
 

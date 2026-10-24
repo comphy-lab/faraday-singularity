@@ -88,6 +88,16 @@ state is the one before an event (``precut_e<k>``), from which they apply anew
 and ``run_status.json`` the events the run made and the end of its window (``events``,
 ``window_end``, from the driver's result), or, for a run that failed in the cut of a liquid neck it
 made, that event (``event``).
+The ``collapse.gas`` block (``neckgas.coupler.GasSettings``) adds a quasi-one-dimensional
+compressible gas in the collapsing neck whose pressure acts on the free surface. It is read before
+the events block and is no key of the driver's settings (``collapse_settings.json`` is unchanged);
+``parameters.json`` and the manifest record it (``gas``) only where it is present. It is no derived
+key: a restart, a cut and a continuation carry the parent's block unchanged, and one that adds,
+drops or changes it is refused as a different case. A dump of an active gas has its state beside
+it (``<dump>.gas.npz``), which the restart record hashes (``gas_sha256``) and the restart copies
+and restores with it. A landing state of an active gas records the partition of the gas at the neck
+(``gas_handover``), and a cut from it writes that partition at the cut's neck to
+``gas_cut.json`` and retires the gas: after the cut the bubble keeps the passive pressure.
 An unknown key of the ``collapse`` block is refused with a message before any output, as is an
 invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
 or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
@@ -140,6 +150,8 @@ from faraday_singularity.events import (EVENT_SCHEMA, EVENTS_BLOCK, PRECUT_EVENT
                                         EventSettings, events_done, minimum_dt_after_cut,
                                         split_events_block)
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
+from faraday_singularity.neckgas.coupler import (GAS_BLOCK, GasSettings,  # noqa: E402
+                                                 split_gas_block)
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import create_run_manifest, pyoomph_revision  # noqa: E402
 from faraday_singularity.reconnect import (CONTINUATION_KEYS, ReconnectSettings,  # noqa: E402
@@ -298,6 +310,9 @@ def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = F
                              "format": parent_format, "component_commit": parent_commit}}
     if not legacy and derived is not None:  # a restart of the same case records what it did
         out["parent_record"].update(case_sha256=parent_case_hash, derived_keys=derived)
+    gas = state.with_suffix(".gas.npz")  # the gas's side file of a dump with collapse.gas
+    if gas.is_file():
+        out["gas_sha256"] = hashlib.sha256(gas.read_bytes()).hexdigest()
     return out
 
 
@@ -585,12 +600,17 @@ def main() -> int:
     settings = None
     reconnect = None
     events = None
+    gas = None
     keep_stop_state = False
     landing = ()
     if collapse:
         try:
-            # the events block first: it is no key of the cut nor of the driver
-            block, events_block = split_events_block(case["collapse"])
+            # the gas block first, then the events block: neither is a key of the cut nor of the
+            # driver's settings (CollapseSettings, whose record is written as it is)
+            block, gas_block = split_gas_block(case["collapse"])
+            if gas_block is not None:
+                gas = GasSettings.from_dict(gas_block)
+            block, events_block = split_events_block(block)
             block, recon_block, keep_stop_state, landing = split_collapse_block(block)
             if recon_block is not None:
                 reconnect = ReconnectSettings.from_dict(recon_block)
@@ -693,6 +713,8 @@ def main() -> int:
         manifest["reconnect"] = reconnect.to_dict()
     if events is not None:
         manifest["reconnect_events"] = events.to_dict()
+    if gas is not None:  # only with the block: other manifests keep their keys
+        manifest[GAS_BLOCK] = gas.to_dict()
     create_run_manifest(args.outdir, manifest)
     with (args.outdir / "progress.jsonl").open("a") as stream:
         stream.write(json.dumps({"event": "start", "wall_time": time.time()}) + "\n")
@@ -716,6 +738,8 @@ def main() -> int:
         info["reconnect"] = reconnect.to_dict()
     if events is not None:
         info["reconnect_events"] = events.to_dict()
+    if gas is not None:
+        info[GAS_BLOCK] = gas.to_dict()
     if keep_stop_state:
         info["keep_stop_state"] = True
     if landing:
@@ -732,6 +756,8 @@ def main() -> int:
     cut_error = None
     try:
         extra = {"reconnect": reconnect} if reconnect is not None else {}
+        if gas is not None:  # the gas's normal traction on the free surface
+            extra["gas"] = True
         problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, mesh_output=args.mesh_output,
                                  **extra)
         problem.set_output_directory(str(args.outdir))
@@ -752,7 +778,8 @@ def main() -> int:
                                            if restart_mode in (CUT, POST_CUT) else {}),
                                         **({"events": events, "leg_info": {"commit": commit}}
                                            if events is not None else {}),
-                                        **({"step_timing": True} if args.step_timing else {}))
+                                        **({"step_timing": True} if args.step_timing else {}),
+                                        **({"gas": gas} if gas is not None else {}))
                 try:
                     if args.restart is not None:
                         from pyoomph.output.states import copy_state_file
@@ -764,8 +791,16 @@ def main() -> int:
                         if hashlib.sha256(args.restart.with_suffix(".json").read_bytes()).hexdigest() != parent_record["metadata_sha256"]:
                             raise RuntimeError("restart metadata changed after admission")
                         copy_state_file(str(args.restart), str(local))
+                        gas_file = {}
+                        source_gas = args.restart.with_suffix(".gas.npz")
+                        if "gas_sha256" in parent_record:  # its side file, copied with it
+                            if hashlib.sha256(source_gas.read_bytes()).hexdigest() != \
+                                    parent_record["gas_sha256"]:
+                                raise RuntimeError("restart gas state changed after admission")
+                            shutil.copyfile(source_gas, local.with_suffix(".gas.npz"))
+                            gas_file = {"gas_file": local.with_suffix(".gas.npz")}
                         problem.load_state(str(local))
-                        driver.restore(restart_meta)
+                        driver.restore(restart_meta, **gas_file)
                     if restart_mode == CUT:
                         from faraday_singularity.surgery import CutFailed, CutRefused, cut
 

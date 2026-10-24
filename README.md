@@ -68,6 +68,15 @@ and test:
   divergence-free field by a pressure impulse that vanishes on the free surfaces, and the run
   continues with the bubble at the passive constant gas pressure (the limit of zero gas density).
   A result of the cut is meaningful only if it does not depend on $\delta$.
+- Optionally the gas in the collapsing neck is not passive: a case's `collapse.gas` block adds a
+  quasi-one-dimensional compressible ideal gas in the duct the free surface bounds, the unsteady
+  Euler equations with moving walls of Gekle & Gordillo [6] between a lumped compressible bubble
+  zone at the cavity's bottom and the atmosphere above the neck, with a separated-flow limit and
+  laminar wall friction as options. Its pressure over the ambient acts on the free surface as a
+  normal traction, set before each step from the gas at the start of the step (staggered
+  coupling), and the gas is advanced over each step on the two positions of the free surface. The
+  gas acts before a cut only: at the cut its partition at the neck is recorded and the bubble keeps
+  the passive pressure after it.
 - The step size and the mesh near the axis follow the local scale of the collapse: the apex radius
   of curvature, the jet-base radius or the narrowest neck, whichever is smallest. The scale may
   grow by at most a fixed factor per step, and each rebuild of the mesh coarsens it near the axis
@@ -97,7 +106,14 @@ container frame the body force is $-(Bo + \Gamma\cos\Omega t)\,\mathbf{e}_z$, wi
 `verificationCases/` compares the solver with the exact linear viscous theory of the $J_0$ mode:
 free decay against the finite-depth dispersion relation and the linear initial-value response, and
 forced growth or decay against the Floquet analysis of Kumar & Tuckerman [4]. The acceptance
-criteria are stated in `verificationCases/README.md`.
+criteria are stated in `verificationCases/README.md`. `verificationCases/neck-gas/` verifies the gas
+of `collapse.gas`: the quasi-1D solver against exact gas-dynamic limits (a gas at rest, adiabatic
+compression, a choked nozzle with a normal shock, Bernoulli and separated flow, a steady squeeze,
+an unsteady de Laval nozzle; `verify_q1d.py`), and the traction on the free surface against the
+linear theory extended by a normal stress on the surface (`forced_wave.py`: a uniform traction on
+the layer at rest raises its pressure by the traction and leaves a free decay unchanged; a forced
+`J0` traction set at the start of each step gives the time scheme's own linear response with a lag
+of one step).
 
 ## Layout
 
@@ -204,6 +220,32 @@ direction and decay of the surface velocity along the cavity wall at inception, 
 intermediate window; and, as a secondary check, fits of `r_j(t)` with the origin fixed at the
 apex-based singular time or fitted with the exponent. Every window and threshold is written to
 its summary.
+
+### The gas in the neck
+
+A `collapse.gas` block (`neckgas.coupler.GasSettings`; keys and defaults in its docstring) makes
+the problem with the pinned traction field `gas_traction` on the free surface and the driver
+advance the gas. The heights of the case's cavity, `z_hi` (the top of the gas zone, above which
+the gas is the atmosphere) and `neck_window` (where the narrowest section is sought before a neck
+has formed), have no default; the material values default to air and water at `k = 1.8e3 m^-1`.
+The gas is dormant until the neck has closed to `r_on`, then starts quasi-steadily from the next
+step's pair of free surfaces. `coupling` `two-way` applies its traction and limits the step to
+`omega_dt/omega`, the period of the gas spring on the liquid wall; `one-way` advances one or more
+`variants` (attached or separated, with or without friction) on the passive liquid, records the
+traction it would apply and leaves the trajectory as that of a dormant block. A dormant block
+changes the trajectory of a run without the block at round-off only, as the compiled code differs.
+
+The run writes `gas.txt` (a row per variant per step: the neck, its closing speed and Weber
+number, the throat state, the pocket, the extremes about the neck, the budgets of mass, energy and
+work, the regrids; `neckgas.coupler.COLUMNS`) and `gas_profiles/` beside every interface profile,
+and stops resumably (`states/stop_<step>.dump`) when the free surface is no single-valued duct
+between the gas's lowest face and `z_hi`, a budget does not close, the neck stalls or reopens, it
+turns into a long thread, or the throat leaves the continuum range. Every dump of an active gas
+has its state beside it (`<dump>.gas.npz`), which a restart copies and restores; a landing state
+records the partition of the gas at its neck (`gas_handover`), and a cut from it writes the
+partition at the cut's neck to `gas_cut.json` and retires the gas. The block is no derived key: a
+restart, a cut or a continuation carries the parent's block unchanged. A dump of a problem with
+the block loads only into one with it, and the reverse.
 
 ### Reconnection through a neck pinch-off
 
@@ -814,3 +856,6 @@ no runner continues its states.
    collapse of cavities with applications to bubble bursting jets, *Phys. Rev. Fluids* **8**,
    073606 (2023).
    [doi:10.1103/PhysRevFluids.8.073606](https://doi.org/10.1103/PhysRevFluids.8.073606)
+6. S. Gekle and J. M. Gordillo, Compressible air flow through a collapsing liquid cavity,
+   *Int. J. Numer. Methods Fluids* (2011). [doi:10.1002/fld.2426](https://doi.org/10.1002/fld.2426);
+   [arXiv:1001.5402](https://arxiv.org/abs/1001.5402)
