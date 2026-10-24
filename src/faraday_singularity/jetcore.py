@@ -24,7 +24,11 @@ region of their own per chain, recentred on the worst element at each request in
 at the floor, below it only while the turn exceeds ``far_yield_turn`` (a yield, halving per
 rebuild); the far regions refined beyond ``far_refine_ratio`` of their targets; the ring's kinks no
 finer than the column. The tracked necks' regions are exempt, so that a neck is followed to its
-landing.
+landing. Where a freshly built mesh of the ring cannot represent a feature (the guard's fresh
+limit, an element of the ring turning beyond ``edge_turn_stop_fresh``, but within
+``edge_turn_stop``), the driver rebuilds the ring's far kink at once at the size the element's turn
+asks for (``CollapseDriver._ring_refine``), and that region keeps its size while the ring asks for
+one (``refined``).
 
 Before the piercing (:func:`prep_regions`), once the bubble is shorter than ``prep_gap delta``, its
 bottom and the downward jet's tip are refined so that the ring cut (``ring.ring_cut_geometry``,
@@ -222,7 +226,12 @@ def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, 
     last target down to ``h_floor`` each time the current mesh has met it (``sizes``: the size of
     each region in the current mesh), each halving a yield (``yields``, ``yield_t``). A region whose
     chain asks for none for ``hold(h_before)`` of time is released, its target back to the chord it
-    met, as a core kink is (``reconnect.kink_regions``)."""
+    met, as a core kink is (``reconnect.kink_regions``).
+
+    A region the driver refined itself on a freshly built mesh (``refined``, the ring's
+    ``CollapseDriver._ring_refine``: the rim of a thin sheet that a rebuild at the yielded size
+    could not represent) keeps its target, and the mark, while its chain still asks for one; it is
+    released by the hold as any other, and a region set after its release is an ordinary one."""
     out = {name: dict(v) for name, v in previous.items()}
     floors = floors or {}
     for chain, idx in refine.items():
@@ -238,6 +247,7 @@ def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, 
         target = max(0.25 * L, floor)
         g = out.get(key)
         yields, yield_t = (g.get("yields", 0), g.get("yield_t")) if g is not None else (0, None)
+        refined = g is not None and not g["released"] and bool(g.get("refined"))
         if g is not None and not g["released"] and turn > yield_turn:
             last = float(g["target"])
             size = sizes.get(name)
@@ -246,10 +256,14 @@ def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, 
                 yields, yield_t = yields + 1, t
             else:
                 target = min(target, last)  # not met yet: kept
+        elif refined:
+            target = min(target, float(g["target"]))  # the driver's refinement: kept
         out[key] = {"name": name, "chain": chain, "r": r, "z": z, "radius": 4.0 * L,
                     "target": target, "h_before": max(L, g["h_before"]) if g is not None
                     and not g["released"] else L, "t_set": t, "released": False,
                     "turn": turn, "yields": yields, "yield_t": yield_t, "far": True}
+        if refined:
+            out[key]["refined"] = True
     for key, g in out.items():
         chain = g["chain"]
         if chain in refine and len(refine[chain]) or g["released"]:

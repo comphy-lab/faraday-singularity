@@ -478,12 +478,20 @@ add a second top-level `cases/` tree.
   `CollapseDriver._far_sizing`), the far kinks recentred with `far_kinks` `recentre`
   (`jetcore.far_kink_regions`: at the floor, below it only past `far_yield_turn`, halving per
   rebuild, event `far-yield`), refined at `far_refine_ratio`, the ring's kinks at the column's size
-  with `ring_kink_floor`, the edge-turn profiles from the core with `edge_turn_snapshots` `core`;
-  `prep_gap` refines the bubble's bottom and the downward jet's tip before the piercing
-  (`jetcore.prep_regions`) so that the ring cut admits `prep_rho s_t`; `profile_dt` adds profiles
-  (reason `window`); `box_gate` stops the run (`box-gate`, on `states/gate_<step>.dump`, the state
-  before the rebuild) where an ordinary rebuild changes the liquid volume or axial momentum of the
-  box about the core's base by more than `box_gate_sigmas` times `liquid.sigma_V`, `sigma_Pz`;
+  with `ring_kink_floor` (in the ring stage the guard's stop on a fresh mesh of the ring, a turn
+  beyond `edge_turn_stop_fresh` within `edge_turn_stop` or a midside node beyond `midside_stop`, is
+  met by `CollapseDriver._ring_refine`: up to `driver.RING_REFINE_TRIES` rebuilds with the ring's
+  far kink at `min(1/2, edge_turn_refine/turn)` of the element's chord, marked `refined` so that
+  `jetcore.far_kink_regions` keeps its size while the ring asks, event `ring-refine`, the upward
+  jet's base held within `HEAD_FOLD_BASE_TOL` by `driver.base_guard` or the stop
+  `ring-refine-base`; `test_ring_refine.py`, `test_ring_refine_fem.py`, and
+  `test_ring_refine_identity.py`, runs that never meet it e923ead's), the edge-turn profiles
+  from the core with `edge_turn_snapshots` `core`; `prep_gap` refines the bubble's bottom and
+  the downward jet's tip before the piercing (`jetcore.prep_regions`) so that the ring cut
+  admits `prep_rho s_t`; `profile_dt` adds profiles (reason `window`); `box_gate` stops the run
+  (`box-gate`, on `states/gate_<step>.dump`, the state before the rebuild) where an ordinary
+  rebuild changes the liquid volume or axial momentum of the box about the core's base by more
+  than `box_gate_sigmas` times `liquid.sigma_V`, `sigma_Pz`;
   `jetcore.txt` a row per step (`jetcore.COLUMNS`), `limits.jetcore` in each leg. The `pinch`
   part (`events.PinchSettings`, keys of the class `liquid`, `EventSettings.CLASS_OF_PART`) lands a
   tracked neck only when it closes (`events.closing_neck`, from the driver's per-neck history,
