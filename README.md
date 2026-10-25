@@ -709,16 +709,22 @@ worst element at each request (four chords wide, no growth), at the floor, and b
 the element turns by more than `far_yield_turn` degrees (75), halving at each rebuild down to the
 run's `h_floor` (event `far-yield`); the far regions are refined beyond `far_refine_ratio` times
 their targets (null for the collapse's `refine_ratio`); with `ring_kink_floor` the ring's kinks are
-no finer than its column. In the ring stage a freshly built mesh whose ring an element turns across
-by more than `reconnect.edge_turn_stop_fresh` (but within `edge_turn_stop`), or whose midside node
-lies beyond `midside_stop`, is not a stop at once: the mesh is rebuilt with the ring's far kink
-recentred on that element at the size its turn asks for (`min(1/2, edge_turn_refine/turn)` of its
-chord, never below `h_floor`), every other region as the mesh has it, at most three times per state
-(event `ring-refine`, a yield), and that kink keeps its size while the ring asks for one about the
-same feature (the region of its new worst element overlapping it); the base of
+no finer than its column. In the ring stage a mesh of whose ring an element turns by more than the
+guard allows (`reconnect.edge_turn_stop_fresh` on a fresh mesh, `edge_turn_stop` on one a step has
+run on; up to 150 degrees), or whose midside node lies beyond `midside_stop`, is not a stop at
+once: the mesh is rebuilt with that element in a far
+kink of its own (`kink_ring_r<n>_far`) at the size its turn asks for (`min(1/2,
+edge_turn_refine/turn)` of its chord, never below `h_floor`), every other region as the mesh has
+it, at most three times per state (event `ring-refine`, a yield); that kink follows its feature
+(the elements that ask within its reach), keeping its size, until the feature asks no more, and
+while it remains every far kink of the ring follows its own feature, a new feature a region of its
+own (`kink_ring_m<n>_far`, at most eight), so that several sharp features (a sheet's rim, the
+corners of a fill) are all kept refined; the base of
 the upward jet must stay within `driver.HEAD_FOLD_BASE_TOL` across each such rebuild, or the run
 stops (`interface-unresolved`, trigger `ring-refine-base`). A thin sheet's rim, which a rebuild at
-the yielded size cannot represent, is so followed instead of ending the run. With
+the yielded size cannot represent, is so followed instead of ending the run, and one thinner than
+the run's `h_floor` is carried at the floor (no `feature-below-floor` stop on the ring) as long as
+its elements keep within the guard's limits of the turn and the midside node. With
 `edge_turn_snapshots` `core` only an element of the core that bends
 beyond `reconnect.edge_turn_refine` writes a profile at every step. With `prep_gap` (null for none),
 once the bubble is shorter than `prep_gap delta`, its bottom and the downward jet's tip are refined

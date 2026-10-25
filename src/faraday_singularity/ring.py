@@ -864,6 +864,7 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
         if L is not None:
             readings["ring"] = loop_edges(L)
         return interface_guard(readings, settings, fresh=fresh, h_floor=float(guard["h_floor"]),
+                               floored_ok=ring_floored_ok(events),
                                refine_ratio=float(guard["refine_ratio"]))["stop"]
 
     if guard is not None and fresh:
@@ -1020,6 +1021,16 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
     if guard is not None and not fresh:
         return guarded()
     return None
+
+
+def ring_floored_ok(events) -> tuple:
+    """The chains whose elements the guard carries at the floor in the ring stage
+    (``reconnect.interface_guard``'s ``floored_ok``): the ring, with the block's jetcore and its
+    recentred far kinks (the ring a nuisance, decision 22: a feature thinner than the run's floor,
+    the rim of a thin sheet, is carried at the floor within the limits of the turn and the midside
+    node rather than ending the run); none otherwise."""
+    jet = getattr(events, "jetcore", None)
+    return ("ring",) if jet is not None and jet.enabled and jet.far_kinks == "recentre" else ()
 
 
 def ring_axis_limits(ring: dict, events) -> tuple[float, float]:

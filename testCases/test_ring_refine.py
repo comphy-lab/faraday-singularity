@@ -6,22 +6,29 @@ liquids, as r1 of the delta triple met it at tau/delta^2 24.74, eight steps afte
 element of the ring turning by 91.1 degrees on the mesh rebuilt with the ring's far kink yielded to
 half the column's size, chord 9.4e-6).
 
-* the stop met: the guard's ``interface-unresolved`` on the ring, on a fresh mesh, an ``edge-turn``
-  within the limit on any mesh or an ``edge-midside``, at an element above the guard's floor, in
-  the ring stage with jetcore's recentred far kinks; nothing else (the open chain, a stepped mesh,
-  a turn beyond ``edge_turn_stop``, ``feature-below-floor``, a curved Jacobian, the floor, no ring,
-  the ring removed, no jetcore or kinks that grow);
-* the rebuild: the ring's far kink recentred on the element at ``min(1/2, edge_turn_refine/turn)``
-  of its chord (never below ``h_floor``), the radius of the region it lies in kept, the other
-  regions of the focus as they are and in their order, ``refined``, a yield; the base of the upward
+* the stop met: the guard's ``interface-unresolved`` on the ring, an ``edge-turn`` on a fresh mesh
+  (r1's) or on a stepped one (r1h's, 123.3 degrees three steps after its ring cut) up to
+  ``RING_REFINE_TURN_MAX``, or an ``edge-midside``, at an element above the guard's floor, in the
+  ring stage with jetcore's recentred far kinks; nothing else (the open chain, a turn beyond the
+  cap, ``feature-below-floor``, a curved Jacobian, the floor, no ring, the ring removed, no jetcore
+  or kinks that grow);
+* the floor: an element of the ring at the guard's floor that asks is carried there with
+  jetcore's recentred far kinks (``ring.ring_floored_ok``, ``reconnect.interface_guard``'s
+  ``floored_ok``), within the guard's turn limits, and still asks; the open chain's, and the ring's
+  without them, stop the run as before;
+* the rebuild: the element in a far kink of its own (``kink_ring_r<n>_far``, ``refined``; the
+  refined one whose reach holds it refined further, never coarser; a feature elsewhere a second
+  one) at ``min(1/2, edge_turn_refine/turn)`` of its chord (never below ``h_floor``), the radius of
+  the far kink it lies in kept, every other region of the focus as it is and in its order, a
+  yield; the base of the upward
   jet read before and after it, a move beyond ``HEAD_FOLD_BASE_TOL`` the stop
   ``ring-refine-base``, a state without a born jet not checked; the stops of the new mesh;
 * at most ``RING_REFINE_TRIES`` rebuilds per state, the stop that stays carrying their count;
-* the far kink's rule: a ``refined`` region keeps its target and its mark while the ring asks for
-  one about the same feature (the new worst element's region overlapping it: the rim moving on),
-  yields past ``far_yield_turn`` as before, and is released by the hold, after which a new
-  request is an ordinary region at the floor, as is one about an element elsewhere on the ring and
-  every region the driver did not refine (the rule of e923ead);
+* the far kink's rule after a refine: every far kink of the ring follows its own feature (the
+  elements that ask within its reach: the rim moving on), a refined one at its target, a new
+  feature in a region of its own (``kink_ring_m<n>_far``, at most ``MULTI_FAR_KINKS``), a yield
+  halving the finer of a region's target and its size, each released by its own hold; without a
+  refined region every region is as at e923ead;
 * ``base_guard``: the reading of ``_head_fold_check`` (e923ead's formula, value for value).
 """
 
@@ -55,6 +62,10 @@ KINK = {"name": "kink_ring_far", "chain": "ring", "r": 1.6071831003016467e-4,
         "z": 4.611886158785072, "radius": 8.060938268988124e-05, "target": H_COL,
         "h_before": 2.894478669127556e-05, "t_set": 10.954720328524774, "released": False,
         "turn": 73.5040251788492, "yields": 0, "yield_t": None, "far": True}
+# r1h's stop (the far floor halved, delta/128), three steps after its ring cut, on a stepped mesh
+STOP_R1H = {"reason": "interface-unresolved", "trigger": "edge-turn", "chain": "ring",
+            "turn": 123.3, "limit": 120.0, "fresh": False, "r": 1.114e-4, "z": 4.61192,
+            "L": 2.30e-5, "index": 2593}
 BASE = {"r_j": 1.290061417830118e-3, "z_b": 4.716019972998573, "V_j": 830.4721688598765,
         "Q_j": 4.3420590885911246e-3}
 
@@ -69,20 +80,69 @@ def _due_driver(*, ring=True, removed=False, jet="recentre", h_floor=H_FLOOR):
     return fake
 
 
-def test_the_ring_refine_meets_the_rings_fresh_stops_and_no_other():
+def test_the_ring_refine_meets_the_rings_stops_and_no_other():
     due = CollapseDriver._ring_refine_due
     fake = _due_driver()
     assert due(fake, dict(STOP))
+    assert due(fake, dict(STOP_R1H))  # r1h's: on a stepped mesh, beyond edge_turn_stop
     assert due(fake, dict(STOP, trigger="edge-midside", midside=0.24, limit=0.2))
-    assert due(fake, dict(STOP, turn=120.0))  # the limit on any mesh, included
-    for change in ({"chain": "open"}, {"chain": "bubble"}, {"fresh": False},
-                   {"turn": 120.5}, {"trigger": "feature-below-floor"},
-                   {"trigger": "curved-jacobian"}, {"reason": "self-contact-approach"},
-                   {"L": 1.5 * H_FLOOR}, {"L": math.nan}):
+    assert due(fake, dict(STOP, turn=dv.RING_REFINE_TURN_MAX))  # the cap, included
+    for change in ({"chain": "open"}, {"chain": "bubble"}, {"turn": dv.RING_REFINE_TURN_MAX + 0.5},
+                   {"trigger": "feature-below-floor"}, {"trigger": "curved-jacobian"},
+                   {"reason": "self-contact-approach"}, {"L": 1.5 * H_FLOOR}, {"L": math.nan}):
         assert not due(fake, dict(STOP, **change)), change
+        assert not due(fake, dict(STOP_R1H, **change)), change
     assert not due(fake, None)
     for kw in ({"ring": False}, {"removed": True}, {"jet": None}, {"jet": "grow"}):
         assert not due(_due_driver(**kw), dict(STOP)), kw
+        assert not due(_due_driver(**kw), dict(STOP_R1H)), kw
+
+
+def _floored_loop(n=16, a=2e-6, b=1e-6, c=(0.01, 4.68)):
+    """A small ring of ``n/2`` quadratic elements, at most about 1.2e-6 long, the sharper ones
+    turning by more than 30 degrees: at the floor of 1e-6 (``refine_ratio`` 1.5) those ask and none
+    can be refined."""
+    t = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+    return np.column_stack([c[0] + a * np.cos(t), c[1] + b * np.sin(t)])
+
+
+def test_a_ring_element_at_the_floor_is_carried_there_with_recentred_far_kinks():
+    from faraday_singularity import events as ev
+    from faraday_singularity import reconnect as rc
+    from faraday_singularity import ring as rg
+
+    from test_ring_stops import KW, flat_open, record, stops
+
+    S = ReconnectSettings(delta=1e-3, dt0=1e-9)
+    L = _floored_loop()
+    rd = {"open": rc.edge_reading(flat_open().points), "ring": rg.loop_edges(L)}
+    plain = rc.interface_guard(rd, S, fresh=False, h_floor=1e-6, refine_ratio=1.5)
+    assert plain["stop"]["trigger"] == "feature-below-floor" and plain["stop"]["chain"] == "ring"
+    carried = rc.interface_guard(rd, S, fresh=False, h_floor=1e-6, refine_ratio=1.5,
+                                 floored_ok=("ring",))
+    asks = carried["refine"]["ring"]
+    e = rd["ring"]["edges"]
+    assert carried["stop"] is None and len(asks) >= 2
+    assert np.all(e["L"][asks] <= 1.5e-6) and np.all(e["turn"][asks] > S.edge_turn_refine)
+    # the limits of the turn still stop it, and the open chain's floor is not carried
+    sharp = {"ring": dict(rd["ring"], turn=125.0)}
+    assert rc.interface_guard(sharp, S, fresh=False, h_floor=1e-6, refine_ratio=1.5,
+                              floored_ok=("ring",))["stop"]["trigger"] == "edge-turn"
+    other = {"open": rd["ring"]}
+    assert rc.interface_guard(other, S, fresh=False, h_floor=1e-6, refine_ratio=1.5,
+                              floored_ok=("ring",))["stop"]["trigger"] == "feature-below-floor"
+    # the ring stage's stops: carried with jetcore's recentred far kinks, a stop without them
+    guard = {"fresh": False, "h_floor": 1e-6, "refine_ratio": 1.5}
+    ringed = ev.EventSettings.from_dict({"ring": {"enabled": True}})
+    recentred = ev.EventSettings.from_dict({"ring": {"enabled": True},
+                                            "jetcore": {"enabled": True,
+                                                        "far_kinks": "recentre"}})
+    assert rg.ring_floored_ok(ringed) == () and rg.ring_floored_ok(recentred) == ("ring",)
+    without = stops([flat_open()], [L], events=ringed, guard=guard)
+    assert without["trigger"] == "feature-below-floor" and without["chain"] == "ring"
+    assert stops([flat_open()], [L], events=recentred, guard=guard) is None
+    assert stops([flat_open()], [L], events=recentred, guard=dict(guard, fresh=True)) is None
+    assert KW["guard"] is None and record()["sizing"]
 
 
 def test_the_rebuilds_are_bounded_and_a_stop_that_stays_carries_their_count():
@@ -156,62 +216,82 @@ def _focus():
     return Focus(size=1.0386e-5, radius=6.3e-3, grading=0.2, regions=regions)
 
 
-def test_one_rebuild_recentres_the_rings_far_kink_at_the_size_its_turn_asks_for():
+def test_one_rebuild_refines_the_element_in_a_far_kink_of_its_own():
     kinks = {"ring_far": dict(KINK), "open": {"name": "kink_open", "chain": "open"}}
     fake, template, log = _once_driver(kinks, _focus())
     m, stop = CollapseDriver._ring_refine_once(fake, dict(BASE), dict(STOP), 1)
     target = 30.0 / STOP["turn"] * STOP["L"]
-    g = kinks["ring_far"]
+    g = kinks["ring_r1_far"]
+    assert g["name"] == "kink_ring_r1_far" and g["chain"] == "ring"
     assert g["target"] == pytest.approx(target, rel=1e-14) and g["refined"] and g["far"]
     assert (g["r"], g["z"]) == (STOP["r"], STOP["z"])
-    assert g["radius"] == KINK["radius"]  # the element lies in it: its radius kept (> 4 L)
-    assert g["h_before"] == KINK["h_before"] and g["yields"] == 1 and not g["released"]
-    assert kinks["open"] == {"name": "kink_open", "chain": "open"}  # the core's untouched
+    # the yielded far kink holds the element: its radius and the chord it met carried over
+    assert g["radius"] == KINK["radius"] and g["h_before"] == KINK["h_before"]
+    assert g["yields"] == 1 and not g["released"]
+    assert kinks["ring_far"] == KINK  # every other region as it was, the core's too
+    assert kinks["open"] == {"name": "kink_open", "chain": "open"}
     assert fake.state.far_yields == 3 and fake.state.last_remesh_step == 7415
     assert log["remesh"] == 1 and log["snapshots"] == ["ring-refine"] and log["stops"] == 1
     names = [x.name for x in template.focus.regions]
-    assert names == ["cavity_tip", "kink_ring_far", "ring_cut"]
-    new = template.focus.region("kink_ring_far")
+    assert names == ["cavity_tip", "kink_ring_far", "ring_cut", "kink_ring_r1_far"]
+    new = template.focus.region("kink_ring_r1_far")
     assert (new.size, new.r, new.z, new.radius) == (g["target"], g["r"], g["z"], g["radius"])
-    for a, b in zip(template.focus.regions, _focus().regions):
-        if a.name != "kink_ring_far":
-            assert a == b
+    assert template.focus.regions[:3] == _focus().regions
     assert template.focus.size == g["target"] and template.focus.grading == 0.2
     (kind, rec), = log["events"]
     assert kind == "ring-refine" and rec["attempt"] == 1 and rec["target"] == g["target"]
-    assert rec["reading"]["turn"] == STOP["turn"] and rec["base"]["ok"] and rec["base"]["checked"]
+    assert rec["name"] == "kink_ring_r1_far" and rec["reading"]["turn"] == STOP["turn"]
+    assert rec["base"]["ok"] and rec["base"]["checked"]
     assert stop is None and m == BASE
 
 
-def test_a_rebuild_halves_at_least_adds_the_region_and_floors_its_size():
+def test_a_rebuild_halves_at_least_refines_its_own_region_further_and_floors_its_size():
     # no far kink yet: the region added at edge_turn_refine/turn of the chord
     kinks = {}
     focus = Focus(size=3.9e-5, radius=6.3e-3, grading=0.2,
                   regions=(FocusRegion("cavity_tip", size=3.9e-5, r=0.0, z=4.75, radius=6.3e-3),))
     fake, template, log = _once_driver(kinks, focus)
     CollapseDriver._ring_refine_once(fake, dict(BASE), dict(STOP, turn=95.0, L=8e-6), 1)
-    assert kinks["ring_far"]["target"] == pytest.approx(30.0 / 95.0 * 8e-6)
-    assert kinks["ring_far"]["radius"] == 4.0 * 8e-6 and kinks["ring_far"]["yields"] == 1
-    assert kinks["ring_far"]["h_before"] == 8e-6
-    assert [x.name for x in template.focus.regions] == ["cavity_tip", "kink_ring_far"]
+    g = kinks["ring_r1_far"]
+    assert g["target"] == pytest.approx(30.0 / 95.0 * 8e-6)
+    assert g["radius"] == 4.0 * 8e-6 and g["yields"] == 1 and g["h_before"] == 8e-6
+    assert [x.name for x in template.focus.regions] == ["cavity_tip", "kink_ring_r1_far"]
+    # the same feature again, within the reach of that region (its radius and four chords): refined
+    # further in it, never coarser, a second yield
+    fake, template, _ = _once_driver(kinks, template.focus)
+    CollapseDriver._ring_refine_once(fake, dict(BASE), dict(STOP, turn=95.0, L=2.5e-6,
+                                                            r=STOP["r"] + 4e-5), 2)
+    assert set(kinks) == {"ring_r1_far"} and kinks["ring_r1_far"]["yields"] == 2
+    assert kinks["ring_r1_far"]["target"] == pytest.approx(30.0 / 95.0 * 2.5e-6)
+    assert [x.name for x in template.focus.regions] == ["cavity_tip", "kink_ring_r1_far"]
+    # a feature elsewhere: a second region of its own, the first as it was
+    first = dict(kinks["ring_r1_far"])
+    fake, template, _ = _once_driver(kinks, template.focus)
+    CollapseDriver._ring_refine_once(fake, dict(BASE), dict(STOP, turn=95.0, L=8e-6, r=4e-4,
+                                                            z=4.6115), 1)
+    assert kinks["ring_r1_far"] == first and kinks["ring_r2_far"]["r"] == 4e-4
+    assert [x.name for x in template.focus.regions] == ["cavity_tip", "kink_ring_r1_far",
+                                                         "kink_ring_r2_far"]
     # a turn below twice edge_turn_refine (a fresh limit set low): halved at least
     kinks = {}
     fake, _, _ = _once_driver(kinks, focus)
     CollapseDriver._ring_refine_once(fake, dict(BASE), dict(STOP, turn=55.0, L=8e-6), 1)
-    assert kinks["ring_far"]["target"] == 0.5 * 8e-6
-    # a midside node: half the chord; a region elsewhere: not its radius
+    assert kinks["ring_r1_far"]["target"] == 0.5 * 8e-6
+    # a midside node: half the chord; the ring's far kink elsewhere: not its radius, unchanged
     kinks = {"ring_far": dict(KINK, r=0.5, z=0.5)}
     fake, template, log = _once_driver(kinks, _focus())
     midside = {k: v for k, v in STOP.items() if k != "turn"}
     CollapseDriver._ring_refine_once(fake, dict(BASE), dict(midside, trigger="edge-midside",
                                                             midside=0.25, limit=0.2), 2)
-    g = kinks["ring_far"]
+    g = kinks["ring_r1_far"]
     assert g["target"] == 0.5 * STOP["L"] and g["radius"] == 4.0 * STOP["L"]
-    assert math.isnan(g["turn"]) and g["yields"] == 1
-    kinks = {"ring_far": dict(KINK, released=True)}  # released: a region of its own again
+    assert math.isnan(g["turn"]) and g["yields"] == 1 and kinks["ring_far"] == dict(KINK, r=0.5,
+                                                                                     z=0.5)
+    kinks = {"ring_far": dict(KINK, released=True)}  # a released kink holds nothing
     fake, _, _ = _once_driver(kinks, _focus())
     CollapseDriver._ring_refine_once(fake, dict(BASE), dict(STOP, L=2.0 * H_FLOOR), 1)
-    assert kinks["ring_far"]["target"] == H_FLOOR and kinks["ring_far"]["h_before"] == 2 * H_FLOOR
+    g = kinks["ring_r1_far"]
+    assert g["target"] == H_FLOOR and g["h_before"] == 2 * H_FLOOR and g["radius"] == 8 * H_FLOOR
 
 
 def test_a_base_moved_by_the_rebuild_stops_the_run_and_none_is_checked_without_a_jet():
@@ -239,47 +319,91 @@ def _ring_reading(turn, L, mid=(1.8e-4, 4.6119)):
                                "index": np.array([1])}}}
 
 
-def test_a_refined_kink_keeps_its_size_while_the_ring_asks_and_is_released_by_the_hold():
+def _ring_readings(*elements):
+    """A reading of the ring's quadratic elements, each ``(turn, L, (r, z))``."""
+    turns, Ls, mids = zip(*elements)
+    return {"ring": {"edges": {"turn": np.array(turns, dtype=float),
+                               "L": np.array(Ls, dtype=float),
+                               "mid": np.array(mids, dtype=float),
+                               "f": np.full(len(turns), 0.5),
+                               "index": 2 * np.arange(len(turns)) + 1}}}
+
+
+def test_after_a_refine_every_far_kink_of_the_ring_follows_its_own_feature():
+    from faraday_singularity.jetcore import MULTI_FAR_KINKS
+
     kw = dict(hold=_hold, h_far=1.5625e-5, h_floor=H_FLOOR, yield_turn=75.0,
               floors={"ring": H_COL})
-    refined = {"ring_far": dict(KINK, target=3.09e-6, refined=True, yields=1, t_set=0.0,
-                                h_before=2.9e-5)}
-    ask = {"ring": np.array([0])}
-    g = far_kink_regions(refined, _ring_reading(44.0, 3e-6), ask, t=0.1, sizes={}, **kw)
-    k = g["ring_far"]
-    assert k["target"] == 3.09e-6 and k["refined"] and k["r"] == 1.8e-4 and k["yields"] == 1
-    assert k["radius"] == 4.0 * 3e-6 and k["h_before"] == 2.9e-5
-    # the same region not refined by the driver: back to the floor at once (e923ead's rule)
-    plain = {"ring_far": {k_: v for k_, v in refined["ring_far"].items() if k_ != "refined"}}
-    p = far_kink_regions(plain, _ring_reading(44.0, 3e-6), ask, t=0.1, sizes={}, **kw)
-    assert p["ring_far"]["target"] == H_COL and "refined" not in p["ring_far"]
-    # past the yield turn, met by the mesh: halved, still refined
-    y = far_kink_regions(g, _ring_reading(80.0, 3e-6), ask, t=0.2,
-                         sizes={"kink_ring_far": 3.0e-6}, **kw)["ring_far"]
-    assert y["target"] == pytest.approx(1.545e-6) and y["yields"] == 2 and y["refined"]
-    # no element asks within the hold: released with its mark, its target the chord it met
-    gone = far_kink_regions({"ring_far": y}, {}, {}, t=5.0, sizes={}, **kw)["ring_far"]
-    assert gone["released"] and gone["target"] == gone["h_before"] == 2.9e-5
-    again = far_kink_regions({"ring_far": gone}, _ring_reading(44.0, 3e-6), ask, t=6.0,
-                             sizes={}, **kw)["ring_far"]
-    assert again["target"] == H_COL and "refined" not in again and not again["released"]
-    # a refined region whose chain asks no more stays within its hold
-    held = far_kink_regions(g, {}, {}, t=0.5, sizes={}, **kw)["ring_far"]
-    assert not held["released"] and held["refined"] and held["target"] == 3.09e-6
-    # the rim moves on: the worst element's region (4 chords) still overlaps the refined one, which
-    # follows it; one step later the region is about the new element, of radius 4 of its chords
-    d = k["radius"] + 4.0 * 3e-6
-    moved = far_kink_regions(g, _ring_reading(44.0, 3e-6, (1.8e-4 + 0.99 * d, 4.6119)), ask,
-                             t=0.2, sizes={}, **kw)["ring_far"]
-    assert moved["refined"] and moved["target"] == 3.09e-6 and moved["r"] == 1.8e-4 + 0.99 * d
-    # the worst element elsewhere on the ring (the column's corner, 0.3 delta away): an ordinary
-    # region there, at the floor
-    jump = far_kink_regions(g, _ring_reading(35.0, 3e-5, (4.5e-4, 4.6115)), ask, t=0.2, sizes={},
-                            **kw)["ring_far"]
-    assert jump["target"] == H_COL and "refined" not in jump and jump["r"] == 4.5e-4
-    just = far_kink_regions(g, _ring_reading(44.0, 3e-6, (1.8e-4 + 1.01 * d, 4.6119)), ask,
-                            t=0.2, sizes={}, **kw)["ring_far"]
-    assert "refined" not in just and just["target"] == H_COL
+    ROOT_RZ, RIM_RZ = (9e-5, 4.6118), (1.8e-4, 4.6119)
+    ordinary = dict(KINK, r=ROOT_RZ[0], z=ROOT_RZ[1], radius=4e-5, t_set=0.0)
+    rim = {"name": "kink_ring_r1_far", "chain": "ring", "r": RIM_RZ[0], "z": RIM_RZ[1],
+           "radius": 1.2e-5, "target": 3.09e-6, "h_before": 2.9e-5, "t_set": 0.0,
+           "released": False, "turn": 91.1, "yields": 1, "yield_t": 0.0, "far": True,
+           "refined": True}
+    prev = {"ring_far": ordinary, "ring_r1_far": rim}
+    # the rim alone asks, moved on within the region's reach: the refined region follows it at
+    # its size, four of its chords wide; the ring's far kink is not moved, nor released
+    d = rim["radius"] + 4.0 * 3e-6
+    one = far_kink_regions(prev, _ring_readings((44.0, 3e-6, (RIM_RZ[0] + 0.99 * d, RIM_RZ[1]))),
+                           {"ring": np.array([0])}, t=0.1, sizes={}, **kw)
+    k = one["ring_r1_far"]
+    assert k["target"] == 3.09e-6 and k["refined"] and k["r"] == RIM_RZ[0] + 0.99 * d
+    assert k["radius"] == 4.0 * 3e-6 and k["h_before"] == 2.9e-5 and k["t_set"] == 0.1
+    assert one["ring_far"] == ordinary and set(one) == {"ring_far", "ring_r1_far"}
+    # just beyond every reach: a region of its own, at the floor, the others as they were
+    x = (RIM_RZ[0] + 1.01 * d, RIM_RZ[1])
+    out = far_kink_regions(prev, _ring_readings((44.0, 3e-6, x)), {"ring": np.array([0])},
+                           t=0.1, sizes={}, **kw)
+    assert out["ring_r1_far"] == rim and out["ring_far"] == ordinary
+    m1 = out["ring_m1_far"]
+    assert (m1["name"], m1["r"], m1["target"], m1["multi"]) == ("kink_ring_m1_far", x[0], H_COL,
+                                                                 True)
+    assert "refined" not in m1 and m1["yields"] == 0
+    # the rim and the column's root both ask: each followed by its own region
+    both = far_kink_regions(prev, _ring_readings((44.0, 3e-6, RIM_RZ), (35.0, 3e-5, ROOT_RZ)),
+                            {"ring": np.array([0, 1])}, t=0.2, sizes={}, **kw)
+    assert both["ring_r1_far"]["r"] == RIM_RZ[0] and both["ring_r1_far"]["target"] == 3.09e-6
+    assert both["ring_far"]["r"] == ROOT_RZ[0] and both["ring_far"]["target"] == H_COL
+    assert set(both) == {"ring_far", "ring_r1_far"}
+    # past the yield turn, met by the mesh: halved from the finer of its target and its size
+    y = far_kink_regions(prev, _ring_readings((80.0, 3e-6, RIM_RZ)), {"ring": np.array([0])},
+                         t=0.2, sizes={"kink_ring_r1_far": 3.0e-6}, **kw)["ring_r1_far"]
+    assert y["target"] == pytest.approx(1.5e-6) and y["yields"] == 2 and y["refined"]
+    # an ordinary region finer in the mesh than its target (once refined, its target back at the
+    # floor): a yield halves its size, where without a refined region (e923ead's rule) it halves
+    # its target, coarser than the mesh is there
+    sharp = _ring_readings((84.0, 9e-6, ROOT_RZ))
+    after = far_kink_regions(prev, sharp, {"ring": np.array([0])}, t=0.2,
+                             sizes={"kink_ring_far": 4.8e-6}, **kw)["ring_far"]
+    assert after["target"] == pytest.approx(2.4e-6) and after["yields"] == 1
+    single = far_kink_regions({"ring_far": ordinary}, sharp, {"ring": np.array([0])}, t=0.2,
+                              sizes={"kink_ring_far": 4.8e-6}, **kw)["ring_far"]
+    assert single["target"] == pytest.approx(0.5 * H_COL)
+    # only the root asks: the rim's region kept within its hold, released after it (its target the
+    # chord it met), while the ring's far kink follows the root
+    kept = far_kink_regions(prev, _ring_readings((35.0, 3e-5, ROOT_RZ)), {"ring": np.array([0])},
+                            t=0.5, sizes={}, **kw)
+    assert not kept["ring_r1_far"]["released"] and kept["ring_r1_far"]["target"] == 3.09e-6
+    gone = far_kink_regions(prev, _ring_readings((35.0, 3e-5, ROOT_RZ)), {"ring": np.array([0])},
+                            t=5.0, sizes={}, **kw)
+    assert gone["ring_r1_far"]["released"] and gone["ring_r1_far"]["target"] == 2.9e-5
+    assert gone["ring_far"]["r"] == ROOT_RZ[0] and not gone["ring_far"]["released"]
+    # nothing asks: each region released by its own hold
+    quiet = far_kink_regions(prev, {}, {}, t=5.0, sizes={}, **kw)
+    assert quiet["ring_r1_far"]["released"] and quiet["ring_far"]["released"]
+    # at most MULTI_FAR_KINKS regions on the chain: features far apart, the worst first
+    spots = [(30.5 + j, 3e-5, (1e-3 * (j + 1), 4.62)) for j in range(MULTI_FAR_KINKS + 2)]
+    many = far_kink_regions({"ring_r1_far": rim}, _ring_readings(*spots),
+                            {"ring": np.arange(len(spots))}, t=0.1, sizes={}, **kw)
+    assert len(many) == MULTI_FAR_KINKS and many["ring_r1_far"] == rim
+    assert sorted(g["r"] for k_, g in many.items() if g.get("multi")) == pytest.approx(
+        [1e-3 * (j + 1) for j in range(3, MULTI_FAR_KINKS + 2)])
+    # without a refined region every region is e923ead's: the worst element, at the floor
+    plain = far_kink_regions({"ring_far": ordinary},
+                             _ring_readings((44.0, 3e-6, RIM_RZ), (35.0, 3e-5, ROOT_RZ)),
+                             {"ring": np.array([0, 1])}, t=0.2, sizes={}, **kw)
+    assert set(plain) == {"ring_far"} and plain["ring_far"]["r"] == RIM_RZ[0]
+    assert plain["ring_far"]["target"] == H_COL
 
 
 def test_base_guard_is_the_head_fold_checks_reading_value_for_value():
