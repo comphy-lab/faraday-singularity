@@ -282,6 +282,16 @@ def test_the_finger_is_filled_the_ring_kept_and_its_budgets_close(fingered):
     for x in ("G1", "G2", "G3", "G3_box"):
         assert c[x] <= c["limits"][x], x
     assert c["G3_projected"] and math.isfinite(c["G3_phi"]["phi_relative_error"])
+    # the box's integrals weighted by its cutoff (2026-10-25), the unweighted G2 reported beside
+    # the closures and never among them; the weighted G3_box is the identity's left side
+    assert rec["budgets"]["box"]["weight"] == "cutoff"
+    grid = rec["budgets"]["grid"]
+    assert all(grid[x]["weight"] == "cutoff" and "unweighted" in grid[x] for x in grid)
+    u = c["G2_unweighted"]
+    assert u["limit"] == c["limits"]["G2"] and u["weighted"] == c["G2"] and u["value"] >= 0.0
+    assert "G2_unweighted" not in c["flags"] + c["hard"]
+    assert c["G3_box"] == pytest.approx(abs(c["G3_phi"]["phi_lhs"]), rel=1e-6,
+                                        abs=1e-9 * c["scales"]["P_ref"])
     assert c["scales"]["U"] > 0.0 and c["scales"]["P_ref"] > 0.0
     assert rec["gas_removed"]["V"] == V_fill
     # the fold the fill met is gone

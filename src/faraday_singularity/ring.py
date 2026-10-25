@@ -51,7 +51,10 @@ This module needs no finite-element problem (numpy and shapely only):
   ring's emptying below ``bubble_stop`` of ``V_b`` the request of its removal, class ``W2``, its
   approach to the axis, ``RA``, its folds, ``RF``, and its approach to the open chain, ``X``, each
   without a handler but the removal's and, with ``groove.enabled``, the fill of a groove for
-  ``RF`` (``groovesurgery.groove_fill``), and so a resumable stop).
+  ``RF`` (``groovesurgery.groove_fill``), and so a resumable stop); the chains whose elements the
+  guard carries at the floor (:func:`ring_floored_ok`) and the wedge of gas of the ring at an
+  element the guard reads at the run's floor (:func:`floor_wedge`, the fold test read at the scale
+  of the floor), which the driver fills (``CollapseDriver._floor_fill_request``).
 
 Lengths are in the solver's units (``1/k``).
 """
@@ -311,13 +314,23 @@ def loop_record(L, u=None) -> dict:
     return out
 
 
+def _simple_loop(P) -> bool:
+    """Whether the closed polyline through ``P`` is simple (it crosses itself nowhere)."""
+    from shapely.geometry import LinearRing
+
+    return bool(LinearRing(P).is_simple)
+
+
 def validate_loop_order(L) -> None:
     """Raise ``RuntimeError`` unless the loop is geometrically ordered: no chord, the closing one
     included, longer than ``LOOP_STEP_RATIO`` times the shorter of the two chords beside it (a
     misordered walk jumps across the loop and back, each jump beside a chord of the walk's own
     spacing; a graded mesh changes its spacing by a small factor per node, so that the test, unlike
     pyoomph's against the median chord of its periodic chart, holds on a ring meshed finely near
-    the axis and coarsely far from it), and its start not repeated at its end."""
+    the axis and coarsely far from it) unless the loop is simple (such a jump across the loop and
+    back crosses it; a rebuild's spacing may jump by more than that factor beside a region refined
+    to the floor, as at the corner of r1h's fill at step 7228, 3.6e-6 beside 6.2e-7, a loop in
+    order), and its start not repeated at its end."""
     P = np.asarray(L, dtype=float).reshape(-1, 2)
     if len(P) < 3:
         raise RuntimeError(f"a loop needs at least three nodes, not {len(P)}")
@@ -327,7 +340,7 @@ def validate_loop_order(L) -> None:
     beside = np.minimum(np.roll(d, 1), np.roll(d, -1))
     ratio = np.where(beside > 0.0, d / np.maximum(beside, 1e-300), np.inf)
     worst = int(np.argmax(ratio))
-    if ratio[worst] > LOOP_STEP_RATIO:
+    if ratio[worst] > LOOP_STEP_RATIO and not _simple_loop(P):
         a, b = P[worst], P[(worst + 1) % len(P)]
         raise RuntimeError(f"the loop is not geometrically ordered: the chord from ({a[0]:.9g}, "
                            f"{a[1]:.9g}) to ({b[0]:.9g}, {b[1]:.9g}) is {d[worst]:.6g}, more "
@@ -864,6 +877,7 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
         if L is not None:
             readings["ring"] = loop_edges(L)
         return interface_guard(readings, settings, fresh=fresh, h_floor=float(guard["h_floor"]),
+                               floored_ok=ring_floored_ok(events),
                                refine_ratio=float(guard["refine_ratio"]))["stop"]
 
     if guard is not None and fresh:
@@ -1020,6 +1034,70 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
     if guard is not None and not fresh:
         return guarded()
     return None
+
+
+# the fold test of a wedge of gas of the ring at the run's floor (floor_wedge): a pair across the
+# wedge is a fold at the scale of the floor where FLOOR_FOLD_RATIO times its gap lies below the arc
+# between the two nodes (a wedge narrower than about 84 degrees) and its gap below
+# fold_stop_elements element lengths there
+FLOOR_FOLD_RATIO = 1.5
+
+
+def floor_wedge(L, index: int, *, stop_elements: float, ratio: float = FLOOR_FOLD_RATIO,
+                chords: int = 2) -> dict | None:
+    """The wedge of gas of the ring at an element the guard reads at the run's floor, the fold test
+    read at the scale of the floor (the driver's floor fill, ``CollapseDriver.
+    _floor_fill_request``): ``L`` the loop (counter-clockwise, its gas inside), ``index`` the
+    guard's element (its midside node, an index of :func:`loop_edges`' closed polyline). The apex
+    is a vertex of the gas where the loop turns left across it (over ``chords`` chords on either
+    side; a right turn is the tip of a liquid finger, and None); the pair a fill would close is the
+    widest symmetric one about it, ``(index - m, index + m)``, that is still a fold at the scale of
+    the floor: its gap below ``stop_elements`` times the element length at the pair (``h_elem``,
+    the sum of the two nodes' spacings, :func:`loop_spacing`) and ``ratio`` times its gap below the
+    arc between them (the shorter way round). None where the apex turns right or no pair is such a
+    fold. Returns ``pair`` (sorted), ``m``, ``gap``, ``h_elem``, ``limit`` (``stop_elements
+    h_elem``), ``arc``, ``ratio``, the apex (``apex``, ``r``, ``z``), its ``turn`` (degrees, left
+    positive) and the gas side's interior ``angle``."""
+    P = np.asarray(L, dtype=float).reshape(-1, 2)
+    n = len(P)
+    if n < 2 * chords + 4:
+        return None
+    i = int(index) % n
+    d1, d2 = P[i] - P[(i - chords) % n], P[(i + chords) % n] - P[i]
+    turn = math.degrees(math.atan2(float(d1[0] * d2[1] - d1[1] * d2[0]), float(d1 @ d2)))
+    if not turn > 0.0:  # a right turn: the tip of a finger of liquid, no wedge of gas
+        return None
+    sp = loop_spacing(P)
+    ds = loop_steps(P)
+    s = np.concatenate([[0.0], np.cumsum(ds)[:-1]])
+    S = float(ds.sum())
+    best = None
+    for m in range(1, n // 4):
+        a, b = (i - m) % n, (i + m) % n
+        gap = float(np.hypot(*(P[a] - P[b])))
+        h_elem = float(sp[a] + sp[b])
+        arc = abs(float(s[b] - s[a]))
+        arc = min(arc, S - arc)
+        if gap < stop_elements * h_elem and ratio * gap < arc:
+            best = {"pair": sorted([int(a), int(b)]), "m": m, "gap": gap, "h_elem": h_elem,
+                    "limit": float(stop_elements) * h_elem, "arc": arc}
+        elif best is not None:
+            break
+    if best is None:
+        return None
+    best.update(ratio=float(ratio), apex=i, r=float(P[i, 0]), z=float(P[i, 1]), turn=turn,
+                angle=180.0 - turn)
+    return best
+
+
+def ring_floored_ok(events) -> tuple:
+    """The chains whose elements the guard carries at the floor in the ring stage
+    (``reconnect.interface_guard``'s ``floored_ok``): the ring, with the block's jetcore and its
+    recentred far kinks (the ring a nuisance, decision 22: a feature thinner than the run's floor,
+    the rim of a thin sheet, is carried at the floor within the limits of the turn and the midside
+    node rather than ending the run); none otherwise."""
+    jet = getattr(events, "jetcore", None)
+    return ("ring",) if jet is not None and jet.enabled and jet.far_kinks == "recentre" else ()
 
 
 def ring_axis_limits(ring: dict, events) -> tuple[float, float]:

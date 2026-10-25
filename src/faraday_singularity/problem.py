@@ -679,6 +679,17 @@ class FaradayProblem(Problem):
         self.release_newton_tolerance()
         super().actions_after_newton_solve()
 
+    def _snapshot_state(self, to_memory: bool = True):
+        """pyoomph's snapshot of the state (the one its net for an inverted element takes before a
+        step), the first of a step also kept while the driver collects it (``_step_snapshots`` a
+        list, ``CollapseDriver._post_cut_solve``): the state the step started from, which a step
+        that fails is rolled back to (``CollapseDriver._failed_step_stop``). Nothing else changes."""
+        snap = super()._snapshot_state(to_memory)
+        kept = getattr(self, "_step_snapshots", None)
+        if kept is not None and not kept and to_memory:
+            kept.append(snap)
+        return snap
+
     def release_newton_tolerance(self):
         """Give back the Newton tolerance that a solve held at zero for its first iterations."""
         if self._held_tolerance is not None:

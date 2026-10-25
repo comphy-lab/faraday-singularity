@@ -180,8 +180,26 @@ add a second top-level `cases/` tree.
   (`reconnect.adjacent_shoulders`), so a stationary pair on a nearly vertical wall is no
   `gas-neck`, while one below `neck_elements h_min` is a `gas-neck` whatever either depth, and the
   request records both depths; no Newton failure ends the run cleanly, and the profiles of the
-  state the failing step started from are written first (`profile_<step>_lastgood{,_bubble}.txt`),
-  as is a profile at every step while an element turns beyond `edge_turn_refine`; rotating dumps
+  state the failing step started from are written first (`profile_<step>_lastgood{,_bubble}.txt`);
+  with pyoomph's net for inverted elements armed, a failed step is rolled back to the state it
+  started from (the net's snapshot before it, kept by `FaradayProblem._snapshot_state` within
+  `CollapseDriver._post_cut_solve`) and ends the run as the resumable stop `step-failed` with that
+  state dumped (`CollapseDriver._failed_step_stop`, event `step-failed`; `test_step_failure.py`,
+  `test_step_failure_fem.py`, `test_step_failure_identity.py`), and a profile is written at every
+  step while an element turns beyond `edge_turn_refine`; a loop of the ring whose spacing jumps
+  beyond `ring.LOOP_STEP_RATIO` is in order when it is simple (`ring.validate_loop_order`); with
+  jetcore's recentred far kinks, a guard stop on the bubble before the piercing at the tail of one
+  of its ends folded along the axis (`axisrepair.axis_fold`: nodes beside the end within
+  `AXIS_FOLD_TOL` of the spacing of the axis or across it) is met by the axis repair
+  (`axisrepair.axis_repair`, `CollapseDriver._axis_repair`; decision 22, the downward jet's tip a
+  nuisance): the folded nodes dropped and the axis node put where the surface meets the axis by a
+  rebuild from the planned chains, the sliver filled, its volume and momentum hard above
+  `AXIS_REPAIR_BOUND delta^3` (`A_V`, `A_P`), the transfer's closures A1-A6 as a fill's, the
+  upward jet's base checked (`A_base`); event `axis-repair`, record `events/axis_repair_<n>.json`,
+  `axis_fold_repairs` in the run's result; a miss or a failed rebuild rolled back to the state
+  before it, the resumable stop `axis-repair-unclosed` or `axis-repair-failed`, and a fold again
+  at the same end within `AXIS_REPAIR_RECUR_STEPS` steps left the stop it is (`axis_fold_recurs`);
+  `test_axis_repair.py`, `test_axis_repair_identity.py`; rotating dumps
   follow at least each time `tau` doubles and the end state is dumped; and every output carries `tau = t - t_cut` and `tau_p = t - t_p` (`collapse.txt`,
   `chains.txt` with `R_apex_<tip>`, `groove_gap_<tip>`, `groove_angle_<tip>`, `edge_turn_<chain>`
   and `edge_midside_<chain>`, profiles of both chains, events, dumps). `rebuild_spline` `vertices`
@@ -442,7 +460,12 @@ add a second top-level `cases/` tree.
   that sets it there) with the projection transfer; the bulk's unlocated nodes those inside the
   filled region within a twentieth of the old surface's shortest chord there; the projection's
   box a disc at the site (`surgery.site_grid`, `box_polyline_budgets(..., r_centre=)`,
-  `project(box=<grid>)`); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
+  `project(box=<grid>)`), its integrals weighted by the cutoff `phi` of the identity G3
+  (`box_integrals(..., cutoff=True)`, `project(..., cutoff=True)`: a cell at the box's edge whose
+  sample a rebuild moves across a fast free surface weighs nothing; the unweighted sums kept as
+  `unweighted`, the unweighted G2 reported as `G2_unweighted`, never a flag,
+  `groovesurgery.unweighted_g2`; `test_fill_cutoff.py`, `test_fill_cutoff_identity.py`, runs
+  without a fill b46713a's); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
   but `G3_box` beyond its limit only a flag where the cutoff identity G3 holds and resolves it (its
   larger side at least `MERGE_RESOLVED` 0.5 of `G3_box` and at the momentum floor or above;
   `groovesurgery.merge_impulse`, `G3_merge` in the closures): the projection of a fill is the
@@ -464,7 +487,17 @@ add a second top-level `cases/` tree.
   open chain filled, the refusals unchanged) and `test_far_head_first_fem.py` (a groove on the
   heads' state's downward head cut with the head, never filled) cover it, and
   `test_far_head_first_identity.py` pins runs that meet no groove or unhandled event on a far head
-  and no curled head to cb12382.
+  and no curled head to cb12382. A wedge of gas of the ring whose apex the guard reads at an
+  element at the run's floor (a stop the ring refine does not meet; `ring.floor_wedge`, the fold
+  test read at the scale of the floor, `ring.FLOOR_FOLD_RATIO`) is met by the same fill
+  (`CollapseDriver._floor_fill_request`: `RF`, `contact` `floor`, the request's `floor` with the
+  guard's reading, the wedge and its fold limits; `groove_fill`'s `base_check`, the hard closure
+  `G_base`; the transfer's former gas beyond `groovesurgery.LOCATOR_BAND` of the old elements'
+  curve, `floor_bulk_inside`), event `floor-fill`, `floor_fills` in the run's events; the tip of
+  a liquid finger stays the stop; a rebuilt mesh's `curved-jacobian` at the ring is read as the
+  ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
+  the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
+  `test_floor_fill_identity.py` (runs never at the floor are 7ba32f9's).
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,
   its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest
@@ -478,12 +511,24 @@ add a second top-level `cases/` tree.
   `CollapseDriver._far_sizing`), the far kinks recentred with `far_kinks` `recentre`
   (`jetcore.far_kink_regions`: at the floor, below it only past `far_yield_turn`, halving per
   rebuild, event `far-yield`), refined at `far_refine_ratio`, the ring's kinks at the column's size
-  with `ring_kink_floor`, the edge-turn profiles from the core with `edge_turn_snapshots` `core`;
-  `prep_gap` refines the bubble's bottom and the downward jet's tip before the piercing
-  (`jetcore.prep_regions`) so that the ring cut admits `prep_rho s_t`; `profile_dt` adds profiles
-  (reason `window`); `box_gate` stops the run (`box-gate`, on `states/gate_<step>.dump`, the state
-  before the rebuild) where an ordinary rebuild changes the liquid volume or axial momentum of the
-  box about the core's base by more than `box_gate_sigmas` times `liquid.sigma_V`, `sigma_Pz`;
+  with `ring_kink_floor` (in the ring stage the guard's stop on the ring, a turn beyond
+  `edge_turn_stop_fresh` on a fresh mesh or `edge_turn_stop` on a stepped one, up to
+  `driver.RING_REFINE_TURN_MAX`, or a midside node beyond `midside_stop`, is met by
+  `CollapseDriver._ring_refine`: up to `driver.RING_REFINE_TRIES` rebuilds with the element in a far
+  kink of its own, `kink_ring_r<n>_far` at `min(1/2, edge_turn_refine/turn)` of its chord, marked
+  `refined` so that `jetcore.far_kink_regions` has it follow its feature at that size until the
+  feature asks no more, every other region as it was, and while it remains every far kink of the
+  ring follows its own feature, a new one `kink_ring_m<n>_far` (`jetcore.MULTI_FAR_KINKS`), event
+  `ring-refine`, the upward jet's base held within `HEAD_FOLD_BASE_TOL` by `driver.base_guard` or
+  the stop `ring-refine-base`; a ring element at the floor that asks is carried there,
+  `ring.ring_floored_ok`, `reconnect.interface_guard`'s `floored_ok`; `test_ring_refine.py`,
+  `test_ring_refine_fem.py`, and `test_ring_refine_identity.py`, runs that never meet it e923ead's),
+  the edge-turn profiles from the core with `edge_turn_snapshots` `core`; `prep_gap` refines the
+  bubble's bottom and the downward jet's tip before the piercing (`jetcore.prep_regions`) so that
+  the ring cut admits `prep_rho s_t`; `profile_dt` adds profiles (reason `window`); `box_gate` stops
+  the run (`box-gate`, on `states/gate_<step>.dump`, the state before the rebuild) where an ordinary
+  rebuild changes the liquid volume or axial momentum of the box about the core's base by more than
+  `box_gate_sigmas` times `liquid.sigma_V`, `sigma_Pz`;
   `core_elements_per_scale` (null: the run's elements per scale after the cut; never below it,
   `jetcore.core_ratio`, refused by the driver and the runner) meshes the core alone finer, every
   rule's size on its nodes `q = eps/core_elements_per_scale` times what it asks for: each region
@@ -506,7 +551,15 @@ add a second top-level `cases/` tree.
   curls back past its neck's height, every node beyond it outside the neck's radius and its
   half-section simple, is a head (`events.head_sides`, `curled` and `curl_depth` in its neck's
   record and request; `testCases/test_curled_head.py`), the head the chain from its tip to that
-  root neck.
+  root neck. A closing groove from the upward jet's head onto the core (one node of the pair on the
+  head from the tip, the other a core node, the wall or the stem beside the base) is the cut of
+  that head at its root neck too (`head_fold` in the request), the head's nodes but its neck off
+  the core, and the cut is checked against the jet's base, read before and after on the fresh mesh
+  (`surgery.liquid_cut`'s `base_check`, `CollapseDriver._head_fold_check`, `base_guard` in the
+  record): `r_j`, `V_j`, `Q_j` within `driver.HEAD_FOLD_BASE_TOL` (1e-3) relative and `z_b` within
+  that times `r_j`, or the hard closure `F_base` (`event-unclosed`); `test_head_fold.py`,
+  `test_head_fold_fem.py`, and `test_head_fold_identity.py` (runs meeting none of it are
+  3e00e92's).
   A key whose behaviour the driver does not make is refused (`events.PENDING_KEYS`).
   `testCases/test_jetcore.py` (stand-ins), `test_jetcore_fem.py` (the far floor and kinks on the
   synthetic headed state, the pre-pierce refinement on the pierced state, the far-head cut) and
