@@ -690,6 +690,40 @@ class FaradayProblem(Problem):
             kept.append(snap)
         return snap
 
+    # the project's attributes of the mesh's template, which pyoomph's reloaded template (a sibling of
+    # the problem's original one, copying that one's) does not carry: kept across an in-memory restore
+    TEMPLATE_KEYS = ("focus", "cut_sizing", "high_order_threshold", "rebuild_spline", "ring_stage",
+                     "ring_sizing")
+
+    def _restore_state(self, snapshot):
+        """pyoomph's restore of a snapshot (``load_state`` of it), the template's project attributes
+        (:data:`TEMPLATE_KEYS`: the driver's focus, the cut's sizing, the ring stage's) put back on
+        the template the restore leaves active, and pyoomph's net for an inverted element re-armed
+        on it (not twice: the old template out of its set).
+
+        A snapshot taken on one mesh and restored after a rebuild (the rollback of a failed step
+        after the net's rebuilds, :meth:`CollapseDriver._failed_step_stop`; that of an axis repair)
+        reloads the stored mesh from a new sibling of the problem's ORIGINAL template
+        (``GmshTemplate._template_for_stored_mesh_file`` copies its ``__dict__``), and in a run
+        restarted from a dump, every leg of a chain, the attributes the driver and the cut set live
+        on the sibling the restart made, not on that original: the restored template had the focus
+        None, no cut sizing and the ring stage off, and every rebuild after the rollback met the mesh
+        without them (r1h at b36c9c1: the end state of its failed step at 7251, dumped after the
+        rollback, held no focus, and the net's rebuilds from it left the open chain 237 nodes
+        against 4873). A restore onto the same mesh makes no sibling and changes nothing."""
+        old = self.active_mesh_template()
+        kept = ({k: getattr(old, k) for k in self.TEMPLATE_KEYS if hasattr(old, k)}
+                if old is not None else {})
+        armed = old is not None and old in getattr(self, "_domains_remesh_on_inversion", set())
+        super()._restore_state(snapshot)
+        new = self.active_mesh_template()
+        if new is not None and new is not old:
+            for k, v in kept.items():
+                setattr(new, k, v)
+            if armed:
+                self._domains_remesh_on_inversion.discard(old)
+                self._domains_remesh_on_inversion.add(new)
+
     def release_newton_tolerance(self):
         """Give back the Newton tolerance that a solve held at zero for its first iterations."""
         if self._held_tolerance is not None:

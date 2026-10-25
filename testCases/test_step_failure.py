@@ -6,6 +6,9 @@
   ``CollapseDriver._post_cut_solve``), and is the resumable stop ``step-failed`` with that state as
   the end state and an event ``step-failed`` (``CollapseDriver._failed_step_stop``); without a
   snapshot (the net not armed, a problem without it) the failure is raised as before;
+* in the ring stage, one retry of a failed step after its ring's sharpest element above the floor
+  is rebuilt as the ring refine rebuilds (r1h at b36c9c1, step 7251: the root of the radial sheet,
+  85.6 degrees in an element of 1.55e-5), ``CollapseDriver._failed_step_retry``;
 * the ring's loop with a jump of its spacing beyond ``LOOP_STEP_RATIO`` beside a region refined to
   the floor is in order when it is simple (r1h at a150b74, step 7228: 3.6e-6 beside 6.2e-7 at the
   corner of a fill, a failed run); a walk that jumps across the loop and back crosses it and is
@@ -122,3 +125,44 @@ def test_a_loop_whose_spacing_jumps_beside_a_refined_region_is_in_order():
     swapped[[5, k]] = swapped[[k, 5]]  # a walk across the loop and back: it crosses itself
     with pytest.raises(RuntimeError, match="not geometrically ordered"):
         ring.validate_loop_order(swapped)
+
+
+def test_a_failed_step_in_the_ring_stage_is_retried_once_after_a_refine_of_the_sharpest_element():
+    """``CollapseDriver._failed_step_retry``: in the ring stage with recentred far kinks, the
+    ring's sharpest element above the floor turning beyond ``edge_turn_refine`` rebuilt at the
+    size its turn asks for (the ring refine's own rebuild, a reading with ``retry``) and the step
+    made again; a second failure of the same step, no ring, or no such element: no retry."""
+    from types import SimpleNamespace
+
+    from faraday_singularity.driver import CollapseDriver
+
+    turn = np.array([10.0, 85.6, 120.0, 40.0])
+    L = np.array([2e-5, 1.55e-5, 1.0e-6, 3e-6])  # the 120 degrees at the floor: not refined
+    mid = np.array([[1e-4, 4.6], [1.6e-4, 4.6116], [3e-4, 4.6115], [4e-4, 4.6114]])
+    calls, logged = [], []
+
+    def fake(chain="ring", turns=turn):
+        f = SimpleNamespace(
+            state=SimpleNamespace(step=7251), reconnect=SimpleNamespace(edge_turn_refine=30.0),
+            s=SimpleNamespace(refine_ratio=1.5), _h_floor=lambda: 7.8125e-7,
+            _refined_chain=lambda: chain,
+            _post_cut_state=lambda: {"edges": {"ring": {"edges": {
+                "turn": turns, "L": L, "mid": mid, "index": np.array([1, 3, 5, 7])}}}},
+            _event=lambda name, m, **kw: logged.append((name, kw)))
+        f._ring_refine_once = lambda m, reading, attempt: (calls.append(reading) or
+                                                         ({"m": "refined"}, None))
+        return f
+
+    f = fake()
+    out = CollapseDriver._failed_step_retry(f, {"m": 0}, {"reason": "step-failed", "error": "x"})
+    assert out == ({"m": "refined"}, None) and len(calls) == 1
+    assert calls[0]["index"] == 3 and calls[0]["turn"] == 85.6 and calls[0]["retry"] is True
+    assert logged[0][0] == "step-retry"
+    # once per step
+    assert CollapseDriver._failed_step_retry(f, {"m": 0}, {"reason": "step-failed"}) is None
+    f.state.step = 7252
+    assert CollapseDriver._failed_step_retry(f, {"m": 0}, {"reason": "step-failed"}) is not None
+    # no ring stage, or nothing above the floor that turns
+    assert CollapseDriver._failed_step_retry(fake(chain=None), {"m": 0}, {}) is None
+    flat = np.array([10.0, 20.0, 120.0, 25.0])
+    assert CollapseDriver._failed_step_retry(fake(turns=flat), {"m": 0}, {}) is None

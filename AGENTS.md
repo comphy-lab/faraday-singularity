@@ -494,7 +494,17 @@ add a second top-level `cases/` tree.
   guard's reading, the wedge and its fold limits; `groove_fill`'s `base_check`, the hard closure
   `G_base`; the transfer's former gas beyond `groovesurgery.LOCATOR_BAND` of the old elements'
   curve, `floor_bulk_inside`), event `floor-fill`, `floor_fills` in the run's events; the tip of
-  a liquid finger stays the stop; a rebuilt mesh's `curved-jacobian` at the ring is read as the
+  a liquid finger stays the stop; where no wedge is, a corner of gas at the floor open up to about a
+  right angle (`ring.FLOOR_CORNER_RATIO`, the root of the radial sheet the downward head drives
+  out along the plug) is filled in the same way (`corner` in its wedge); a failed step in the ring
+  stage is retried once after the ring's sharpest element above the floor is rebuilt as the ring
+  refine rebuilds (`CollapseDriver._failed_step_retry`, event `step-retry`;
+  `test_landing_identity.py` pins runs meeting neither against 6eff16c); an in-memory restore
+  across a rebuild (`FaradayProblem._restore_state`: the rollback of a failed step or of an axis
+  repair) puts the template's project attributes (`TEMPLATE_KEYS`: focus, cut and ring sizing)
+  back on the sibling template pyoomph reloads the mesh from, which in a restarted run otherwise
+  copies the original template's (`test_restore_template_identity.py`); a rebuilt mesh's
+  `curved-jacobian` at the ring is read as the
   ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
   the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
   `test_floor_fill_identity.py` (runs never at the floor are 7ba32f9's).
@@ -559,7 +569,15 @@ add a second top-level `cases/` tree.
   record): `r_j`, `V_j`, `Q_j` within `driver.HEAD_FOLD_BASE_TOL` (1e-3) relative and `z_b` within
   that times `r_j`, or the hard closure `F_base` (`event-unclosed`); `test_head_fold.py`,
   `test_head_fold_fem.py`, and `test_head_fold_identity.py` (runs meeting none of it are
-  3e00e92's).
+  3e00e92's). A tracked neck that a freshly built mesh does not resolve
+  (`liquid-neck-unresolved`) whose head is a far head (no node of it but the neck a core node; on
+  the bubble every node) is the same cut of that head at that neck, closing or not
+  (`events.unresolved_neck_request`, `CollapseDriver._unresolved_neck_request` in the loop's
+  dispatch beside the fill at the floor; `unresolved` and `far_event` in the request, an event
+  `far-head` with `far_kind` `liquid-neck-unresolved`), with the same check of the base; a head of
+  the core, or a neck without a single head, stays the stop; `test_unresolved_neck.py`,
+  `test_unresolved_neck_fem.py`, and `test_unresolved_neck_identity.py` (runs meeting none of it
+  are 7efe4df's).
   A key whose behaviour the driver does not make is refused (`events.PENDING_KEYS`).
   `testCases/test_jetcore.py` (stand-ins), `test_jetcore_fem.py` (the far floor and kinks on the
   synthetic headed state, the pre-pierce refinement on the pierced state, the far-head cut) and

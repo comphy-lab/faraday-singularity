@@ -373,7 +373,12 @@ cavity's wall or the stem beside the base; ``head_fold`` in the request) is the 
 too, its nodes but the neck off the core, and the cut is checked against the jet's base: read
 before and after it (:meth:`CollapseDriver._head_fold_check`, ``base_guard`` in the record), a base
 whose ``r_j``, ``V_j`` or ``Q_j`` moves by more than ``HEAD_FOLD_BASE_TOL`` relative, or ``z_b`` by
-more than that times ``r_j``, is the hard closure ``F_base`` (``event-unclosed``). With
+more than that times ``r_j``, is the hard closure ``F_base`` (``event-unclosed``). A tracked
+liquid neck that a freshly built mesh does not resolve (the stop ``liquid-neck-unresolved``) whose
+head is a far head (the downward jet's, any head off the upward jet's core) is met by the same cut
+of that head at this neck, closing or not, and checked against the jet's base in the same way
+(``events.unresolved_neck_request``, :meth:`CollapseDriver._unresolved_neck_request`,
+``unresolved`` in the request); on a head of the core, or one not single, the stop stays. With
 ``jetcore.box_gate`` every ordinary rebuild may change
 the liquid volume and axial momentum in the box of radius ``liquid.box_radius delta`` about the
 core's base by at most ``box_gate_sigmas`` times ``liquid.sigma_V`` and ``liquid.sigma_Pz``
@@ -3244,6 +3249,11 @@ class CollapseDriver:
                         far_class=request.get("class"), chain=far.get("chain"),
                         r_n=far.get("r_n"), s=far.get("s"), z_n=far.get("z_n"))
             request = far
+        elif request.get("unresolved") is not None:  # an unresolved neck on a far head
+            far_event = request.get("far_event") or {}
+            self._event("far-head", m, far_kind=far_event.get("kind"), far_class=None,
+                        chain=request.get("chain"), r_n=request.get("r_n"), s=request.get("s"),
+                        z_n=request.get("z_n"))
         return self._liquid_cut_event(m, request)
 
     def _liquid_cut_event(self, m: dict, request: dict) -> tuple[dict, dict | None]:
@@ -3265,8 +3275,8 @@ class CollapseDriver:
         dt_prev = st.dt_prev if st.dt_prev else float(self._cut_record()["settings"]["dt0"])
         self._event_before, self._event_after = (m, tip, verdict), None
         try:
-            check = {"base_check": self._head_fold_check(m)} if request.get("head_fold") \
-                else {}
+            check = {"base_check": self._head_fold_check(m)} \
+                if request.get("head_fold") or request.get("unresolved") is not None else {}
             made = liquid_cut(self.pb, self.events, r, self.outdir, request, k=k,
                               dt_prev=dt_prev, elements_per_scale=eps, h_floor=self._h_floor(),
                               driver=self, on_made=self._on_event_made, **check)
@@ -3316,6 +3326,28 @@ class CollapseDriver:
         core = self._post_cut_state().get("core")
         mask = None if core is None or core["whole"] else core["mask"]
         return far_head_request(request, liquid_necks(named, self.events.liquid), mask)
+
+    def _unresolved_neck_request(self, stop: dict | None) -> dict | None:
+        """With ``pinch.far_head`` (and ``jetcore``): for the stop ``liquid-neck-unresolved`` of a
+        freshly built mesh whose neck has a far head, the request of the cut of that head at this
+        neck (``events.unresolved_neck_request``, from the tracked necks of the state with their
+        pinch readings and the core of its open chain), which :meth:`_meet_event` makes with the
+        check of the upward jet's base; None otherwise, the stop staying (decision 22: the far
+        heads are nuisances, the cut's volume and momentum hard checks)."""
+        from .events import LIQUID_NECK_UNRESOLVED, closing_readings, unresolved_neck_request
+
+        if stop is None or stop.get("reason") != LIQUID_NECK_UNRESOLVED:
+            return None
+        if self.events is None or not self.events.pinch.far_head or self._jetcore() is None:
+            return None
+        named = self._named_post_cut_chains()
+        if not named:
+            return None
+        necks = liquid_necks(named, self.events.liquid)
+        closing_readings(necks, self.events, self.reconnect.delta, self._pinch_context())
+        core = self._post_cut_state().get("core")
+        mask = None if core is None or core["whole"] else core["mask"]
+        return unresolved_neck_request(stop, necks, mask)
 
     def _meet_ring(self, m: dict, request: dict) -> tuple[dict, dict | None]:
         """Meet a request of the ring's handlers (``ring``: the piercing, class ``W1``;
@@ -4137,13 +4169,16 @@ class CollapseDriver:
         the ring's removal, with jetcore's recentred far kinks and ``groove.enabled``, where the
         element's apex is a wedge of gas read at the scale of the floor (``ring.floor_wedge``: the
         loop turning left across it, a pair across the wedge closer than ``fold_stop_elements``
-        element lengths and ``ring.FLOOR_FOLD_RATIO`` times its gap below the arc between them).
+        element lengths and ``ring.FLOOR_FOLD_RATIO`` times its gap below the arc between them), or,
+        where no wedge is, a corner of gas open up to about a right angle (the same reading with
+        ``ring.FLOOR_CORNER_RATIO``; ``corner`` in the wedge's record), as at the root of the radial
+        sheet the downward jet's head drives out along the plug.
         Returns the request (``ring-fold``, ``RF``, the fill as its handler, the pair, its gap and
         limit, ``contact`` ``floor``, and ``floor``: the guard's reading, the wedge and the fold
         limits the fill reads its trigger again with) for :meth:`_meet_event`; None otherwise (a
         right turn, the tip of a finger of liquid, stays the stop)."""
         from .events import GROOVE_HANDLER, _request
-        from .ring import FLOOR_FOLD_RATIO, floor_wedge
+        from .ring import FLOOR_CORNER_RATIO, FLOOR_FOLD_RATIO, floor_wedge
 
         stop = self._ring_jacobian_reading(stop)
         if stop is None or stop.get("reason") != "interface-unresolved":
@@ -4162,12 +4197,19 @@ class CollapseDriver:
         if len(loops) != 1 or stop.get("index") is None:
             return None
         P = np.column_stack([loops[0]["r"], loops[0]["z"]])
+        ratio = FLOOR_FOLD_RATIO
         wedge = floor_wedge(P, int(stop["index"]), stop_elements=self.s.fold_stop_elements)
+        if wedge is None:  # a corner of gas at the floor, open up to about a right angle
+            ratio = FLOOR_CORNER_RATIO
+            wedge = floor_wedge(P, int(stop["index"]), stop_elements=self.s.fold_stop_elements,
+                                ratio=ratio)
+            if wedge is not None:
+                wedge["corner"] = True
         if wedge is None:
             return None
         a, b = wedge["pair"]
         mid = 0.5 * (P[a] + P[b])
-        fold = {"ratio": FLOOR_FOLD_RATIO, "stop": 0.0, "stop_elements": self.s.fold_stop_elements}
+        fold = {"ratio": ratio, "stop": 0.0, "stop_elements": self.s.fold_stop_elements}
         guard = {k: v for k, v in stop.items() if k != "reason"}
         req = _request("ring-fold", "RF", chain="ring", contact="floor", fold_gap=wedge["gap"],
                        fold_r=float(mid[0]), fold_z=float(mid[1]), fold_arc=wedge["arc"],
@@ -4309,6 +4351,7 @@ class CollapseDriver:
             if self._ring_refine_due(found):  # a fresh mesh of the ring short of its feature
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found  # a wedge of gas at the floor
+            found = self._unresolved_neck_request(found) or found  # on a far head
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
                 m, found = self._meet_event(m, found)
                 if found is None:  # made: every stop again on the fresh mesh
@@ -4375,6 +4418,10 @@ class CollapseDriver:
                         failed = self._failed_step_stop(exc, dt, rebuilds)
                         if failed is not None:  # rolled back: a resumable stop on that state
                             m, stop = failed
+                            retried = self._failed_step_retry(m, stop)
+                            if retried is not None:  # the ring's sharpest element refined: the
+                                m, stop = retried[0], None  # loop's top reads the new mesh again
+                                continue
                             break
                     raise
                 stop["dt_attempted"] = dt
@@ -4448,6 +4495,7 @@ class CollapseDriver:
             if self._ring_refine_due(found):  # after a rebuild for distortion
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found
+            found = self._unresolved_neck_request(found) or found
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
                 m, found = self._meet_event(m, found)
                 if found is None:  # made: its rebuild stands for the one a stop cancelled
@@ -4471,6 +4519,7 @@ class CollapseDriver:
             if self._ring_refine_due(found):  # after the rule's rebuild
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found
+            found = self._unresolved_neck_request(found) or found
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
                 m, found = self._meet_event(m, found)
                 if found is None:
@@ -4625,6 +4674,39 @@ class CollapseDriver:
         self._event("step-failed", m, error=stop["error"], dt_attempted=dt,
                     net_rebuilds=int(inside))
         return m, stop
+
+    def _failed_step_retry(self, m: dict, stop: dict) -> tuple[dict, dict | None] | None:
+        """After a failed step rolled back (:meth:`_failed_step_stop`), in the ring stage with
+        jetcore's recentred far kinks: one retry per step, the ring's sharpest element (turning by
+        more than ``edge_turn_refine`` and above the guard's floor) rebuilt in a far kink of its own
+        at the size its turn asks for, as the ring refine does (:meth:`_ring_refine_once`, event
+        ``ring-refine`` with ``retry`` in its reading), and the step made again from the rebuilt
+        mesh (r1h at b36c9c1, step 7251: the root of the radial sheet the downward head drives out
+        along the plug, an element of 1.55e-5 turning by 85.6 degrees, below the guard's stop, and
+        the step from it failed at every size). Returns the state and the stop of the rebuilt mesh,
+        from which the loop's top goes on (its stops read again), or None where no retry is made (a
+        second failure of the same step, no ring, no element to refine), the stop ``step-failed``
+        then standing."""
+        st, r = self.state, self.reconnect
+        if getattr(self, "_retried_step", None) == st.step or self._refined_chain() != "ring":
+            return None
+        edges = (self._post_cut_state().get("edges") or {}).get("ring") or {}
+        e = edges.get("edges")
+        if e is None or not len(e["L"]):
+            return None
+        floor = self.s.refine_ratio * self._h_floor()
+        ok = (e["turn"] > r.edge_turn_refine) & (e["L"] > floor)
+        if not ok.any():
+            return None
+        k = int(np.argmax(np.where(ok, e["turn"], -1.0)))
+        reading = {"reason": "interface-unresolved", "trigger": "edge-turn", "chain": "ring",
+                   "turn": float(e["turn"][k]), "limit": float(r.edge_turn_refine),
+                   "L": float(e["L"][k]), "r": float(e["mid"][k, 0]), "z": float(e["mid"][k, 1]),
+                   "index": int(e["index"][k]), "retry": True}
+        self._retried_step = st.step
+        self._event("step-retry", m, reading=reading, error=stop.get("error"))
+        m, new_stop = self._ring_refine_once(m, reading, 1)
+        return m, new_stop
 
     def _write_lastgood(self, m: dict, exc: BaseException):
         """After a failed step after a cut: the profiles of the last state the driver measured (the
