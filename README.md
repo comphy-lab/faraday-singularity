@@ -750,11 +750,11 @@ a handler (a resumable stop).
 
 The block's `jetcore` part (off by default, and written into the block and its hash only where it
 differs from its defaults; every key a key of the leg, its sizing keys among `events.SIZING_KEYS`)
-sets a resolution policy for the run after the cut that resolves the upward jet as before and
-meshes and steps the rest of the free surface under simplifying assumptions, every feature kept in
-the domain (`jetcore.py`). The core is the part of the open chain about the base of the upward jet,
-the apex of the groove around it: its nodes within `max(core_radius L, apex_extent R_apex)` of the
-base (`L = max(r_j, delta)`; `core_radius`, 2), but not above the jet's tracked liquid neck, and the
+sets a resolution policy for the run after the cut that resolves the upward jet as before and meshes
+and steps the rest of the free surface under simplifying assumptions, every feature kept in the
+domain (`jetcore.py`). The core is the part of the open chain about the base of the upward jet, the
+apex of the groove around it: its nodes within `max(core_radius L, apex_extent R_apex)` of the base
+(`L = max(r_j, delta)`; `core_radius`, 2), but not above the jet's tracked liquid neck, and the
 walls beyond the base within `wall_radius L` (10); without a base of a jet the whole open chain.
 Every other node of the free surface is far. The step's Courant limit is split, `reconnect.courant`
 on the core and `far_courant` on the far nodes (by default the same number, which leaves the step
@@ -765,7 +765,35 @@ worst element at each request (four chords wide, no growth), at the floor, and b
 the element turns by more than `far_yield_turn` degrees (75), halving at each rebuild down to the
 run's `h_floor` (event `far-yield`); the far regions are refined beyond `far_refine_ratio` times
 their targets (null for the collapse's `refine_ratio`); with `ring_kink_floor` the ring's kinks are
-no finer than its column; with `edge_turn_snapshots` `core` only an element of the core that bends
+no finer than its column. In the ring stage a mesh of whose ring an element turns by more than the
+guard allows (`reconnect.edge_turn_stop_fresh` on a fresh mesh, `edge_turn_stop` on one a step has
+run on; up to 150 degrees), or whose midside node lies beyond `midside_stop`, is not a stop at
+once: the mesh is rebuilt with that element in a far
+kink of its own (`kink_ring_r<n>_far`) at the size its turn asks for (`min(1/2,
+edge_turn_refine/turn)` of its chord, never below `h_floor`), every other region as the mesh has
+it, at most three times per state (event `ring-refine`, a yield); that kink follows its feature
+(the elements that ask within its reach), keeping its size, until the feature asks no more, and
+while it remains every far kink of the ring follows its own feature, a new feature a region of its
+own (`kink_ring_m<n>_far`, at most eight), so that several sharp features (a sheet's rim, the
+corners of a fill) are all kept refined; the base of
+the upward jet must stay within `driver.HEAD_FOLD_BASE_TOL` across each such rebuild, or the run
+stops (`interface-unresolved`, trigger `ring-refine-base`). A thin sheet's rim, which a rebuild at
+the yielded size cannot represent, is so followed instead of ending the run, and one thinner than
+the run's `h_floor` is carried at the floor (no `feature-below-floor` stop on the ring) as long as
+its elements keep within the guard's limits of the turn and the midside node. A stop of the guard
+on the ring at an element at the floor that the refine does not meet, where the element's apex is
+a wedge of gas read at the scale of the floor (the loop turning left across it, a pair across the
+wedge closer than `fold_stop_elements` element lengths, with 1.5 times its gap below the arc
+between them), is met by the fill of the wedge: the groove fill of the ring under the fold limits
+of the floor, its hard closures, and the base of the upward jet besides (`G_base`); an event
+`floor-fill` and `floor_fills` in the run's events count them. Its check of the transfer predicts
+the former gas, a few elements wide, on the old elements' quadratic curve and beyond the band of
+them that pyoomph's locator still takes (`groovesurgery.LOCATOR_BAND`, 0.07 of the element's
+length; the transfer's `bulk_band`). The tip of a finger of liquid at the floor stays a stop. A
+rebuilt mesh whose curved element at the ring falls below the Jacobian bound (`curved-jacobian`)
+is read as the guard's reading of the ring's element there and met in the same way: by the ring
+refine above the floor, by the fill of a wedge of gas at it. With
+`edge_turn_snapshots` `core` only an element of the core that bends
 beyond `reconnect.edge_turn_refine` writes a profile at every step. With `prep_gap` (null for none),
 once the bubble is shorter than `prep_gap delta`, its bottom and the downward jet's tip are refined
 (`pierce_bottom`, `pierce_tip`, of radius `s_t`, the jet's shoulder) at `prep_rho s_t / 2.25`, so
@@ -776,8 +804,8 @@ for distortion) may change the liquid volume and axial momentum of the box of ra
 `liquid.box_radius delta` about the core's base by at most `box_gate_sigmas` (5) times the
 calibrated floors `liquid.sigma_V` and `liquid.sigma_Pz`; beyond either the run stops (`box-gate`)
 on the state before the rebuild, dumped as `states/gate_<step>.dump`, from which a continuation
-resumes. `jetcore.txt` records per step what set the step, the split Courant limit (with the node
-of each class that sets its part) and the core, and each leg the resolved keys. The block's `pinch`
+resumes. `jetcore.txt` records per step what set the step, the split Courant limit (with the node of
+each class that sets its part) and the core, and each leg the resolved keys. The block's `pinch`
 part (off by default, written only where it differs from its defaults; its keys are keys of the
 class `liquid`) decides when a tracked neck with a head is cut: with `enabled` only once it closes,
 `r_n <= r_c delta` (`r_c`, 0.2) with a quadratic fit of `r_n(t)` over the trailing `window
@@ -792,9 +820,13 @@ any node of the head but its neck may lie in the upward jet's core. A head whose
 the height of its neck (the root neck, the narrowest point of the stem below it), every node beyond
 that height outside the neck's radius and its half-section a simple polygon, is a head too
 (`curled`, with `curl_depth` in neck radii, in its neck's record): the head is the chain from its
-tip to the root neck, the curled rim included. At their defaults neither part changes a value;
-whether a given set of keys leaves the upward jet unchanged is a question for replays against runs
-without the parts.
+tip to the root neck, the curled rim included. A closing groove from the upward jet's head onto its
+core (the cavity's wall or the stem beside the base) is the cut of that head at its root neck too,
+the head's nodes but its neck off the core, and the cut must leave the jet's base as it was: its
+radius, speed and flux read before and after on the fresh mesh within a relative 1e-3 (its height
+within that times its radius), or the cut is the hard closure `F_base` and the run stops resumably.
+At their defaults neither part changes a value; whether a given set of keys leaves the upward jet
+unchanged is a question for replays against runs without the parts.
 
 `postProcess/event_table.py` tabulates the events of such runs, one row per event and one per run
 and tip (`<run-directory> [...] --out <events>.csv --runs <runs>.csv`): each event, made or the one

@@ -927,7 +927,15 @@ def far_head_request(request: dict, necks: list[dict], open_core=None) -> dict |
     status ``head``, a curled head among them), beside the neck itself, and in the far region: no
     node of the site, nor of the head but its neck, a core node of the open chain (``open_core``,
     ``jetcore.core_mask``'s mask; every node of another chain is far), so that the cut never takes
-    a node of the upward jet's core. Of several heads, that of the narrowest ``r_n/s``."""
+    a node of the upward jet's core. Of several heads, that of the narrowest ``r_n/s``.
+
+    One exception, the head folding onto the core: a closing fold (``A-groove``) of the open chain
+    whose one node lies on the upward jet's head (the head from the tip on the axis, node 0, to its
+    root neck) and whose other lies in the core (the cavity's wall or the stem beside the base,
+    beyond that neck) is the cut of that head too, the head's nodes but its neck off the core as
+    always, so that the cut leaves every node of the core in place; its request carries
+    ``head_fold`` (the head's node and the core's node of the pair), on which the driver checks the
+    jet's base after the cut (``driver.CollapseDriver._head_fold_check``)."""
     if request.get("class") not in FAR_EVENT_CLASSES:
         return None
     chain = request.get("chain")
@@ -937,15 +945,23 @@ def far_head_request(request: dict, necks: list[dict], open_core=None) -> dict |
         site = [int(k) for k in request.get("fold_pair") or ()]
     if chain is None or not site:
         return None
+    fold = None  # the head folding onto the core: (its node on the head, its node in the core)
     if chain == "open":
         if open_core is None:
             return None
         mask = np.asarray(open_core, dtype=bool)
-        if any(mask[k] for k in site if 0 <= k < len(mask)):
-            return None
+        in_core = [k for k in site if 0 <= k < len(mask) and mask[k]]
+        if in_core:
+            if request.get("class") != "A-groove" or len(set(site)) != 2 or len(in_core) != 1:
+                return None
+            fold = (next(k for k in site if k != in_core[0]), in_core[0])
     hits = [x for x in necks if x["chain"] == chain and x.get("status") == "head"
             and x.get("head") is not None
             and any(x["head"][0] <= k <= x["head"][1] and k != x["index"] for k in site)]
+    if fold is not None:  # the upward jet's head holds the one node, the core the other
+        hits = [x for x in hits if int(x["head"][0]) == 0
+                and x["head"][0] <= fold[0] <= x["head"][1] and fold[0] != x["index"]
+                and not x["head"][0] <= fold[1] <= x["head"][1]]
     if chain == "open":  # the head itself off the core, its neck at the core's edge at most
         def clear(x):
             lo, hi = (int(k) for k in x["head"])
@@ -958,8 +974,10 @@ def far_head_request(request: dict, necks: list[dict], open_core=None) -> dict |
     if not hits:
         return None
     x = min(hits, key=lambda x: x["r_n"] / x["s"])
+    extra = {"head_fold": {"head_node": int(fold[0]), "core_node": int(fold[1])}} \
+        if fold is not None else {}
     return _request("far-head", "F-head", **_neck_fields(x), **_pinch_field(x),
-                    far_event={k: v for k, v in request.items() if k != "reason"})
+                    far_event={k: v for k, v in request.items() if k != "reason"}, **extra)
 
 
 # --- the events after the cut, as the stops find them ---------------------------------------------

@@ -24,7 +24,14 @@ region of their own per chain, recentred on the worst element at each request in
 at the floor, below it only while the turn exceeds ``far_yield_turn`` (a yield, halving per
 rebuild); the far regions refined beyond ``far_refine_ratio`` of their targets; the ring's kinks no
 finer than the column. The tracked necks' regions are exempt, so that a neck is followed to its
-landing.
+landing. Where the mesh of the ring cannot represent a feature (an element of the ring turning
+beyond the guard's limit, on a fresh or a stepped mesh), the driver rebuilds at once with that
+element refined to the size its turn asks for, in a far kink of its own
+(``CollapseDriver._ring_refine``, ``refined``, ``kink_ring_r<n>_far``) that follows its feature
+keeping its size until the feature asks no more; every other region as it was; while such a region
+remains, every far kink of the ring follows its own feature and a new feature has a region of its
+own (``kink_ring_m<n>_far``), so that a feature never loses its refinement at once because another
+one asks.
 
 Before the piercing (:func:`prep_regions`), once the bubble is shorter than ``prep_gap delta``, its
 bottom and the downward jet's tip are refined so that the ring cut (``ring.ring_cut_geometry``,
@@ -37,6 +44,7 @@ core's Courant number (:func:`prep_mask`).
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 
@@ -210,6 +218,11 @@ def split_refine(refine: dict, readings: dict, core: dict) -> tuple[dict, dict]:
     return near, far
 
 
+# with a region the driver refined on a chain (CollapseDriver._ring_refine), at most this many far
+# kinks on that chain, each following its own feature (far_kink_regions)
+MULTI_FAR_KINKS = 8
+
+
 def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, hold,
                      h_far: float, h_floor: float, yield_turn: float, sizes: dict,
                      floors: dict | None = None) -> dict:
@@ -222,37 +235,101 @@ def far_kink_regions(previous: dict, readings: dict, refine: dict, *, t: float, 
     last target down to ``h_floor`` each time the current mesh has met it (``sizes``: the size of
     each region in the current mesh), each halving a yield (``yields``, ``yield_t``). A region whose
     chain asks for none for ``hold(h_before)`` of time is released, its target back to the chord it
-    met, as a core kink is (``reconnect.kink_regions``)."""
+    met, as a core kink is (``reconnect.kink_regions``).
+
+    On a chain with a region the driver refined itself on a freshly built mesh (``refined``, the
+    ring's ``CollapseDriver._ring_refine``, keyed ``<chain>_r<n>_far``: the rim of a thin sheet
+    that a rebuild at the yielded size could not represent), while one such region remains, every
+    far kink of the chain follows its own feature: the elements that ask within the reach of a
+    live region (its radius and four of their chords) are its own, and it is recentred on the
+    worst of them,
+    four of its chords wide, at the rule's target (a refined one keeping its own, never coarser),
+    yielding past ``yield_turn`` by halving the finer of its target and its size in the mesh; an
+    element beyond every reach gives a region of its own (``<chain>_m<n>_far``, ``multi``; at most
+    ``MULTI_FAR_KINKS`` regions on the chain), and each region none of whose elements asks for
+    ``hold(h_before)`` is released, coarsening by the rule's bounded factor. A feature so never
+    loses its refinement at once because another one asks. Without a refined region every region
+    is as the rule makes it above."""
     out = {name: dict(v) for name, v in previous.items()}
     floors = floors or {}
+    touched = set()
+    multi_chains = {g.get("chain") for g in out.values() if g.get("refined") or g.get("multi")}
     for chain, idx in refine.items():
         idx = np.asarray(idx, dtype=int)
         if not len(idx):
             continue
         e = readings[chain]["edges"]
-        k = int(idx[np.argmax(e["turn"][idx])])
-        L, turn = float(e["L"][k]), float(e["turn"][k])
-        r, z = float(e["mid"][k, 0]), float(e["mid"][k, 1])
-        key, name = f"{chain}_far", f"kink_{chain}_far"
         floor = max(h_far if h_far is not None else 0.0, floors.get(chain, 0.0), h_floor)
-        target = max(0.25 * L, floor)
-        g = out.get(key)
-        yields, yield_t = (g.get("yields", 0), g.get("yield_t")) if g is not None else (0, None)
-        if g is not None and not g["released"] and turn > yield_turn:
-            last = float(g["target"])
-            size = sizes.get(name)
-            if size is not None and size <= last * (1.0 + 1e-9) and last > h_floor:
-                target = max(0.5 * last, h_floor)  # the mesh has met the last target: halve it
-                yields, yield_t = yields + 1, t
-            else:
-                target = min(target, last)  # not met yet: kept
-        out[key] = {"name": name, "chain": chain, "r": r, "z": z, "radius": 4.0 * L,
-                    "target": target, "h_before": max(L, g["h_before"]) if g is not None
-                    and not g["released"] else L, "t_set": t, "released": False,
-                    "turn": turn, "yields": yields, "yield_t": yield_t, "far": True}
+        multi = chain in multi_chains
+
+        def renewed(g, name, k, *, kept):
+            """The region ``name`` (its last entry ``g``, or None) about element ``k``."""
+            L, turn = float(e["L"][k]), float(e["turn"][k])
+            target = max(0.25 * L, floor)
+            yields, yield_t = (g.get("yields", 0), g.get("yield_t")) if g is not None else (0, None)
+            live = g is not None and not g["released"]
+            if live:
+                last = float(g["target"])
+                size = sizes.get(name)
+                if multi and size is not None:
+                    last = min(last, size)  # the finer of its target and its size in the mesh
+                if turn > yield_turn:
+                    if size is not None and size <= last * (1.0 + 1e-9) and last > h_floor:
+                        target = max(0.5 * last, h_floor)  # the mesh has met the last: halve it
+                        yields, yield_t = yields + 1, t
+                    else:
+                        target = min(target, last)  # not met yet: kept
+                elif kept:
+                    target = min(target, last)  # the driver's refinement: kept
+            entry = {"name": name, "chain": chain, "r": float(e["mid"][k, 0]),
+                     "z": float(e["mid"][k, 1]), "radius": 4.0 * L, "target": target,
+                     "h_before": max(L, g["h_before"]) if live else L, "t_set": t,
+                     "released": False, "turn": turn, "yields": yields, "yield_t": yield_t,
+                     "far": True}
+            for mark in ("refined", "multi"):
+                if live and g.get(mark):
+                    entry[mark] = True
+            return entry
+
+        def within(key, pool):
+            g = out[key]
+            reach = float(g["radius"]) + 4.0 * e["L"][pool]
+            return pool[np.hypot(e["mid"][pool, 0] - float(g["r"]),
+                                 e["mid"][pool, 1] - float(g["z"])) <= reach]
+
+        pool = idx
+        for key in sorted(k for k, g in out.items() if g.get("chain") == chain
+                          and not g["released"] and (multi or g.get("refined"))):
+            near = within(key, pool)
+            if not len(near):
+                continue
+            g = out[key]
+            out[key] = renewed(g, g["name"], int(near[np.argmax(e["turn"][near])]),
+                               kept=bool(g.get("refined")))
+            touched.add(key)
+            pool = np.setdiff1d(pool, near)
+        if not len(pool):
+            continue
+        if multi:  # each feature beyond every reach a region of its own
+            live = sum(1 for g in out.values() if g.get("chain") == chain and not g["released"])
+            while len(pool) and live < MULTI_FAR_KINKS:
+                n = [int(x.group(1)) for x in
+                     (re.fullmatch(rf"{re.escape(chain)}_m(\d+)_far", k) for k in out) if x]
+                key = f"{chain}_m{max(n, default=0) + 1}_far"
+                out[key] = renewed(None, f"kink_{key}", int(pool[np.argmax(e["turn"][pool])]),
+                                   kept=False)
+                out[key]["multi"] = True
+                touched.add(key)
+                pool = np.setdiff1d(pool, within(key, pool))
+                live += 1
+            continue
+        key, name = f"{chain}_far", f"kink_{chain}_far"
+        out[key] = renewed(out.get(key), name, int(pool[np.argmax(e["turn"][pool])]), kept=False)
     for key, g in out.items():
         chain = g["chain"]
-        if chain in refine and len(refine[chain]) or g["released"]:
+        if g["released"] or key in touched:
+            continue
+        if chain not in multi_chains and chain in refine and len(refine[chain]):
             continue
         if t >= g["t_set"] + hold(g["h_before"]):
             g.update(released=True, target=g["h_before"])

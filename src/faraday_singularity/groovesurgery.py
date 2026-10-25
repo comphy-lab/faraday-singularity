@@ -38,11 +38,14 @@ The fill is a rebuild the project owns, as the ring surgeries are (``ringsurgery
    in the ring stage, ``ring.loop_kept``; one loop after a fill of the ring), the axis spans as
    planned; the nodes the transfer leaves unlocated those the geometry predicts
    (``ringsurgery._transfer_check``): of the interface on the closure, of the bulk inside the filled
-   region, none of the axis, no node without a value but on the corner set, none new.
+   region (for a fill at the floor, on the old elements' curve and beyond the band of them
+   pyoomph's locator reaches, :func:`floor_bulk_inside`), none of the axis, no node without a
+   value but on the corner set, none new.
 6. **Fill** (``groove.fill``: the blend, or zero) and the **projection** (``surgery.project`` with
    ``groove.projection`` and ``groove.restart`` or the cut's, the run's last step as the history's,
    the time unchanged, the disc its box): ``Pi = 0`` on every free surface, the closure included.
-7. **Budgets after and closures** (``ringsurgery._ring_closures``, prefix ``G``): G1 the volume the
+7. **Budgets after and closures** (``ringsurgery._ring_closures``, prefix ``G``; for a fill at
+   the floor the base of the upward jet besides, ``G_base``, below): G1 the volume the
    liquid gains against the filled volume, G2 the momentum the transfer carries against the filled
    region's, G3 the projection's momentum balance in the disc (the cutoff identity) and ``G3_box``
    the disc's change of momentum by the projection, hard (``surgery.BudgetUnclosed``,
@@ -52,9 +55,20 @@ The fill is a rebuild the project owns, as the ring surgeries are (``ringsurgery
    (kind ``groove-fill``) with the filled region, the closure and the pocket.
 
 A refusal leaves the problem unchanged, and a fill whose hard closures miss leaves it holding a
-rebuilt state that is not accepted: either is a resumable stop. A groove on the head of a tracked
-neck in the far region is not filled: the driver cuts that head first (``driver.CollapseDriver.
-_meet_event``, the far-head cut of ``pinch.far_head``).
+rebuilt state that is not accepted: either is a resumable stop.
+
+**A fill at the floor** (``CollapseDriver._floor_fill_request``): a wedge of gas of the ring whose
+apex the guard reads at an element of the run's floor (an edge turn or a midside node beyond the
+guard's limits there) is filled by this same fill as an ``RF`` whose request carries ``floor``:
+the guard's reading, the wedge (``ring.floor_wedge``) and the fold limits it is read again with,
+those of the floor (``ring.FLOOR_FOLD_RATIO``, ``fold_stop_elements`` element lengths at the pair),
+not ``max(kappa_g delta, fold_stop_elements h_elem)``; its hard closures are the fill's, and the
+base of the upward jet besides (``base_check``, the hard closure ``G_base``). Its former gas, a few
+elements wide, is predicted for the check of the transfer beyond the band of the old elements
+(:func:`floor_bulk_inside`, recorded as the transfer's ``bulk_band``).
+
+A groove on the head of a tracked neck in the far region is not filled: the driver cuts that head
+first (``driver.CollapseDriver._meet_event``, the far-head cut of ``pinch.far_head``).
 """
 
 from __future__ import annotations
@@ -82,6 +96,69 @@ assert set(REQUEST_KINDS) == set(GROOVE_CLASSES)
 # G3_box beyond its limit is the impulse of the merge where the cutoff identity resolves it: its
 # larger side at least this share of the disc's change of momentum (merge_impulse)
 MERGE_RESOLVED = 0.5
+# pyoomph's locator takes a point of the new bulk lying just outside an old element, within about
+# this share of the element's length beyond its edge, onto that edge: such nodes of a fill's former
+# gas are located, not unlocated (the second fill at the floor of the smoke of r1 from step 7506,
+# at step 7512: every predicted node within 0.059 of its element's length of the old surface taken,
+# none from 0.084)
+LOCATOR_BAND = 0.07
+ARC_SAMPLES = 8  # the points sampled on the curve of each chord of the old surface's elements
+
+
+def _arc_curve(P, walk) -> np.ndarray:
+    """The old surface of a loop ``P`` (its seam on a vertex: even indices vertices, odd midside
+    nodes) along the old indices ``walk`` (consecutive, forward), on its quadratic elements'
+    curve: each chord sampled at ``ARC_SAMPLES`` points of its element's parabola through vertex,
+    midside node, vertex (local coordinate 0, 1/2, 1)."""
+    n = len(P)
+    out = [P[walk[0]][None, :]]
+    for a in walk[:-1]:
+        lo, half = (a, 0.0) if a % 2 == 0 else (a - 1, 1.0)  # the chord's element and its half
+        A, M, B = P[lo % n], P[(lo + 1) % n], P[(lo + 2) % n]
+        s = (0.5 * (half + np.linspace(0.0, 1.0, ARC_SAMPLES + 1)[1:]))[:, None]
+        out.append(A * (1 - s) * (1 - 2 * s) + 4 * M * s * (1 - s) + B * s * (2 * s - 1))
+    return np.vstack(out)
+
+
+def floor_bulk_inside(X, P, i_s: int, j_s: int, closure, shrink: float) -> tuple[np.ndarray, dict]:
+    """The bulk nodes ``X`` (``(M, 2)``) of the new mesh that a fill at the floor (an ``RF`` of
+    the ring's loop ``P``, counter-clockwise, its seam on a vertex) predicts in its former gas, for
+    the check of the transfer (``ringsurgery._transfer_check``). Such a fill is a few elements
+    wide, so the band of its former gas that the old elements' edges reach (``LOCATOR_BAND``) is a
+    share of it beyond the check's slack: the filled region is read on the old surface's quadratic
+    curve (:func:`_arc_curve`, the splices ``i_s`` to ``j_s`` walked forward) and the closure back,
+    shrunk by ``shrink``, less the nodes within ``LOCATOR_BAND`` times the length of the old element
+    nearest them of that curve. Returns the mask and what the reading found (``mode``
+    ``floor-band``)."""
+    import shapely
+    from scipy.spatial import cKDTree
+
+    from .ringsurgery import _inside
+
+    P = np.asarray(P, dtype=float).reshape(-1, 2)
+    X = np.asarray(X, dtype=float).reshape(-1, 2)
+    n = len(P)
+    if n % 2:
+        raise ValueError(f"a loop of quadratic elements has an even count of nodes, not {n}")
+    walk = (int(i_s) + np.arange((int(j_s) - int(i_s)) % n + 1)) % n
+    arc = _arc_curve(P, walk)
+    Q = np.vstack([arc, np.asarray(closure, dtype=float).reshape(-1, 2)[::-1]])
+    inside = _inside(X, Q, float(shrink))
+    out = np.zeros(len(X), dtype=bool)
+    idx = np.flatnonzero(inside)
+    record = {"mode": "floor-band", "band": LOCATOR_BAND, "samples": ARC_SAMPLES,
+              "inside": len(idx), "in_band": 0, "predicted": 0}
+    if not len(idx):
+        return out, record
+    k = walk[cKDTree(P[walk]).query(X[idx])[1]]
+    L = np.where(k % 2 == 1, np.hypot(*(P[(k + 1) % n] - P[(k - 1) % n]).T),
+                 np.maximum(np.hypot(*(P[(k + 2) % n] - P[k]).T),
+                            np.hypot(*(P[k] - P[(k - 2) % n]).T)))
+    d = shapely.distance(shapely.LineString(arc), shapely.points(X[idx]))
+    keep = d > LOCATOR_BAND * L
+    out[idx[keep]] = True
+    record.update(in_band=int(np.sum(~keep)), predicted=int(np.sum(keep)))
+    return out, record
 
 
 def merge_impulse(closures: dict, floor_Pz: float = 0.0) -> dict:
@@ -160,14 +237,18 @@ def fill_trigger(P, pair, *, loop: bool, fold: dict, mouth: float) -> dict:
 
 def groove_fill(problem, events, reconnect, outdir: Path, request: dict, *, k: int, dt_prev: float,
                 elements_per_scale: float, h_floor: float, fold: dict, core=None, driver=None,
-                on_made=None, log=print) -> dict:
+                on_made=None, log=print, base_check=None) -> dict:
     """Fill the closing gas groove an event request names (``A-groove`` or ``RF``; module
     docstring), the ``k``-th event after the gas cut, under the block ``events`` with
     ``groove.enabled``. ``elements_per_scale`` is the run's after the cut, which
     ``groove.cut_elements`` replaces on the closure; ``h_floor`` the run's floor of the sizes after
     it; ``fold`` the stops' fold limits (``ratio``, ``stop``, ``stop_elements``) the trigger is read
     again with; ``core`` jetcore's mask of the open chain's core (None without the part), whose
-    nodes no fill takes. Returns the record (schema ``faraday-event/2``, kind ``groove-fill``),
+    nodes no fill takes; ``base_check`` (the driver's, for a fill at the floor of a wedge of the
+    ring, ``CollapseDriver._floor_fill_request``), once the budgets close, reads the upward jet's
+    base on the fresh mesh against its reading before the fill (``base_guard`` in the record), and
+    a base it finds changed is the hard closure ``G_base``. Returns the record (schema
+    ``faraday-event/2``, kind ``groove-fill``),
     also written to ``events/event_<k>.json`` whatever the outcome; raises ``surgery.CutRefused``
     with the problem unchanged, ``surgery.BudgetUnclosed`` where a hard closure misses (a stop to
     resume from ``precut_e<k>``), ``surgery.CutFailed`` otherwise after the remesh."""
@@ -181,12 +262,12 @@ def groove_fill(problem, events, reconnect, outdir: Path, request: dict, *, k: i
         problem, events, reconnect, out, record, progress, request, path, k=int(k),
         dt_prev=float(dt_prev), elements_per_scale=float(elements_per_scale),
         h_floor=float(h_floor), fold=dict(fold), core=core, driver=driver, on_made=on_made,
-        log=log), problem, out, record, path, log)
+        log=log, base_check=base_check), problem, out, record, path, log)
 
 
 def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request: dict,
                  path: Path, *, k: int, dt_prev: float, elements_per_scale: float, h_floor: float,
-                 fold: dict, core, driver, on_made, log) -> dict:
+                 fold: dict, core, driver, on_made, log, base_check=None) -> dict:
     """The sequence of :func:`groove_fill`, filling ``record`` as it goes."""
     import shapely
 
@@ -382,8 +463,13 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
                              <= CLOSURE_TOL * g.mouth, dtype=bool)
                   if len(X) else np.zeros(0, dtype=bool))
     # the bulk nodes in the old gas: inside the filled region but within a twentieth of the old
-    # surface's shortest chord there, the sag of its quadratic elements
-    bulk_inside = _inside(sets["bulk"][1], g.fill, 0.05 * g.h_arc)
+    # surface's shortest chord there, the sag of its quadratic elements; for a fill at the floor,
+    # on the old surface's curve and beyond the band of the old elements (floor_bulk_inside)
+    if request.get("floor") is not None and cls == "RF":
+        bulk_inside, transfer["bulk_band"] = floor_bulk_inside(
+            sets["bulk"][1], P, g.i_s, g.j_s, g.closure, 0.05 * g.h_arc)
+    else:
+        bulk_inside = _inside(sets["bulk"][1], g.fill, 0.05 * g.h_arc)
     axis_gap = np.zeros(len(sets["axis"][1]), dtype=bool)
     corners = _corners(pb, _axis_ends([c for _, c in named]),
                        CORNER_TOL * float(pb.cut["sizing"]["h_tip"]))
@@ -444,6 +530,15 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
         missed = {x: closures[x] for x in closures["hard"]}
         raise BudgetUnclosed(f"the budget of the fill of the groove does not close: "
                              f"{closures['hard']} beyond their limits ({missed})")
+    if base_check is not None:  # the base of the upward jet, which the fill must leave as it was
+        stage("base")
+        guard = base_check()
+        record["base_guard"] = guard
+        if not guard["ok"]:
+            closures["flags"] = list(closures["flags"]) + ["G_base"]
+            closures["hard"] = list(closures["hard"]) + ["G_base"]
+            raise BudgetUnclosed(f"the fill changed the upward jet's base: {guard['change']} "
+                                 f"beyond {guard['tol']}")
     record["filled"] = {"V": g.V_fill, "Pz": fill["Pz_fill"], "KE": fill["KE_fill"]}
     record["gas_removed"] = {"V": g.V_fill, "V_over_V_b": g.V_fill / V_b,
                              "V_over_delta3": g.V_fill / delta**3,

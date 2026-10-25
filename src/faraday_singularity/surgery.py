@@ -1254,7 +1254,7 @@ def _closures(removed: dict, poly: dict, box: dict, sigma: dict | None = None) -
 
 def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, request: dict, *,
                k: int, dt_prev: float, elements_per_scale: float, h_floor: float, driver=None,
-               on_made=None, log=print) -> dict:
+               on_made=None, log=print, base_check=None) -> dict:
     """Cut the liquid neck an event request lands (``events.post_cut_events``: ``liquid-neck``,
     class ``L``, or ``a-head``, class ``A-head``; with ``pinch.far_head`` ``far-head``, class
     ``F-head``, the head of a far event without a handler, ``events.far_head_request``, with no
@@ -1336,7 +1336,12 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
     written to ``events/event_<k>.json`` whatever the outcome (``made``, ``refused``, ``unclosed``,
     ``failed`` or ``interrupted``, with ``failed_at``), as :func:`cut` writes its own; a refusal
     leaves the problem unchanged, a failure ends the run, and hard budgets that do not close
-    (:class:`BudgetUnclosed`, a failure) end it at a stop to resume from ``precut_e<k>``."""
+    (:class:`BudgetUnclosed`, a failure) end it at a stop to resume from ``precut_e<k>``.
+
+    With ``base_check`` (the driver's for a head folding onto the core, ``events.
+    far_head_request``'s ``head_fold``), once the budgets close, ``base_check()`` reads the upward
+    jet's base on the fresh mesh against its reading before the cut (``base_guard`` in the
+    record); a base it finds changed is the hard closure ``F_base`` (:class:`BudgetUnclosed`)."""
     out = Path(outdir)
     record: dict = {"schema": EVENT_SCHEMA, "k": int(k), "kind": request.get("kind"),
                     "class": request.get("class")}
@@ -1346,7 +1351,7 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
         return _liquid_cut(problem, events, reconnect, out, record, progress, request, path,
                            k=int(k), dt_prev=float(dt_prev),
                            elements_per_scale=float(elements_per_scale), h_floor=float(h_floor),
-                           driver=driver, on_made=on_made, log=log)
+                           driver=driver, on_made=on_made, log=log, base_check=base_check)
     except BaseException as e:
         stage, err, extra = progress["stage"], e, {}
         if isinstance(e, Exception) and not isinstance(e, (CutRefused, CutFailed)):
@@ -1374,7 +1379,7 @@ def liquid_cut(problem, events, reconnect: ReconnectSettings, outdir: Path, requ
 
 def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progress: dict,
                 request: dict, path: Path, *, k: int, dt_prev: float, elements_per_scale: float,
-                h_floor: float, driver, on_made, log) -> dict:
+                h_floor: float, driver, on_made, log, base_check=None) -> dict:
     """The sequence of :func:`liquid_cut`, filling ``record`` as it goes."""
     from dataclasses import replace
 
@@ -1660,6 +1665,15 @@ def _liquid_cut(pb, events, s: ReconnectSettings, out: Path, record: dict, progr
         missed = {x: closures[x] for x in closures["hard"]}
         raise BudgetUnclosed(f"the budget of the liquid cut does not close: {closures['hard']} "
                              f"beyond their limits ({missed})")
+    if base_check is not None:  # the base of the upward jet, which the cut must leave as it was
+        stage("base")
+        guard = base_check()
+        record["base_guard"] = guard
+        if not guard["ok"]:
+            closures["flags"] = list(closures["flags"]) + ["F_base"]
+            closures["hard"] = list(closures["hard"]) + ["F_base"]
+            raise BudgetUnclosed(f"the cut of the head changed the upward jet's base: "
+                                 f"{guard['change']} beyond {guard['tol']}")
     # the removed head as the run is to follow it: moving rigidly at its mean axial speed, its rear
     # (the cap's side) retracting towards it at the capillary speed of the end of a thread
     _, segs_after = _named_chains(pb)

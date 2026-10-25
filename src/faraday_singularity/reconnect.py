@@ -1449,7 +1449,7 @@ def edge_reading(points) -> dict:
 
 
 def interface_guard(readings: dict, settings: ReconnectSettings, *, fresh: bool, h_floor: float,
-                    refine_ratio: float) -> dict:
+                    refine_ratio: float, floored_ok: tuple = ()) -> dict:
     """What the quadratic elements of the chains after a cut call for (``readings``: per chain name,
     :func:`edge_reading`).
 
@@ -1462,7 +1462,10 @@ def interface_guard(readings: dict, settings: ReconnectSettings, *, fresh: bool,
     :func:`p2_edges`) whose turn exceeds ``edge_turn_refine`` or whose midside node lies more than
     ``midside_refine`` chords off mid-chord: a rebuild refines there (the driver's ``kink_<chain>``
     region). The worst element over the chains is reported (its chain, turn or offset, the limit,
-    the place of its midside node and its chord)."""
+    the place of its midside node and its chord). On a chain of ``floored_ok`` (the ring of the ring
+    stage with jetcore's recentred far kinks, a nuisance) an element that asks at the floor is no
+    stop: it is carried there, within the limits of the turn and the midside node, and still asks
+    (``refine``), so that its kink region follows it."""
     s = settings
     turn_limit = s.edge_turn_stop_fresh if fresh else s.edge_turn_stop
     worst = None
@@ -1491,7 +1494,7 @@ def interface_guard(readings: dict, settings: ReconnectSettings, *, fresh: bool,
         if not len(idx):
             continue
         floored = idx[e["L"][idx] <= refine_ratio * h_floor]
-        if len(floored):
+        if len(floored) and name not in floored_ok:
             k = int(floored[np.argmax(e["turn"][floored])])
             return {"stop": {"reason": "interface-unresolved", "trigger": "feature-below-floor",
                              "chain": name, "turn": float(e["turn"][k]),
