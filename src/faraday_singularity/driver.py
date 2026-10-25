@@ -250,7 +250,9 @@ post-cut one, on both chains (below). In addition:
   inverted element took its snapshot before the step: then the problem is rolled back to that
   state and the run ends on it, the resumable stop ``step-failed`` with its end state
   (:meth:`CollapseDriver._failed_step_stop`); while an element of either chain turns by more than
-  ``edge_turn_refine`` degrees a profile is written at every step;
+  ``edge_turn_refine`` degrees a profile is written at every step; with jetcore's recentred far
+  kinks, a guard stop on the bubble before the piercing at the tail of an end folded along the
+  axis is met by the axis repair (:meth:`CollapseDriver._axis_repair`, ``axisrepair``);
 * ``collapse.txt`` gets the columns ``tau`` and ``tau_p = t - t_p`` (``t_p`` the pinch time the cut
   recorded, NaN without one), ``chains.txt`` a row per step with both chains
   (``reconnect.post_cut_record``: the three tips, bridge, bubble, necks, budgets) and the step
@@ -883,6 +885,7 @@ class CollapseDriver:
         # (RemeshWhen's on_inverted_element, armed by run())
         self._inversion_remeshes = 0
         self._step_snapshot = None  # after a cut: the state the last step started from
+        self._axis_repairs: list[dict] = []  # after a cut: the folds of a tip repaired (this leg)
         # the remesh count at the end of the last accepted step: a mesh built since is fresh (the
         # guard of the interface and the check of its curved elements, after a cut)
         self._stepped_rc: int | None = None
@@ -3876,6 +3879,108 @@ class CollapseDriver:
             return m, self._stop(m)
         return m, None
 
+    def _axis_fold_of(self, stop: dict | None) -> tuple[str, dict] | None:
+        """The fold along the axis that a guard stop sits on (``axisrepair.axis_fold``): the
+        guard's ``interface-unresolved`` (an edge turn, a midside node, a feature below the floor)
+        on the bubble before the piercing, with jetcore's recentred far kinks (the nuisance region,
+        decision 22), at an element within the folded tail of one of the bubble's ends on the axis
+        and the node kept beside it; the end and the fold, or None."""
+        if stop is None or stop.get("reason") != "interface-unresolved" \
+                or stop.get("chain") != "bubble" or stop.get("trigger") not in (
+                    "edge-turn", "edge-midside", "feature-below-floor") \
+                or stop.get("index") is None:
+            return None
+        jet = self._jetcore()
+        if jet is None or jet.far_kinks != "recentre" or self._ring() is not None:
+            return None
+        from .axisrepair import axis_fold
+        from .surgery import _named_chains
+
+        named = dict(_named_chains(self.pb)[0])
+        if "bubble" not in named:
+            return None
+        P = named["bubble"].points
+        i = int(stop["index"])
+        for end in ("first", "last"):
+            fold = axis_fold(P, end)
+            if fold is None:
+                continue
+            near = fold["removed"] + [fold["kept"], fold["kept"] + (-1 if end == "last" else 1)]
+            if min(abs(i - j) for j in near) <= 1:
+                return end, fold
+        return None
+
+    def _axis_repair_due(self, stop: dict | None) -> bool:
+        """Whether a stop is one :meth:`_axis_repair` meets (:meth:`_axis_fold_of`)."""
+        return self._axis_fold_of(stop) is not None
+
+    def _axis_repair(self, m: dict, stop: dict) -> tuple[dict, dict | None]:
+        """Repair a jet's tip folded along the axis (``axisrepair.axis_repair``; decision 22, the
+        lead's option A): the folded nodes dropped and the axis node put where the surface meets
+        the axis by a rebuild from the planned chains, the sliver of gas between them filled, its
+        volume and momentum hard above ``axisrepair.AXIS_REPAIR_BOUND delta^3`` (and ``U`` times
+        it), the transfer's closures A1-A6 as a fill's, the upward jet's base checked; an event
+        ``axis-repair`` and its record ``events/axis_repair_<n>.json``. A repair whose hard
+        closures miss, or whose rebuild fails, is rolled back to the state before it (the snapshot
+        taken first) and is the resumable stop ``axis-repair-unclosed`` (or ``axis-repair-failed``)
+        for the cap of option B; a fold at the same end within ``AXIS_REPAIR_RECUR_STEPS`` steps of
+        the last repair there is not repaired again (the stop as it is, ``axis_fold_recurs``).
+        Returns the state the run goes on from and its stop."""
+        from .axisrepair import AXIS_REPAIR_RECUR_STEPS, axis_repair
+        from .surgery import BudgetUnclosed, _named_chains
+
+        end, fold = self._axis_fold_of(stop)
+        st, pb = self.state, self.pb
+        last = [x for x in self._axis_repairs if x["end"] == end]
+        if last and st.step - last[-1]["step"] < AXIS_REPAIR_RECUR_STEPS:
+            return m, dict(stop, axis_fold_recurs={"end": end, "last_step": last[-1]["step"],
+                                                   "repairs": len(last)})
+        n = len(self._axis_repairs) + 1
+        segs = _named_chains(pb)[1]
+        velocity = np.column_stack([segs["bubble"]["u_r"], segs["bubble"]["u_z"]])
+        snapshot = pb._snapshot_state()
+        path = self.outdir / "events" / f"axis_repair_{n:03d}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        def base_check():
+            return base_guard_checked(m, self.measure())
+
+        reason = None
+        try:
+            record = axis_repair(pb, self.events, self.reconnect, self.outdir, "bubble", fold,
+                                 velocity=velocity, base_check=base_check)
+        except BudgetUnclosed as e:
+            record, reason = getattr(e, "record", {}), "axis-repair-unclosed"
+        except Exception as e:  # noqa: BLE001  (a rebuild that fails: rolled back, a stop)
+            record = {"kind": "axis-repair", "outcome": "failed",
+                      "error": f"{type(e).__name__}: {e}"[:400]}
+            reason = "axis-repair-failed"
+        record.update(n=n, step=st.step, guard=stop, **self._taus(self._t()))
+        path.write_text(json.dumps(_plain(record), indent=1) + "\n")
+        if reason is not None:
+            pb._restore_state(snapshot)
+            pb.invalidate_cached_mesh_data()
+            self._post_cut_cache = None
+            m = self.measure()
+            return m, {"reason": reason, "chain": "bubble", "end": end,
+                       "hard": (record.get("closures") or {}).get("hard"),
+                       "error": record.get("error"), "record": f"events/{path.name}",
+                       "guard": {k: v for k, v in stop.items() if k != "reason"},
+                       **self._taus(self._t())}
+        st.last_remesh_step = st.step
+        after = self.measure()
+        self._keep_landings(after)
+        self._axis_repairs.append({"end": end, "step": st.step,
+                                   "V_sliver": record["fold"]["V_sliver"]})
+        self._event("axis-repair", after, n=n, end=end, chain="bubble",
+                    removed=len(fold["removed"]), V_sliver=record["fold"]["V_sliver"],
+                    V_sliver_over_delta3=record["fold"]["V_sliver_over_delta3"],
+                    new_end=record["fold"]["new_end"], hard=record["closures"]["hard"],
+                    flags=record["closures"]["flags"], base=record.get("base_guard"),
+                    record=f"events/{path.name}")
+        self._snapshot(after, "axis-repair")
+        return after, self._stop(after)
+
     def _refined_chain(self) -> str | None:
         """The chain whose guard stops the ring refine meets: the ring, in the ring stage before its
         removal, with jetcore's recentred far kinks; None otherwise. (The bubble before the
@@ -4130,6 +4235,8 @@ class CollapseDriver:
         self._tick()  # step timing only
         while True:
             found = self._stop(m)
+            if self._axis_repair_due(found):  # a jet's tip folded along the axis (nuisance)
+                m, found = self._axis_repair(m, found)
             if self._ring_refine_due(found):  # a fresh mesh of the ring short of its feature
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found  # a wedge of gas at the floor
@@ -4267,6 +4374,8 @@ class CollapseDriver:
             self._keep_landings(m)
             self._tick("rows")
             found = self._stop(m)
+            if self._axis_repair_due(found):
+                m, found = self._axis_repair(m, found)
             if self._ring_refine_due(found):  # after a rebuild for distortion
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found
@@ -4288,6 +4397,8 @@ class CollapseDriver:
                 self._maybe_snapshot(m)
             self._tick("snapshot")
             m, found = self._remesh_checks(m)
+            if self._axis_repair_due(found):
+                m, found = self._axis_repair(m, found)
             if self._ring_refine_due(found):  # after the rule's rebuild
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found
@@ -4343,7 +4454,9 @@ class CollapseDriver:
             out["cut"] = {"t_cut": t_cut, "t_p": t_p, "tau_end": r.tau_end, **self._taus(self._t()),
                           "inverted_element_remesh": self._nets_armed,
                           "inverted_element_remeshes": self._inversion_remeshes,
-                          "axis_midside_repairs": getattr(pb, "axis_repairs_total", 0)}
+                          "axis_midside_repairs": getattr(pb, "axis_repairs_total", 0),
+                          **({"axis_fold_repairs": len(self._axis_repairs)}
+                             if self._axis_repairs else {})}
             if self.events is not None:  # only with the block: other results keep their keys
                 out["events"] = self._events_summary(stop)
                 out["window_end"] = ({"reason": stop["reason"], **self._taus(m["time"])}

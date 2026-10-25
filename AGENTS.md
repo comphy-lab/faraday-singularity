@@ -185,9 +185,21 @@ add a second top-level `cases/` tree.
   started from (the net's snapshot before it, kept by `FaradayProblem._snapshot_state` within
   `CollapseDriver._post_cut_solve`) and ends the run as the resumable stop `step-failed` with that
   state dumped (`CollapseDriver._failed_step_stop`, event `step-failed`; `test_step_failure.py`,
-  `test_step_failure_fem.py`, `test_step_failure_identity.py`); a loop of the ring whose spacing
-  jumps beyond `ring.LOOP_STEP_RATIO` is in order when it is simple (`ring.validate_loop_order`),
-  as is a profile at every step while an element turns beyond `edge_turn_refine`; rotating dumps
+  `test_step_failure_fem.py`, `test_step_failure_identity.py`), and a profile is written at every
+  step while an element turns beyond `edge_turn_refine`; a loop of the ring whose spacing jumps
+  beyond `ring.LOOP_STEP_RATIO` is in order when it is simple (`ring.validate_loop_order`); with
+  jetcore's recentred far kinks, a guard stop on the bubble before the piercing at the tail of one
+  of its ends folded along the axis (`axisrepair.axis_fold`: nodes beside the end within
+  `AXIS_FOLD_TOL` of the spacing of the axis or across it) is met by the axis repair
+  (`axisrepair.axis_repair`, `CollapseDriver._axis_repair`; decision 22, the downward jet's tip a
+  nuisance): the folded nodes dropped and the axis node put where the surface meets the axis by a
+  rebuild from the planned chains, the sliver filled, its volume and momentum hard above
+  `AXIS_REPAIR_BOUND delta^3` (`A_V`, `A_P`), the transfer's closures A1-A6 as a fill's, the
+  upward jet's base checked (`A_base`); event `axis-repair`, record `events/axis_repair_<n>.json`,
+  `axis_fold_repairs` in the run's result; a miss or a failed rebuild rolled back to the state
+  before it, the resumable stop `axis-repair-unclosed` or `axis-repair-failed`, and a fold again
+  at the same end within `AXIS_REPAIR_RECUR_STEPS` steps left the stop it is (`axis_fold_recurs`);
+  `test_axis_repair.py`, `test_axis_repair_identity.py`; rotating dumps
   follow at least each time `tau` doubles and the end state is dumped; and every output carries `tau = t - t_cut` and `tau_p = t - t_p` (`collapse.txt`,
   `chains.txt` with `R_apex_<tip>`, `groove_gap_<tip>`, `groove_angle_<tip>`, `edge_turn_<chain>`
   and `edge_midside_<chain>`, profiles of both chains, events, dumps). `rebuild_spline` `vertices`

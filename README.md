@@ -370,7 +370,14 @@ state the failing step started from are written first (`profile_<step>_lastgood.
 turns by more than `edge_turn_refine`. With pyoomph's net for inverted elements armed (the
 default after a cut), a failed step is rolled back to the state it started from, the net's own
 snapshot before the step, and the run ends on that state as the resumable stop `step-failed`
-with it dumped, so that a continuation can resume from it. For sensitivity tests only, `rebuild_spline` `vertices`
+with it dumped, so that a continuation can resume from it. In the region away from the upward jet,
+the tip of a fast jet on the axis that folds along the axis within one element (its last element
+running up the axis, a node of it across it) is repaired: the folded nodes are dropped and the
+axis node put where the surface meets the axis, by a rebuild from the planned surface, and the
+thin sliver of gas between them becomes liquid. Its volume and momentum are hard checks above
+`1e-4 delta^3` (a fold of a tip element is far smaller), with the budgets of the rebuild and the
+base of the upward jet; a repair that misses is rolled back and the run stops resumably.
+For sensitivity tests only, `rebuild_spline` `vertices`
 splines each rebuild through the vertices of the elements rather than every node; it is off by
 default, since smoothing would alter, and hide, the very feature under test. All these settings
 belong to the cut: a continuation keeps them.
