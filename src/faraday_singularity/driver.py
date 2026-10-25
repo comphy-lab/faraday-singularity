@@ -4068,13 +4068,16 @@ class CollapseDriver:
         the ring's removal, with jetcore's recentred far kinks and ``groove.enabled``, where the
         element's apex is a wedge of gas read at the scale of the floor (``ring.floor_wedge``: the
         loop turning left across it, a pair across the wedge closer than ``fold_stop_elements``
-        element lengths and ``ring.FLOOR_FOLD_RATIO`` times its gap below the arc between them).
+        element lengths and ``ring.FLOOR_FOLD_RATIO`` times its gap below the arc between them), or,
+        where no wedge is, a corner of gas open up to about a right angle (the same reading with
+        ``ring.FLOOR_CORNER_RATIO``; ``corner`` in the wedge's record), as at the root of the radial
+        sheet the downward jet's head drives out along the plug.
         Returns the request (``ring-fold``, ``RF``, the fill as its handler, the pair, its gap and
         limit, ``contact`` ``floor``, and ``floor``: the guard's reading, the wedge and the fold
         limits the fill reads its trigger again with) for :meth:`_meet_event`; None otherwise (a
         right turn, the tip of a finger of liquid, stays the stop)."""
         from .events import GROOVE_HANDLER, _request
-        from .ring import FLOOR_FOLD_RATIO, floor_wedge
+        from .ring import FLOOR_CORNER_RATIO, FLOOR_FOLD_RATIO, floor_wedge
 
         stop = self._ring_jacobian_reading(stop)
         if stop is None or stop.get("reason") != "interface-unresolved":
@@ -4093,12 +4096,19 @@ class CollapseDriver:
         if len(loops) != 1 or stop.get("index") is None:
             return None
         P = np.column_stack([loops[0]["r"], loops[0]["z"]])
+        ratio = FLOOR_FOLD_RATIO
         wedge = floor_wedge(P, int(stop["index"]), stop_elements=self.s.fold_stop_elements)
+        if wedge is None:  # a corner of gas at the floor, open up to about a right angle
+            ratio = FLOOR_CORNER_RATIO
+            wedge = floor_wedge(P, int(stop["index"]), stop_elements=self.s.fold_stop_elements,
+                                ratio=ratio)
+            if wedge is not None:
+                wedge["corner"] = True
         if wedge is None:
             return None
         a, b = wedge["pair"]
         mid = 0.5 * (P[a] + P[b])
-        fold = {"ratio": FLOOR_FOLD_RATIO, "stop": 0.0, "stop_elements": self.s.fold_stop_elements}
+        fold = {"ratio": ratio, "stop": 0.0, "stop_elements": self.s.fold_stop_elements}
         guard = {k: v for k, v in stop.items() if k != "reason"}
         req = _request("ring-fold", "RF", chain="ring", contact="floor", fold_gap=wedge["gap"],
                        fold_r=float(mid[0]), fold_z=float(mid[1]), fold_arc=wedge["arc"],
@@ -4306,6 +4316,10 @@ class CollapseDriver:
                         failed = self._failed_step_stop(exc, dt, rebuilds)
                         if failed is not None:  # rolled back: a resumable stop on that state
                             m, stop = failed
+                            retried = self._failed_step_retry(m, stop)
+                            if retried is not None:  # the ring's sharpest element refined: the
+                                m, stop = retried[0], None  # loop's top reads the new mesh again
+                                continue
                             break
                     raise
                 stop["dt_attempted"] = dt
@@ -4556,6 +4570,39 @@ class CollapseDriver:
         self._event("step-failed", m, error=stop["error"], dt_attempted=dt,
                     net_rebuilds=int(inside))
         return m, stop
+
+    def _failed_step_retry(self, m: dict, stop: dict) -> tuple[dict, dict | None] | None:
+        """After a failed step rolled back (:meth:`_failed_step_stop`), in the ring stage with
+        jetcore's recentred far kinks: one retry per step, the ring's sharpest element (turning by
+        more than ``edge_turn_refine`` and above the guard's floor) rebuilt in a far kink of its own
+        at the size its turn asks for, as the ring refine does (:meth:`_ring_refine_once`, event
+        ``ring-refine`` with ``retry`` in its reading), and the step made again from the rebuilt
+        mesh (r1h at b36c9c1, step 7251: the root of the radial sheet the downward head drives out
+        along the plug, an element of 1.55e-5 turning by 85.6 degrees, below the guard's stop, and
+        the step from it failed at every size). Returns the state and the stop of the rebuilt mesh,
+        from which the loop's top goes on (its stops read again), or None where no retry is made (a
+        second failure of the same step, no ring, no element to refine), the stop ``step-failed``
+        then standing."""
+        st, r = self.state, self.reconnect
+        if getattr(self, "_retried_step", None) == st.step or self._refined_chain() != "ring":
+            return None
+        edges = (self._post_cut_state().get("edges") or {}).get("ring") or {}
+        e = edges.get("edges")
+        if e is None or not len(e["L"]):
+            return None
+        floor = self.s.refine_ratio * self._h_floor()
+        ok = (e["turn"] > r.edge_turn_refine) & (e["L"] > floor)
+        if not ok.any():
+            return None
+        k = int(np.argmax(np.where(ok, e["turn"], -1.0)))
+        reading = {"reason": "interface-unresolved", "trigger": "edge-turn", "chain": "ring",
+                   "turn": float(e["turn"][k]), "limit": float(r.edge_turn_refine),
+                   "L": float(e["L"][k]), "r": float(e["mid"][k, 0]), "z": float(e["mid"][k, 1]),
+                   "index": int(e["index"][k]), "retry": True}
+        self._retried_step = st.step
+        self._event("step-retry", m, reading=reading, error=stop.get("error"))
+        m, new_stop = self._ring_refine_once(m, reading, 1)
+        return m, new_stop
 
     def _write_lastgood(self, m: dict, exc: BaseException):
         """After a failed step after a cut: the profiles of the last state the driver measured (the

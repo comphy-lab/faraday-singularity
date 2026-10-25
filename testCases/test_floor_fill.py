@@ -300,3 +300,47 @@ def test_the_driver_fills_the_wedge_with_the_floors_limits_and_checks_the_base(t
         else:
             assert calls[0]["fold"]["ratio"] == drv.s.fold_ratio and checks == [None]
             assert "floor_fills" not in out["events"] and floors == []
+
+
+def corner(h=H, n=12, apex=(1.74e-4, 4.6116)):
+    """A ring whose gas has a right-angled corner at ``apex`` (the root of the radial sheet where
+    its top meets the column's wall): a wall down from above to the apex, then out along +r, the
+    rest closed round counter-clockwise (its gas inside), and the apex's index."""
+    a = np.asarray(apex, dtype=float)
+    down = a + np.column_stack([np.zeros(n), (n - np.arange(n)) * h])  # from above to the apex
+    out = a + np.column_stack([np.arange(1, n + 1) * h, np.zeros(n)])
+    far = out[-1] + np.column_stack([np.zeros(2 * n), np.linspace(h, n * h, 2 * n)])
+    back = np.column_stack([np.linspace(out[-1][0] - h, a[0] + h, 2 * n), np.full(2 * n,
+                                                                              a[1] + (n + 1) * h)])
+    # counter-clockwise with the gas inside: from the apex out along +r, up, back, down to it
+    L = np.vstack([a[None, :], out, far, back, down[1:]])
+    if signed_area(L) < 0.0:
+        L = L[::-1].copy()
+    i = int(np.argmin(np.hypot(L[:, 0] - a[0], L[:, 1] - a[1])))
+    return L, i
+
+
+def test_a_corner_of_gas_at_the_floor_is_read_with_the_corners_ratio():
+    """``ring.FLOOR_CORNER_RATIO``: where no wedge is (a right-angled corner fails the wedge's
+    1.5), the corner of gas open up to about 100 degrees is read with 1.3, the request's fold
+    limits the corner's, ``corner`` in its wedge; a liquid corner (a right turn) none."""
+    from faraday_singularity.ring import FLOOR_CORNER_RATIO
+
+    L, i = corner()
+    assert floor_wedge(L, i, stop_elements=3.0) is None
+    w = floor_wedge(L, i, stop_elements=3.0, ratio=FLOOR_CORNER_RATIO)
+    assert w is not None and w["angle"] == pytest.approx(90.0, abs=1.0)
+    req = CollapseDriver._floor_fill_request(_fake_driver(L), _guard(L, i, turn=99.1))
+    assert req is not None and req["floor"]["wedge"]["corner"] is True
+    assert req["floor"]["fold"]["ratio"] == FLOOR_CORNER_RATIO
+    trig = groovesurgery.fill_trigger(L, req["fold_pair"], loop=True, fold=req["floor"]["fold"],
+                                      mouth=1.5)
+    assert trig["holds"]
+    # a wedge stays the wedge's: no corner flag, the wedge's ratio
+    T, j = teardrop(roll=23)
+    req = CollapseDriver._floor_fill_request(_fake_driver(T), _guard(T, j))
+    assert "corner" not in req["floor"]["wedge"] and req["floor"]["fold"]["ratio"] == FLOOR_FOLD_RATIO
+    # the corner of the liquid (the loop turning right) stays the stop
+    R = L[::-1].copy()  # clockwise: its gas outside, the same corner a liquid one
+    k = len(R) - 1 - i
+    assert floor_wedge(R, k, stop_elements=3.0, ratio=FLOOR_CORNER_RATIO) is None

@@ -370,7 +370,9 @@ state the failing step started from are written first (`profile_<step>_lastgood.
 turns by more than `edge_turn_refine`. With pyoomph's net for inverted elements armed (the
 default after a cut), a failed step is rolled back to the state it started from, the net's own
 snapshot before the step, and the run ends on that state as the resumable stop `step-failed`
-with it dumped, so that a continuation can resume from it. In the region away from the upward jet,
+with it dumped, so that a continuation can resume from it; in the ring stage the step is first
+made once more after the ring's sharpest element is rebuilt at the size its turn asks for.
+In the region away from the upward jet,
 the tip of a fast jet on the axis that folds along the axis within one element (its last element
 running up the axis, a node of it across it) is repaired: the folded nodes are dropped and the
 axis node put where the surface meets the axis, by a rebuild from the planned surface, and the
@@ -744,7 +746,9 @@ a wedge of gas read at the scale of the floor (the loop turning left across it, 
 wedge closer than `fold_stop_elements` element lengths, with 1.5 times its gap below the arc
 between them), is met by the fill of the wedge: the groove fill of the ring under the fold limits
 of the floor, its hard closures, and the base of the upward jet besides (`G_base`); an event
-`floor-fill` and `floor_fills` in the run's events count them. Its check of the transfer predicts
+`floor-fill` and `floor_fills` in the run's events count them; where no wedge is, a corner of gas at
+the floor open up to about a right angle (the root of the radial sheet that the downward jet's head
+drives out along the plug) is filled the same way. Its check of the transfer predicts
 the former gas, a few elements wide, on the old elements' quadratic curve and beyond the band of
 them that pyoomph's locator still takes (`groovesurgery.LOCATOR_BAND`, 0.07 of the element's
 length; the transfer's `bulk_band`). The tip of a finger of liquid at the floor stays a stop. A

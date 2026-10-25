@@ -1041,6 +1041,11 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
 # between the two nodes (a wedge narrower than about 84 degrees) and its gap below
 # fold_stop_elements element lengths there
 FLOOR_FOLD_RATIO = 1.5
+# a corner of gas at the floor, open up to about a right angle (1/sin(50 degrees) = 1.31: up to about
+# 100 degrees), read so where no wedge is: the root of the radial sheet that the downward jet's head
+# drives out along the plug, where the sheet's top meets the column's wall (r1 at b36c9c1, step 7506:
+# a gas corner of 90 degrees at the floor, turning by 99 degrees within an element of 1.08e-6)
+FLOOR_CORNER_RATIO = 1.3
 
 
 def floor_wedge(L, index: int, *, stop_elements: float, ratio: float = FLOOR_FOLD_RATIO,
