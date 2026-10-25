@@ -541,6 +541,10 @@ RING_REFINE_TRIES = 3
 # the largest turn of the ring's element the refine meets, on a stepped or a fresh mesh (beyond it
 # the element folds back on itself, and the run stops as the guard stops it)
 RING_REFINE_TURN_MAX = 150.0
+# a fresh mesh's curved element on the bubble's chain before the piercing (CollapseDriver.
+# _tip_straighten): the surface's edges within this many times the distance of the element to the
+# surface, or the chain's spacing there, are read for their midside nodes
+TIP_STRAIGHTEN_REACH = 3.0
 BASE_KEYS = ("r_j", "z_b", "V_j", "Q_j")
 
 
@@ -893,6 +897,7 @@ class CollapseDriver:
         self._inversion_remeshes = 0
         self._step_snapshot = None  # after a cut: the state the last step started from
         self._axis_repairs: list[dict] = []  # after a cut: the folds of a tip repaired (this leg)
+        self._tip_straightens: list[dict] = []  # after a cut: curved edges of the bubble made straight
         # the remesh count at the end of the last accepted step: a mesh built since is fresh (the
         # guard of the interface and the check of its curved elements, after a cut)
         self._stepped_rc: int | None = None
@@ -1404,10 +1409,64 @@ class CollapseDriver:
         j = bound(self.reconnect.jacobian_min)
         if j is None or not j["min"] < self.reconnect.jacobian_min:
             return None
-        return {"reason": "interface-unresolved", "trigger": "curved-jacobian",
+        stop = {"reason": "interface-unresolved", "trigger": "curved-jacobian",
                 "jacobian_bound": j["min"], "limit": self.reconnect.jacobian_min, "r": j["r"],
                 "z": j["z"], "on_interface": j["on_interface"], "elements_below": j["below"],
                 "fresh": True}
+        return self._tip_straighten(stop)
+
+    def _tip_straighten(self, stop: dict) -> dict | None:
+        """A fresh mesh's ``curved-jacobian`` at an element on the bubble's chain before the
+        piercing, with jetcore's recentred far kinks (decision 22: the bubble a nuisance): the free
+        surface's quadratic edges about the element (within ``TIP_STRAIGHTEN_REACH`` times the
+        distance of its centroid to the surface, at least that times the chain's spacing there)
+        whose midside node lies more than ``AXIS_MIDSIDE_LIMIT`` chords off the middle are put
+        straight (``FaradayProblem.straighten_interface_edges``), if the volume between their
+        curves and chords is within ``axisrepair.AXIS_REPAIR_BOUND delta^3``, and the bound read
+        again; at least ``jacobian_min`` there, the stop is met (event ``tip-straighten``, None
+        returned). r3 (fix5 leg 1 at aa48432, step 7339): the first rebuild after the repair of its
+        folded tip meshed the surface's edge beside the new end, where it bends by 2e-6 within a
+        chord of 4.4e-6, with its midside node a quarter of the chord off, the element's bound
+        0.054 against 0.2. Otherwise the stop is returned (with ``tip_straighten``, the reading,
+        where it was tried)."""
+        from .axisrepair import AXIS_REPAIR_BOUND
+
+        jet = self._jetcore()
+        if not stop.get("on_interface") or jet is None or jet.far_kinks != "recentre" \
+                or self._ring() is not None or not hasattr(self.pb, "straighten_interface_edges"):
+            return stop
+        x = np.array([float(stop["r"]), float(stop["z"])])
+        near = None
+        for c in self.pb.interface_segments():
+            P = np.column_stack([c["r"], c["z"]])
+            if len(P) < 3:
+                continue
+            d = np.hypot(P[:, 0] - x[0], P[:, 1] - x[1])
+            k = int(np.argmin(d))
+            if near is None or d[k] < near[0]:
+                h = float(np.max(np.hypot(*(P[min(k + 1, len(P) - 1)] - P[max(k - 1, 0)]).T)))
+                near = (float(d[k]), bool(c["open"]), h)
+        if near is None or near[1]:  # nearest the open chain: the upward jet's, not a nuisance
+            return stop
+        radius = TIP_STRAIGHTEN_REACH * max(near[0], near[2])
+        limit = AXIS_REPAIR_BOUND * self.reconnect.delta ** 3
+        read = self.pb.straighten_interface_edges(x[0], x[1], radius, apply=False)
+        reading = {"radius": radius, "edges": read["edges"], "dV": read["dV"],
+                   "dV_abs": read["dV_abs"], "bound_dV": limit}
+        if not read["edges"] or read["dV_abs"] > limit:
+            return dict(stop, tip_straighten=reading)
+        self.pb.straighten_interface_edges(x[0], x[1], radius)
+        self._post_cut_cache = None
+        j = self.pb.curved_jacobian_bound(self.reconnect.jacobian_min)
+        reading.update(jacobian_bound_after=j["min"] if j is not None else None)
+        if j is not None and j["min"] < self.reconnect.jacobian_min:
+            return dict(stop, tip_straighten=reading)
+        self._tip_straightens.append({"step": self.state.step, **reading})
+        here = {"time": self._t(), "r_j": math.nan, "z_axis": math.nan, "ell": math.nan,
+                "axis_curvature": math.nan}  # read inside the stops: no measurement of its own
+        self._event("tip-straighten", here, jacobian_bound=stop["jacobian_bound"],
+                    element_r=stop["r"], element_z=stop["z"], **reading)
+        return None
 
     def _h_near_after_cut(self, r, z, near_r: float, focus_r: float, h_near: float) -> float:
         """The spacing near the collapse after a cut, where the focus sets it, on both chains.
@@ -4093,6 +4152,33 @@ class CollapseDriver:
         L = float(stop.get("L", math.nan))
         return math.isfinite(L) and L > self.s.refine_ratio * self._h_floor()
 
+    def _ring_kink_reading(self, stop: dict | None) -> dict | None:
+        """The ring's ``self-contact-approach`` (trigger ``fold-gap``) of contact ``kink`` on its gas
+        side (or of no side read) read as the guard's reading at the element between the fold's
+        pair (``index`` the node midway along the shorter way round, ``L`` the fold's arc, trigger
+        ``fold-kink``, the stop kept as ``kink``), so that the fill at the floor meets the wedge of
+        gas closing across a kink as it meets the guard's stops at the floor (r1h, h3 leg 1 at
+        aa48432, step 7254: the wedge of gas at the rim of the radial sheet the downward head
+        drives out along the plug, r 4.28e-4, its pair 2769/2771 two nodes apart, the gap 1.3e-7
+        over an arc of 9.7e-7 between elements of 1.4e-6, which the fill of a groove, made for a
+        fold across a resolved arc, does not take). Any other stop is returned as it is."""
+        if stop is None or stop.get("reason") != "self-contact-approach" \
+                or stop.get("trigger") != "fold-gap" or stop.get("chain") != "ring" \
+                or stop.get("contact") != "kink" or stop.get("side", "gas") != "gas" \
+                or stop.get("fold_pair") is None:
+            return stop
+        loops = self._post_cut_state().get("loops") or []
+        if len(loops) != 1:
+            return stop
+        n = len(loops[0]["r"])
+        a, b = (int(x) % n for x in stop["fold_pair"])
+        d = (b - a) % n
+        apex = (a + d // 2) % n if d <= n - d else (b + (n - d) // 2) % n
+        return {"reason": "interface-unresolved", "trigger": "fold-kink", "chain": "ring",
+                "index": int(apex), "L": float(stop.get("fold_arc", math.nan)),
+                "r": float(loops[0]["r"][apex]), "z": float(loops[0]["z"][apex]),
+                "kink": {k: v for k, v in stop.items() if k != "reason"}}
+
     def _floor_fill_request(self, stop: dict | None) -> dict | None:
         """The fill at the floor of a wedge of gas of the ring (decision 22; ``groovesurgery``'s
         fill at the floor) for a stop the refine does not meet: the guard's ``interface-unresolved``
@@ -4105,7 +4191,9 @@ class CollapseDriver:
         element lengths and ``ring.FLOOR_FOLD_RATIO`` times its gap below the arc between them), or,
         where no wedge is, a corner of gas open up to about a right angle (the same reading with
         ``ring.FLOOR_CORNER_RATIO``; ``corner`` in the wedge's record), as at the root of the radial
-        sheet the downward jet's head drives out along the plug.
+        sheet the downward jet's head drives out along the plug; a closing fold of the ring's gas
+        across a kink at the scale of the floor is read as the guard's reading at the element
+        between its pair (:meth:`_ring_kink_reading`, trigger ``fold-kink``).
         Returns the request (``ring-fold``, ``RF``, the fill as its handler, the pair, its gap and
         limit, ``contact`` ``floor``, and ``floor``: the guard's reading, the wedge and the fold
         limits the fill reads its trigger again with) for :meth:`_meet_event`; None otherwise (a
@@ -4113,11 +4201,11 @@ class CollapseDriver:
         from .events import GROOVE_HANDLER, _request
         from .ring import FLOOR_CORNER_RATIO, FLOOR_FOLD_RATIO, floor_wedge
 
-        stop = self._ring_jacobian_reading(stop)
+        stop = self._ring_kink_reading(self._ring_jacobian_reading(stop))
         if stop is None or stop.get("reason") != "interface-unresolved":
             return None
         if stop.get("chain") != "ring" or stop.get("trigger") not in (
-                "edge-turn", "edge-midside", "feature-below-floor", "curved-jacobian"):
+                "edge-turn", "edge-midside", "feature-below-floor", "curved-jacobian", "fold-kink"):
             return None
         ring, jet = self._ring(), self._jetcore()
         if ring is None or ring.get("removed") is not None or jet is None \
@@ -4508,7 +4596,9 @@ class CollapseDriver:
                           "inverted_element_remeshes": self._inversion_remeshes,
                           "axis_midside_repairs": getattr(pb, "axis_repairs_total", 0),
                           **({"axis_fold_repairs": len(self._axis_repairs)}
-                             if self._axis_repairs else {})}
+                             if self._axis_repairs else {}),
+                          **({"tip_straightens": len(self._tip_straightens)}
+                             if self._tip_straightens else {})}
             if self.events is not None:  # only with the block: other results keep their keys
                 out["events"] = self._events_summary(stop)
                 out["window_end"] = ({"reason": stop["reason"], **self._taus(m["time"])}

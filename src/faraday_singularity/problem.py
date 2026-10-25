@@ -657,6 +657,62 @@ class FaradayProblem(Problem):
             self.reapply_boundary_conditions()
         return out
 
+    def straighten_interface_edges(self, r: float, z: float, radius: float, *,
+                                   offset_min: float = AXIS_MIDSIDE_LIMIT,
+                                   apply: bool = True) -> dict:
+        """Put on the middle of its chord the midside node of every quadratic element of the free
+        surface whose midpoint lies within ``radius`` of ``(r, z)`` and whose midside node lies
+        more than ``offset_min`` chords off that middle, at every time level the time stepper reads
+        (position and velocity, as :meth:`repair_axis_midsides` does on the axis); with ``apply``
+        false the edges are only read. Each edge's volume of revolution between its quadratic curve
+        and its chord, ``2 pi r_m (2/3) |chord| d`` (``d`` the signed offset of the midside node
+        from the chord, ``r_m`` the radius of its middle), is summed with its sign (``dV``) and in
+        magnitude (``dV_abs``). Returns the edges straightened (``edges``: the midside node's
+        place, its offset in chords, its volume) and those sums. A mesh with no such edge within
+        ``radius`` is unchanged."""
+        bulk = self.get_mesh("liquid")
+        fields = bulk.get_nodal_field_indices()
+        velocity = [fields[k] for k in ("velocity_x", "velocity_y") if k in fields]
+        n_levels = self.timestepper.nprev_values() + 1
+        out = {"edges": [], "dV": 0.0, "dV_abs": 0.0, "read": 0}
+        for e in self.get_mesh("liquid/interface").elements():
+            if e.nnode() != 3:
+                continue
+            a, mid, b = (e.node_pt(k) for k in range(3))
+            ca = np.array([a.x(0), a.x(1)])
+            cb = np.array([b.x(0), b.x(1)])
+            cm = np.array([mid.x(0), mid.x(1)])
+            if math.hypot(*(0.5 * (ca + cb) - np.array([r, z]))) > radius:
+                continue
+            out["read"] += 1
+            chord = cb - ca
+            length = float(math.hypot(*chord))
+            if length <= 0.0:
+                continue
+            offset = float(math.hypot(*(cm - 0.5 * (ca + cb)))) / length
+            if offset <= offset_min:
+                continue
+            normal = np.array([-chord[1], chord[0]]) / length
+            d = float(np.dot(cm - 0.5 * (ca + cb), normal))
+            dV = 2.0 * math.pi * float(0.5 * (ca[0] + cb[0])) * (2.0 / 3.0) * length * d
+            out["edges"].append({"r": float(cm[0]), "z": float(cm[1]), "offset": offset,
+                                 "chord": length, "dV": dV})
+            out["dV"] += dV
+            out["dV_abs"] += abs(dV)
+            if not apply:
+                continue
+            levels = range(min(n_levels, mid.ntstorage()))
+            for t in levels:
+                for i in range(2):
+                    mid.set_x_at_t(t, i, 0.5 * (a.x_at_t(t, i) + b.x_at_t(t, i)))
+                for k in velocity:
+                    mid.set_value_at_t(t, k, 0.5 * (a.value_at_t(t, k) + b.value_at_t(t, k)))
+        if apply and out["edges"]:
+            self.reapply_boundary_conditions()
+            self.invalidate_cached_mesh_data()
+            self._jacobian_cache = None
+        return out
+
     # --- at least min_newton_iterations Newton iterations per solve ------------------------------
 
     def actions_before_newton_solve(self):

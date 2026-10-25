@@ -207,3 +207,54 @@ def test_the_repair_made_rolled_back_and_not_repeated(tmp_path, monkeypatch):
     assert fake2.pb.restored == ["snap"] and fake2._axis_repairs == [] and fake2.logged == []
     assert stop["record"] == "events/axis_repair_001.json" and m == {"m": "after"}
     assert math.isfinite(stop["tau"])
+
+
+def test_a_curved_element_beside_the_bubbles_tip_is_put_straight_and_nothing_else_is():
+    """``CollapseDriver._tip_straighten``: a fresh mesh's ``curved-jacobian`` at an element whose
+    nearest surface is the bubble's chain, before the piercing, with jetcore's recentred far
+    kinks: the surface's curved edges about it put straight (``straighten_interface_edges``) when
+    the volume between their curves and chords is within ``AXIS_REPAIR_BOUND delta^3`` and the
+    bound read again is at least ``jacobian_min`` (event ``tip-straighten``, no stop); the stop
+    stays with the reading otherwise, and as it is near the open chain, in the ring stage, or
+    without the recentred far kinks (r3, fix5 leg 1 at aa48432, step 7339: 0.054 against 0.2)."""
+    P = tip(fold=False)
+    bad = {"reason": "interface-unresolved", "trigger": "curved-jacobian",
+           "jacobian_bound": 0.0537, "limit": 0.2, "r": 8.04e-6, "z": 4.6770412,
+           "on_interface": True, "elements_below": 1, "fresh": True}
+
+    def fake(*, dV=2.05e-16, after=0.805, ring=None, jet="recentre"):
+        calls = []
+        pb = Pb(P)
+        pb.straighten_interface_edges = lambda r, z, radius, apply=True: (
+            calls.append((r, z, radius, apply)) or
+            {"edges": [{"r": 8.4e-6, "z": 4.6770414, "offset": 0.232, "chord": 4.86e-6,
+                        "dV": dV}], "dV": dV, "dV_abs": abs(dV), "read": 3})
+        pb.curved_jacobian_bound = lambda limit: {"min": after}
+        f = SimpleNamespace(pb=pb, reconnect=SimpleNamespace(delta=DELTA, jacobian_min=0.2),
+                            state=SimpleNamespace(step=7339), _tip_straightens=[], logged=[],
+                            _post_cut_cache="x", _ring=lambda: ring, _t=lambda: 10.95,
+                            _jetcore=lambda: (SimpleNamespace(far_kinks=jet) if jet else None))
+        f._event = lambda name, m, **kw: f.logged.append((name, kw))
+        return f, calls
+
+    f, calls = fake()
+    assert CollapseDriver._tip_straighten(f, dict(bad)) is None
+    assert [c[3] for c in calls] == [False, True] and calls[0][:2] == (8.04e-6, 4.6770412)
+    assert f._tip_straightens[0]["jacobian_bound_after"] == 0.805 and f._post_cut_cache is None
+    assert f.logged[0][0] == "tip-straighten" and f.logged[0][1]["bound_dV"] == pytest.approx(
+        ar.AXIS_REPAIR_BOUND * DELTA**3)
+    # a volume beyond the bound: read only, the stop with the reading
+    f, calls = fake(dV=-1e-14)
+    out = CollapseDriver._tip_straighten(f, dict(bad))
+    assert out["reason"] == "interface-unresolved" and out["tip_straighten"]["dV_abs"] == 1e-14
+    assert [c[3] for c in calls] == [False] and not f._tip_straightens
+    # put straight, but the bound still below: the stop with the reading
+    f, calls = fake(after=0.1)
+    out = CollapseDriver._tip_straighten(f, dict(bad))
+    assert out["tip_straighten"]["jacobian_bound_after"] == 0.1 and not f.logged
+    # near the open chain, in the ring stage, without the recentred kinks, off the surface: as it is
+    for kw, stop in (({}, dict(bad, r=5e-4, z=4.7)), ({"ring": {"removed": None}}, dict(bad)),
+                     ({"jet": "grow"}, dict(bad)), ({"jet": None}, dict(bad)),
+                     ({}, dict(bad, on_interface=False))):
+        f, calls = fake(**kw)
+        assert CollapseDriver._tip_straighten(f, stop) == stop and not calls, (kw, stop)

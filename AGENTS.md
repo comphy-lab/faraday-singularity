@@ -506,7 +506,13 @@ add a second top-level `cases/` tree.
   copies the original template's (`test_restore_template_identity.py`); after a cut each Newton
   solve's tolerance is `max(newton_tolerance, newton_floor/dt)` with dt the sub-step it makes
   (`FaradayProblem.newton_floor_rule`, set by `CollapseDriver._post_cut_solve`), not the driver's
-  step alone (`test_newton_floor_identity.py`); a rebuilt mesh's
+  step alone (`test_newton_floor_identity.py`); a closing fold of the ring's gas across a kink at
+  the floor's scale is read as the guard's reading at its apex and filled at the floor
+  (`CollapseDriver._ring_kink_reading`, trigger `fold-kink`), and a fresh mesh's curved element
+  beside the bubble's chain before the piercing has the surface's curved edges about it put
+  straight within `AXIS_REPAIR_BOUND delta^3` (`CollapseDriver._tip_straighten`,
+  `FaradayProblem.straighten_interface_edges`, event `tip-straighten`;
+  `test_kink_tip_identity.py`); a rebuilt mesh's
   `curved-jacobian` at the ring is read as the
   ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
   the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
