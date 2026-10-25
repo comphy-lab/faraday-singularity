@@ -499,7 +499,11 @@ add a second top-level `cases/` tree.
   out along the plug) is filled in the same way (`corner` in its wedge); a failed step in the ring
   stage is retried once after the ring's sharpest element above the floor is rebuilt as the ring
   refine rebuilds (`CollapseDriver._failed_step_retry`, event `step-retry`;
-  `test_landing_identity.py` pins runs meeting neither against 6eff16c); a rebuilt mesh's
+  `test_landing_identity.py` pins runs meeting neither against 6eff16c); an in-memory restore
+  across a rebuild (`FaradayProblem._restore_state`: the rollback of a failed step or of an axis
+  repair) puts the template's project attributes (`TEMPLATE_KEYS`: focus, cut and ring sizing)
+  back on the sibling template pyoomph reloads the mesh from, which in a restarted run otherwise
+  copies the original template's (`test_restore_template_identity.py`); a rebuilt mesh's
   `curved-jacobian` at the ring is read as the
   ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
   the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
