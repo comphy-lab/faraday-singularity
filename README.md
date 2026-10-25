@@ -431,9 +431,10 @@ size the cut keeps there from the landing until the first rebuild after the cut.
 With the block, the stops of a state after the cut come in three ranks (`events.post_cut_events`). A
 state that is not valid stops the run: the chains not two, a spline through the nodes that contacts
 itself, on a freshly built mesh a tracked liquid neck narrower than `liquid.resolution` (4) element
-lengths at it (`liquid-neck-unresolved`), the guard of the interface and the check of the curved
-elements; on a mesh a step has run on, the guard comes last, after the events, as in the cut's own
-stops (an event's handler rebuilds the mesh). The bubble emptying (below `bubble_stop` of its volume
+lengths at it (`liquid-neck-unresolved`; with `pinch.far_head` a far head's is cut instead,
+below), the guard of the interface and the check of the curved elements; on a mesh a step has run
+on, the guard comes last, after the events, as in the cut's own stops (an event's handler rebuilds
+the mesh). The bubble emptying (below `bubble_stop` of its volume
 at the cut) ends the window (`bubble-vanishing`, with `window_end`). Every change of topology is
 then an event, in this order: the bubble's two tips within `delta` of each other (within
 `max(ring.gap delta, 3 h_min)` with `ring.enabled`, below), the downward jet piercing the bubble
@@ -776,6 +777,10 @@ core (the cavity's wall or the stem beside the base) is the cut of that head at 
 the head's nodes but its neck off the core, and the cut must leave the jet's base as it was: its
 radius, speed and flux read before and after on the fresh mesh within a relative 1e-3 (its height
 within that times its radius), or the cut is the hard closure `F_base` and the run stops resumably.
+A tracked neck that a freshly built mesh does not resolve (`liquid-neck-unresolved`) whose head is a
+far head (the downward jet's, any head off the upward jet's core) is cut at that neck in the same
+way, closing or not, with the same check of the base; on a head of the core, or one not single, the
+stop stays.
 At their defaults neither part changes a value; whether a given set of keys leaves the upward jet
 unchanged is a question for replays against runs without the parts.
 

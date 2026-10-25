@@ -536,7 +536,15 @@ add a second top-level `cases/` tree.
   record): `r_j`, `V_j`, `Q_j` within `driver.HEAD_FOLD_BASE_TOL` (1e-3) relative and `z_b` within
   that times `r_j`, or the hard closure `F_base` (`event-unclosed`); `test_head_fold.py`,
   `test_head_fold_fem.py`, and `test_head_fold_identity.py` (runs meeting none of it are
-  3e00e92's).
+  3e00e92's). A tracked neck that a freshly built mesh does not resolve
+  (`liquid-neck-unresolved`) whose head is a far head (no node of it but the neck a core node; on
+  the bubble every node) is the same cut of that head at that neck, closing or not
+  (`events.unresolved_neck_request`, `CollapseDriver._unresolved_neck_request` in the loop's
+  dispatch beside the fill at the floor; `unresolved` and `far_event` in the request, an event
+  `far-head` with `far_kind` `liquid-neck-unresolved`), with the same check of the base; a head of
+  the core, or a neck without a single head, stays the stop; `test_unresolved_neck.py`,
+  `test_unresolved_neck_fem.py`, and `test_unresolved_neck_identity.py` (runs meeting none of it
+  are 7efe4df's).
   A key whose behaviour the driver does not make is refused (`events.PENDING_KEYS`).
   `testCases/test_jetcore.py` (stand-ins), `test_jetcore_fem.py` (the far floor and kinks on the
   synthetic headed state, the pre-pierce refinement on the pierced state, the far-head cut) and

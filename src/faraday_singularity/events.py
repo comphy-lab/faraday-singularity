@@ -170,7 +170,9 @@ class LiquidEventSettings:
     point, lies on one side of the neck's height and is at most ``max_head_volume`` times the cube
     of its largest radius ``s``. The neck lands at the first checked state with ``r_n <= eps_d s``.
     A tracked neck narrower than ``resolution`` times the element length at it on a freshly built
-    mesh stops the run (``liquid-neck-unresolved``). A fold one of whose sides lies on the head of a
+    mesh stops the run (``liquid-neck-unresolved``), unless, with ``pinch.far_head``, its head is
+    a far head: the driver then cuts that head at this neck (:func:`unresolved_neck_request`). A
+    fold one of whose sides lies on the head of a
     tracked neck (the head's bulb coming up to the groove wall around it) lands that neck at once if
     ``r_n <= eps_max s``. With ``enabled`` false no neck is tracked: a liquid neck is met where the
     cut's own test of a second pinch-off finds it (below ``delta``), as an event without a handler
@@ -978,6 +980,51 @@ def far_head_request(request: dict, necks: list[dict], open_core=None) -> dict |
         if fold is not None else {}
     return _request("far-head", "F-head", **_neck_fields(x), **_pinch_field(x),
                     far_event={k: v for k, v in request.items() if k != "reason"}, **extra)
+
+
+# the stop of a freshly built mesh on which a tracked liquid neck is narrower than liquid.resolution
+# element lengths at it (post_cut_events, ring.ring_stage_events)
+LIQUID_NECK_UNRESOLVED = "liquid-neck-unresolved"
+
+
+def unresolved_neck_request(stop: dict | None, necks: list[dict], open_core=None) -> dict | None:
+    """With ``pinch.far_head``: the request of the cut of the head of a tracked neck that a freshly
+    built mesh does not resolve (``stop``, :data:`LIQUID_NECK_UNRESOLVED`, of
+    :func:`post_cut_events` or ``ring.ring_stage_events``), where that head is a far head (decision
+    22: a nuisance whose cut has hard volume and momentum checks), or None, the stop staying.
+
+    The stop's neck (its ``chain`` and ``index``) is looked up among ``necks`` (:func:`liquid_necks`
+    of the same state); it must have a single head (status ``head``, a curled head among them), and
+    on the open chain neither that head nor any of its nodes but the neck may be a core node
+    (``open_core``, ``jetcore.core_mask``'s mask; every node of another chain is far, the open chain
+    without a mask none). The cut is of that head at this neck, its root, whether or not the neck
+    closes (kind ``far-head``, class ``F-head``, handler ``liquid-cut``, its trigger the neck with
+    its pinch readings where it has them); ``far_event`` holds the stop, kind
+    :data:`LIQUID_NECK_UNRESOLVED`, and ``unresolved`` its reading (``r_n``, ``h_loc``, ``limit``,
+    ``resolution``), on which the driver checks the upward jet's base after the cut
+    (``driver.CollapseDriver._head_fold_check``, the hard closure ``F_base``)."""
+    if not isinstance(stop, dict) or stop.get("reason") != LIQUID_NECK_UNRESOLVED:
+        return None
+    chain, index = stop.get("chain"), stop.get("index")
+    if chain is None or index is None:
+        return None
+    x = next((x for x in necks if x["chain"] == chain and int(x["index"]) == int(index)), None)
+    if x is None or x.get("status") != "head" or x.get("head") is None:
+        return None
+    if chain == "open":  # the head off the core, its neck at the core's edge at most
+        if open_core is None:
+            return None
+        mask = np.asarray(open_core, dtype=bool)
+        lo, hi = (int(k) for k in x["head"])
+        on = mask[max(lo, 0):min(hi, len(mask) - 1) + 1].copy()
+        if lo <= int(x["index"]) <= hi and int(x["index"]) < len(mask):
+            on[int(x["index"]) - max(lo, 0)] = False
+        if on.any():
+            return None
+    far = {"kind": LIQUID_NECK_UNRESOLVED, **{k: v for k, v in stop.items() if k != "reason"}}
+    unresolved = {k: stop.get(k) for k in ("r_n", "h_loc", "limit", "resolution")}
+    return _request("far-head", "F-head", **_neck_fields(x), **_pinch_field(x), far_event=far,
+                    unresolved=unresolved)
 
 
 # --- the events after the cut, as the stops find them ---------------------------------------------

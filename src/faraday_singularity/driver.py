@@ -367,7 +367,12 @@ cavity's wall or the stem beside the base; ``head_fold`` in the request) is the 
 too, its nodes but the neck off the core, and the cut is checked against the jet's base: read
 before and after it (:meth:`CollapseDriver._head_fold_check`, ``base_guard`` in the record), a base
 whose ``r_j``, ``V_j`` or ``Q_j`` moves by more than ``HEAD_FOLD_BASE_TOL`` relative, or ``z_b`` by
-more than that times ``r_j``, is the hard closure ``F_base`` (``event-unclosed``). With
+more than that times ``r_j``, is the hard closure ``F_base`` (``event-unclosed``). A tracked
+liquid neck that a freshly built mesh does not resolve (the stop ``liquid-neck-unresolved``) whose
+head is a far head (the downward jet's, any head off the upward jet's core) is met by the same cut
+of that head at this neck, closing or not, and checked against the jet's base in the same way
+(``events.unresolved_neck_request``, :meth:`CollapseDriver._unresolved_neck_request`,
+``unresolved`` in the request); on a head of the core, or one not single, the stop stays. With
 ``jetcore.box_gate`` every ordinary rebuild may change
 the liquid volume and axial momentum in the box of radius ``liquid.box_radius delta`` about the
 core's base by at most ``box_gate_sigmas`` times ``liquid.sigma_V`` and ``liquid.sigma_Pz``
@@ -3172,6 +3177,11 @@ class CollapseDriver:
                         far_class=request.get("class"), chain=far.get("chain"),
                         r_n=far.get("r_n"), s=far.get("s"), z_n=far.get("z_n"))
             request = far
+        elif request.get("unresolved") is not None:  # an unresolved neck on a far head
+            far_event = request.get("far_event") or {}
+            self._event("far-head", m, far_kind=far_event.get("kind"), far_class=None,
+                        chain=request.get("chain"), r_n=request.get("r_n"), s=request.get("s"),
+                        z_n=request.get("z_n"))
         return self._liquid_cut_event(m, request)
 
     def _liquid_cut_event(self, m: dict, request: dict) -> tuple[dict, dict | None]:
@@ -3193,8 +3203,8 @@ class CollapseDriver:
         dt_prev = st.dt_prev if st.dt_prev else float(self._cut_record()["settings"]["dt0"])
         self._event_before, self._event_after = (m, tip, verdict), None
         try:
-            check = {"base_check": self._head_fold_check(m)} if request.get("head_fold") \
-                else {}
+            check = {"base_check": self._head_fold_check(m)} \
+                if request.get("head_fold") or request.get("unresolved") is not None else {}
             made = liquid_cut(self.pb, self.events, r, self.outdir, request, k=k,
                               dt_prev=dt_prev, elements_per_scale=eps, h_floor=self._h_floor(),
                               driver=self, on_made=self._on_event_made, **check)
@@ -3244,6 +3254,28 @@ class CollapseDriver:
         core = self._post_cut_state().get("core")
         mask = None if core is None or core["whole"] else core["mask"]
         return far_head_request(request, liquid_necks(named, self.events.liquid), mask)
+
+    def _unresolved_neck_request(self, stop: dict | None) -> dict | None:
+        """With ``pinch.far_head`` (and ``jetcore``): for the stop ``liquid-neck-unresolved`` of a
+        freshly built mesh whose neck has a far head, the request of the cut of that head at this
+        neck (``events.unresolved_neck_request``, from the tracked necks of the state with their
+        pinch readings and the core of its open chain), which :meth:`_meet_event` makes with the
+        check of the upward jet's base; None otherwise, the stop staying (decision 22: the far
+        heads are nuisances, the cut's volume and momentum hard checks)."""
+        from .events import LIQUID_NECK_UNRESOLVED, closing_readings, unresolved_neck_request
+
+        if stop is None or stop.get("reason") != LIQUID_NECK_UNRESOLVED:
+            return None
+        if self.events is None or not self.events.pinch.far_head or self._jetcore() is None:
+            return None
+        named = self._named_post_cut_chains()
+        if not named:
+            return None
+        necks = liquid_necks(named, self.events.liquid)
+        closing_readings(necks, self.events, self.reconnect.delta, self._pinch_context())
+        core = self._post_cut_state().get("core")
+        mask = None if core is None or core["whole"] else core["mask"]
+        return unresolved_neck_request(stop, necks, mask)
 
     def _meet_ring(self, m: dict, request: dict) -> tuple[dict, dict | None]:
         """Meet a request of the ring's handlers (``ring``: the piercing, class ``W1``;
@@ -4133,6 +4165,7 @@ class CollapseDriver:
             if self._ring_refine_due(found):  # a fresh mesh of the ring short of its feature
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found  # a wedge of gas at the floor
+            found = self._unresolved_neck_request(found) or found  # on a far head
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
                 m, found = self._meet_event(m, found)
                 if found is None:  # made: every stop again on the fresh mesh
@@ -4270,6 +4303,7 @@ class CollapseDriver:
             if self._ring_refine_due(found):  # after a rebuild for distortion
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found
+            found = self._unresolved_neck_request(found) or found
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
                 m, found = self._meet_event(m, found)
                 if found is None:  # made: its rebuild stands for the one a stop cancelled
@@ -4291,6 +4325,7 @@ class CollapseDriver:
             if self._ring_refine_due(found):  # after the rule's rebuild
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found
+            found = self._unresolved_neck_request(found) or found
             if found is not None and found["reason"] == EVENT_REQUEST:  # the events block only
                 m, found = self._meet_event(m, found)
                 if found is None:
