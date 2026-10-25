@@ -76,8 +76,9 @@ def _due_driver(*, ring=True, removed=False, jet="recentre", h_floor=H_FLOOR):
         reconnect=recon, s=SimpleNamespace(refine_ratio=1.5),
         _ring=lambda: ({"removed": 3 if removed else None} if ring else None),
         _jetcore=lambda: (SimpleNamespace(far_kinks=jet) if jet is not None else None),
-        _h_floor=lambda: h_floor)
+        _h_floor=lambda: h_floor, _post_cut_state=lambda: {"edges": {}})
     fake._ring_jacobian_reading = lambda st: CollapseDriver._ring_jacobian_reading(fake, st)
+    fake._refined_chain = lambda: CollapseDriver._refined_chain(fake)
     return fake
 
 

@@ -112,6 +112,7 @@ def _fake_driver(L, *, enabled=True, jet="recentre", ring=True, removed=False, h
         _post_cut_state=lambda: {"loops": [loop] * loops, "edges": edges},
         _t=lambda: 10.95, _taus=lambda t: {"tau": 2.5e-5, "tau_p": 2.3e-5})
     fake._ring_jacobian_reading = lambda st: CollapseDriver._ring_jacobian_reading(fake, st)
+    fake._refined_chain = lambda: CollapseDriver._refined_chain(fake)
     return fake
 
 

@@ -180,7 +180,13 @@ add a second top-level `cases/` tree.
   (`reconnect.adjacent_shoulders`), so a stationary pair on a nearly vertical wall is no
   `gas-neck`, while one below `neck_elements h_min` is a `gas-neck` whatever either depth, and the
   request records both depths; no Newton failure ends the run cleanly, and the profiles of the
-  state the failing step started from are written first (`profile_<step>_lastgood{,_bubble}.txt`),
+  state the failing step started from are written first (`profile_<step>_lastgood{,_bubble}.txt`);
+  with pyoomph's net for inverted elements armed, a failed step is rolled back to the state it
+  started from (the net's snapshot before it, kept by `FaradayProblem._snapshot_state` within
+  `CollapseDriver._post_cut_solve`) and ends the run as the resumable stop `step-failed` with that
+  state dumped (`CollapseDriver._failed_step_stop`, event `step-failed`; `test_step_failure.py`,
+  `test_step_failure_fem.py`, `test_step_failure_identity.py`); a loop of the ring whose spacing
+  jumps beyond `ring.LOOP_STEP_RATIO` is in order when it is simple (`ring.validate_loop_order`),
   as is a profile at every step while an element turns beyond `edge_turn_refine`; rotating dumps
   follow at least each time `tau` doubles and the end state is dumped; and every output carries `tau = t - t_cut` and `tau_p = t - t_p` (`collapse.txt`,
   `chains.txt` with `R_apex_<tip>`, `groove_gap_<tip>`, `groove_angle_<tip>`, `edge_turn_<chain>`

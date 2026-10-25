@@ -314,13 +314,23 @@ def loop_record(L, u=None) -> dict:
     return out
 
 
+def _simple_loop(P) -> bool:
+    """Whether the closed polyline through ``P`` is simple (it crosses itself nowhere)."""
+    from shapely.geometry import LinearRing
+
+    return bool(LinearRing(P).is_simple)
+
+
 def validate_loop_order(L) -> None:
     """Raise ``RuntimeError`` unless the loop is geometrically ordered: no chord, the closing one
     included, longer than ``LOOP_STEP_RATIO`` times the shorter of the two chords beside it (a
     misordered walk jumps across the loop and back, each jump beside a chord of the walk's own
     spacing; a graded mesh changes its spacing by a small factor per node, so that the test, unlike
     pyoomph's against the median chord of its periodic chart, holds on a ring meshed finely near
-    the axis and coarsely far from it), and its start not repeated at its end."""
+    the axis and coarsely far from it) unless the loop is simple (such a jump across the loop and
+    back crosses it; a rebuild's spacing may jump by more than that factor beside a region refined
+    to the floor, as at the corner of r1h's fill at step 7228, 3.6e-6 beside 6.2e-7, a loop in
+    order), and its start not repeated at its end."""
     P = np.asarray(L, dtype=float).reshape(-1, 2)
     if len(P) < 3:
         raise RuntimeError(f"a loop needs at least three nodes, not {len(P)}")
@@ -330,7 +340,7 @@ def validate_loop_order(L) -> None:
     beside = np.minimum(np.roll(d, 1), np.roll(d, -1))
     ratio = np.where(beside > 0.0, d / np.maximum(beside, 1e-300), np.inf)
     worst = int(np.argmax(ratio))
-    if ratio[worst] > LOOP_STEP_RATIO:
+    if ratio[worst] > LOOP_STEP_RATIO and not _simple_loop(P):
         a, b = P[worst], P[(worst + 1) % len(P)]
         raise RuntimeError(f"the loop is not geometrically ordered: the chord from ({a[0]:.9g}, "
                            f"{a[1]:.9g}) to ({b[0]:.9g}, {b[1]:.9g}) is {d[worst]:.6g}, more "

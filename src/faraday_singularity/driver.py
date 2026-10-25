@@ -246,8 +246,11 @@ post-cut one, on both chains (below). In addition:
   and of the bases of their jets, and grows by at most the cut's ``dt_growth``;
 * no Newton failure ends the run cleanly: after a cut it is a failed run, whatever the state, and
   the profiles of the state the failing step started from are written first
-  (``profile_<step>_lastgood.txt`` and its ``_bubble`` beside it); while an element of either
-  chain turns by more than ``edge_turn_refine`` degrees a profile is written at every step;
+  (``profile_<step>_lastgood.txt`` and its ``_bubble`` beside it), unless pyoomph's net for an
+  inverted element took its snapshot before the step: then the problem is rolled back to that
+  state and the run ends on it, the resumable stop ``step-failed`` with its end state
+  (:meth:`CollapseDriver._failed_step_stop`); while an element of either chain turns by more than
+  ``edge_turn_refine`` degrees a profile is written at every step;
 * ``collapse.txt`` gets the columns ``tau`` and ``tau_p = t - t_p`` (``t_p`` the pinch time the cut
   recorded, NaN without one), ``chains.txt`` a row per step with both chains
   (``reconnect.post_cut_record``: the three tips, bridge, bubble, necks, budgets) and the step
@@ -879,6 +882,7 @@ class CollapseDriver:
         # after a cut: the rebuilds pyoomph made inside a step for an element turned inside out
         # (RemeshWhen's on_inverted_element, armed by run())
         self._inversion_remeshes = 0
+        self._step_snapshot = None  # after a cut: the state the last step started from
         # the remesh count at the end of the last accepted step: a mesh built since is fresh (the
         # guard of the interface and the check of its curved elements, after a cut)
         self._stepped_rc: int | None = None
@@ -3872,6 +3876,18 @@ class CollapseDriver:
             return m, self._stop(m)
         return m, None
 
+    def _refined_chain(self) -> str | None:
+        """The chain whose guard stops the ring refine meets: the ring, in the ring stage before its
+        removal, with jetcore's recentred far kinks; None otherwise. (The bubble before the
+        piercing is not met so: r3's stop at e923ead, step 7338, is the downward jet's tip folded
+        along the axis, a node of it at r < 0, which a rebuild at the size its turn asks for exposes
+        as an axis contact, not a feature it resolves.)"""
+        jet = self._jetcore()
+        if jet is None or jet.far_kinks != "recentre":
+            return None
+        ring = self._ring()
+        return "ring" if ring is not None and ring.get("removed") is None else None
+
     def _ring_jacobian_reading(self, stop: dict | None) -> dict | None:
         """A rebuilt mesh's ``curved-jacobian`` stop at an element on the ring's loop read as the
         guard's reading of the ring's quadratic element there: in the ring stage before the ring's
@@ -3888,12 +3904,11 @@ class CollapseDriver:
                 or stop.get("trigger") != "curved-jacobian" or not stop.get("on_interface") \
                 or stop.get("chain") is not None:
             return stop
-        ring, jet = self._ring(), self._jetcore()
-        if ring is None or ring.get("removed") is not None or jet is None \
-                or jet.far_kinks != "recentre":
+        chain = self._refined_chain()
+        if chain is None:
             return stop
         edges = self._post_cut_state().get("edges") or {}
-        if "ring" not in edges:
+        if chain not in edges:
             return stop
         x = np.array([float(stop["r"]), float(stop["z"])])
 
@@ -3905,11 +3920,11 @@ class CollapseDriver:
             k = int(np.argmin(d))
             return (e, k), float(d[k])
 
-        (ring_e, k), d_ring = nearest("ring")
+        (ring_e, k), d_ring = nearest(chain)
         _, d_open = nearest("open")
         if not (d_ring <= float(ring_e["L"][k]) and d_ring <= d_open):
             return stop
-        return dict(stop, chain="ring", index=int(ring_e["index"][k]), L=float(ring_e["L"][k]),
+        return dict(stop, chain=chain, index=int(ring_e["index"][k]), L=float(ring_e["L"][k]),
                     turn=float(ring_e["turn"][k]), f=float(ring_e["f"][k]),
                     r=float(ring_e["mid"][k, 0]), z=float(ring_e["mid"][k, 1]),
                     element={"r": float(x[0]), "z": float(x[1])})
@@ -3922,7 +3937,7 @@ class CollapseDriver:
         ``RING_REFINE_TURN_MAX`` or ``edge-midside``, or a rebuilt mesh's ``curved-jacobian`` at an
         element on the ring (:meth:`_ring_jacobian_reading`), at an element longer than
         ``refine_ratio`` times the run's ``h_floor`` (the guard's own floor), in the ring stage
-        before the ring's removal with jetcore's recentred far kinks."""
+        before the ring's removal with jetcore's recentred far kinks (:meth:`_refined_chain`)."""
         stop = self._ring_jacobian_reading(stop)
         if stop is None or stop.get("reason") != "interface-unresolved":
             return False
@@ -3931,9 +3946,7 @@ class CollapseDriver:
         trigger = stop.get("trigger")
         if trigger not in ("edge-turn", "edge-midside", "curved-jacobian"):
             return False
-        ring, jet = self._ring(), self._jetcore()
-        if ring is None or ring.get("removed") is not None or jet is None \
-                or jet.far_kinks != "recentre":
+        if stop.get("chain") != self._refined_chain():
             return False
         if trigger in ("edge-turn", "curved-jacobian") and not float(stop.get("turn", math.inf)) \
                 <= RING_REFINE_TURN_MAX:
@@ -4025,8 +4038,10 @@ class CollapseDriver:
         return m, stop
 
     def _ring_refine_once(self, m: dict, stop: dict, attempt: int) -> tuple[dict, dict | None]:
-        """One rebuild of :meth:`_ring_refine`."""
+        """One rebuild of :meth:`_ring_refine`, on the chain of the stop (its regions
+        ``kink_<chain>_r<n>_far``)."""
         st, r = self.state, self.reconnect
+        chain = stop.get("chain", "ring")
         L, rr, zz = float(stop["L"]), float(stop["r"]), float(stop["z"])
         if stop["trigger"] in ("edge-turn", "curved-jacobian"):  # a curved element: by its turn
             factor = min(0.5, r.edge_turn_refine / max(float(stop["turn"]), 1e-12))
@@ -4036,7 +4051,7 @@ class CollapseDriver:
         # the ring's live far kinks whose disc holds the element (the region that yielded there):
         # their radius and the chord they met carried over; a refined one whose reach holds it is
         # refined further, else the refinement is a region of its own; no other region changes
-        live = {k: g for k, g in st.kinks.items() if g.get("far") and g.get("chain") == "ring"
+        live = {k: g for k, g in st.kinks.items() if g.get("far") and g.get("chain") == chain
                 and not g.get("released")}
         holding = [g for g in live.values()
                    if math.hypot(rr - float(g["r"]), zz - float(g["z"])) <= float(g["radius"])]
@@ -4044,14 +4059,14 @@ class CollapseDriver:
                     and math.hypot(rr - float(live[k]["r"]), zz - float(live[k]["z"]))
                     <= float(live[k]["radius"]) + 4.0 * L), None)
         if key is None:
-            n = [int(x.group(1)) for x in (re.fullmatch(r"ring_r(\d+)_far", k) for k in st.kinks)
-                 if x]
-            key = f"ring_r{max(n, default=0) + 1}_far"
+            n = [int(x.group(1)) for x in (re.fullmatch(chain + r"_r(\d+)_far", k)
+                                           for k in st.kinks) if x]
+            key = f"{chain}_r{max(n, default=0) + 1}_far"
         name = f"kink_{key}"
         old = st.kinks.get(key)
         radius = max([4.0 * L] + [float(g["radius"]) for g in holding])
         t = self._t()
-        st.kinks[key] = {"name": name, "chain": "ring", "r": rr, "z": zz, "radius": radius,
+        st.kinks[key] = {"name": name, "chain": chain, "r": rr, "z": zz, "radius": radius,
                          "target": min(target, float(old["target"])) if old is not None
                          and not old.get("released") else target,
                          "h_before": max([L] + [float(g["h_before"]) for g in holding]),
@@ -4087,7 +4102,7 @@ class CollapseDriver:
         self._snapshot(after, "ring-refine")
         if not base["ok"]:
             return after, {"reason": "interface-unresolved", "trigger": "ring-refine-base",
-                           "chain": "ring", "base": base, "reading": reading,
+                           "chain": chain, "base": base, "reading": reading,
                            "attempt": attempt, **self._taus(self._t())}
         return after, self._stop(after)
 
@@ -4181,6 +4196,10 @@ class CollapseDriver:
                 if stop is None:
                     if r is not None:  # the state the failing step started from, for forensics
                         self._write_lastgood(m, exc)
+                        failed = self._failed_step_stop(exc, dt, rebuilds)
+                        if failed is not None:  # rolled back: a resumable stop on that state
+                            m, stop = failed
+                            break
                     raise
                 stop["dt_attempted"] = dt
                 if defer and flagged:
@@ -4337,7 +4356,9 @@ class CollapseDriver:
         iterations per solve (``FaradayProblem.min_newton_iterations``), and the snapshot that
         pyoomph's net for an inverted element takes before the step (``_snapshot_state``, through
         ``save_state`` into memory) uncompressed: zlib took about 8% of a step, and the snapshot
-        is lossless either way. The dumps the driver writes keep their compression."""
+        is lossless either way. The dumps the driver writes keep their compression. The first
+        snapshot of the step is kept until the next (``_step_snapshot``): the state a failed step
+        is rolled back to (:meth:`_failed_step_stop`)."""
         pb, r = self.pb, self.reconnect
         if r is None or not hasattr(pb, "release_newton_tolerance"):  # a FaradayProblem only
             yield
@@ -4345,12 +4366,15 @@ class CollapseDriver:
         level = pb.states_compression_level
         pb.min_newton_iterations = r.newton_min_iterations
         pb.states_compression_level = None
+        pb._step_snapshots = []  # the state the step starts from, as the net snapshots it
         try:
             yield
         finally:
             pb.min_newton_iterations = 1
             pb.release_newton_tolerance()
             pb.states_compression_level = level
+            self._step_snapshot = pb._step_snapshots[0] if pb._step_snapshots else None
+            pb._step_snapshots = None
 
     # --- after a cut: the nets and the forensics ----------------------------------------------
 
@@ -4394,6 +4418,31 @@ class CollapseDriver:
             return float(turns.max()) if len(turns) else 0.0
         turns = [rd["turn"] for rd in pc["edges"].values() if math.isfinite(rd["turn"])]
         return max(turns, default=0.0)
+
+    def _failed_step_stop(self, exc: BaseException, dt: float,
+                          rebuilds: int) -> tuple[dict, dict] | None:
+        """After a cut, a step that failed (Newton at every step size oomph-lib tried, or
+        pyoomph's net for an inverted element giving up after its rebuilds): the problem rolled back
+        to the state the step started from (the snapshot the net took before it, kept by
+        :meth:`_post_cut_solve`), measured again, and the stop ``step-failed`` (the error, the step
+        tried, the rebuilds the net made), so that the run ends on that state with its end state
+        dumped, a resumable stop, instead of failing without one (r1 at b46713a, step 7503: three
+        rebuilds of the net and no end state). None without a snapshot (the net not armed): the
+        failure is raised as before."""
+        snap = getattr(self, "_step_snapshot", None)
+        if snap is None:
+            return None
+        pb = self.pb
+        inside = pb.remesh_count - rebuilds
+        pb._restore_state(snap)
+        pb.invalidate_cached_mesh_data()
+        self._post_cut_cache = None
+        m = self.measure()
+        stop = {"reason": "step-failed", "error": f"{type(exc).__name__}: {exc}"[:400],
+                "dt_attempted": dt, "net_rebuilds": int(inside), **self._taus(self._t())}
+        self._event("step-failed", m, error=stop["error"], dt_attempted=dt,
+                    net_rebuilds=int(inside))
+        return m, stop
 
     def _write_lastgood(self, m: dict, exc: BaseException):
         """After a failed step after a cut: the profiles of the last state the driver measured (the

@@ -367,7 +367,10 @@ cut the tolerance `newton_floor/dt` passes the first iterate, whose systematic e
 noise at the scale of the elements. After a cut, no Newton failure ends a run cleanly; the profiles of the
 state the failing step started from are written first (`profile_<step>_lastgood.txt` and its
 `_bubble` beside it), and a profile is written at every step while an element of either chain
-turns by more than `edge_turn_refine`. For sensitivity tests only, `rebuild_spline` `vertices`
+turns by more than `edge_turn_refine`. With pyoomph's net for inverted elements armed (the
+default after a cut), a failed step is rolled back to the state it started from, the net's own
+snapshot before the step, and the run ends on that state as the resumable stop `step-failed`
+with it dumped, so that a continuation can resume from it. For sensitivity tests only, `rebuild_spline` `vertices`
 splines each rebuild through the vertices of the elements rather than every node; it is off by
 default, since smoothing would alter, and hide, the very feature under test. All these settings
 belong to the cut: a continuation keeps them.
