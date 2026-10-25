@@ -724,7 +724,16 @@ the upward jet must stay within `driver.HEAD_FOLD_BASE_TOL` across each such reb
 stops (`interface-unresolved`, trigger `ring-refine-base`). A thin sheet's rim, which a rebuild at
 the yielded size cannot represent, is so followed instead of ending the run, and one thinner than
 the run's `h_floor` is carried at the floor (no `feature-below-floor` stop on the ring) as long as
-its elements keep within the guard's limits of the turn and the midside node. With
+its elements keep within the guard's limits of the turn and the midside node. A stop of the guard
+on the ring at an element at the floor that the refine does not meet, where the element's apex is
+a wedge of gas read at the scale of the floor (the loop turning left across it, a pair across the
+wedge closer than `fold_stop_elements` element lengths, with 1.5 times its gap below the arc
+between them), is met by the fill of the wedge: the groove fill of the ring under the fold limits
+of the floor, its hard closures, and the base of the upward jet besides (`G_base`); an event
+`floor-fill` and `floor_fills` in the run's events count them. Its check of the transfer predicts
+the former gas, a few elements wide, on the old elements' quadratic curve and beyond the band of
+them that pyoomph's locator still takes (`groovesurgery.LOCATOR_BAND`, 0.07 of the element's
+length; the transfer's `bulk_band`). The tip of a finger of liquid at the floor stays a stop. With
 `edge_turn_snapshots` `core` only an element of the core that bends
 beyond `reconnect.edge_turn_refine` writes a profile at every step. With `prep_gap` (null for none),
 once the bubble is shorter than `prep_gap delta`, its bottom and the downward jet's tip are refined

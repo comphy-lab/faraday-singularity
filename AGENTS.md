@@ -464,7 +464,15 @@ add a second top-level `cases/` tree.
   open chain filled, the refusals unchanged) and `test_far_head_first_fem.py` (a groove on the
   heads' state's downward head cut with the head, never filled) cover it, and
   `test_far_head_first_identity.py` pins runs that meet no groove or unhandled event on a far head
-  and no curled head to cb12382.
+  and no curled head to cb12382. A wedge of gas of the ring whose apex the guard reads at an
+  element at the run's floor (a stop the ring refine does not meet; `ring.floor_wedge`, the fold
+  test read at the scale of the floor, `ring.FLOOR_FOLD_RATIO`) is met by the same fill
+  (`CollapseDriver._floor_fill_request`: `RF`, `contact` `floor`, the request's `floor` with the
+  guard's reading, the wedge and its fold limits; `groove_fill`'s `base_check`, the hard closure
+  `G_base`; the transfer's former gas beyond `groovesurgery.LOCATOR_BAND` of the old elements'
+  curve, `floor_bulk_inside`), event `floor-fill`, `floor_fills` in the run's events; the tip of
+  a liquid finger stays the stop; `test_floor_fill.py`, `test_floor_fill_fem.py`,
+  `test_floor_fill_identity.py` (runs never at the floor are 7ba32f9's).
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,
   its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest
