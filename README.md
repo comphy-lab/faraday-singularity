@@ -673,7 +673,11 @@ region's centroid, a disc at the site (G1-G6): the liquid volume gained against 
 the axial momentum the transfer carried against the filled region's, the identity of the disc's
 cutoff in the projection's weak form and the disc's change of momentum by the projection are hard
 checks, the kinetic energies and the area flags, each limit floored at a multiple of the part's
-noise floors (`groove.sigma_V`, `sigma_Pz`, `sigma_KE`, 0 until set). The disc's change of momentum
+noise floors (`groove.sigma_V`, `sigma_Pz`, `sigma_KE`, 0 until set). The momenta and kinetic
+energies of the disc are weighted by its cutoff, the weight of the identity (one within half the
+radius, zero at the edge), so that a cell at the disc's edge whose sample a rebuild moves across a
+fast free surface weighs nothing; the momentum the transfer carried without that weight is reported
+beside the closures (`G2_unweighted`), never a flag. The disc's change of momentum
 beyond its limit (0.05 `V_fill U`) is only a flag where the identity holds and resolves it, its
 larger side at least half the change and at the momentum floor or above: a fill joins liquid that
 moved at different velocities across the gas it removes, and the projection is the inelastic impulse

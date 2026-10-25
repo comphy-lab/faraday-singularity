@@ -501,28 +501,40 @@ def sample_fields(problem, r, z, names) -> tuple[dict, np.ndarray]:
     return out, found
 
 
-def box_integrals(problem, grid: dict, polygons: dict | None = None) -> dict:
+def box_integrals(problem, grid: dict, polygons: dict | None = None, *,
+                  cutoff: bool = False) -> dict:
     """The axial momentum ``Pz`` and the kinetic energy ``KE`` of the liquid within the box of
     ``grid`` (:func:`box_grid`), by the midpoint rule over its cells, points outside the liquid
     counting zero, and the volume the found points cover (``V_grid``); for each half-section of
-    ``polygons`` (by name) the same over the cells inside it, from the same samples."""
+    ``polygons`` (by name) the same over the cells inside it, from the same samples. With
+    ``cutoff`` (a groove's fill, ``groovesurgery``) each cell is weighted by the box's cutoff
+    ``phi`` (:func:`box_cutoff`, the weight of the identity of :func:`_box_projection`: one within
+    half the radius, zero at the edge), so that a cell at the box's edge whose sample a rebuild
+    moves across a free surface weighs nothing; the sums without it are kept as ``unweighted``
+    (the whole box's and each polygon's)."""
     import shapely
     from shapely.geometry import Polygon
 
     f, found = sample_fields(problem, grid["r"], grid["zz"], ("velocity_x", "velocity_y"))
     ur, uz = np.where(found, f["velocity_x"], 0.0), np.where(found, f["velocity_y"], 0.0)
-    w = np.where(found, grid["dV"], 0.0)
+    plain = np.where(found, grid["dV"], 0.0)
+    w = plain * grid["phi"] if cutoff else plain
 
-    def sums(mask):
+    def sums(mask, w=w):
         return {"Pz": float(np.sum(w[mask] * uz[mask])),
                 "KE": float(np.sum(0.5 * w[mask] * (ur[mask] ** 2 + uz[mask] ** 2))),
                 "V_grid": float(np.sum(w[mask])), "points": int(np.count_nonzero(mask & found))}
 
-    out = {"z": grid["z"], "R": grid["R"], "n": grid["n"], **sums(np.ones(len(w), dtype=bool))}
+    every = np.ones(len(w), dtype=bool)
+    out = {"z": grid["z"], "R": grid["R"], "n": grid["n"], **sums(every)}
+    if cutoff:
+        out.update(weight="cutoff", unweighted=sums(every, plain))
     for name, section in (polygons or {}).items():
         inside = np.asarray(shapely.contains_xy(Polygon(section), grid["r"], grid["zz"]),
                             dtype=bool)
         out[name] = sums(inside)
+        if cutoff:
+            out[name]["unweighted"] = sums(inside, plain)
     return out
 
 
@@ -562,7 +574,8 @@ def box_polyline_budgets(chains, z_centre: float, radius: float, reservoir_depth
             "V_liquid": V_disc - gas, "A": area}
 
 
-def _box_projection(grid: dict, before: dict, after: dict, found: np.ndarray) -> dict:
+def _box_projection(grid: dict, before: dict, after: dict, found: np.ndarray, *,
+                    cutoff: bool = False) -> dict:
     """What the projection changed within the box of ``grid``, from the velocity ``u~`` sampled
     before it (``before``) and ``u+`` and the pressure impulse ``Pi`` after it, before the old
     pressure is put back (``after``), on the same points (``found`` in the liquid both times): the
@@ -570,13 +583,15 @@ def _box_projection(grid: dict, before: dict, after: dict, found: np.ndarray) ->
     changes (``delta_Pz``, ``delta_KE``) and the identity of the cutoff ``phi``
     (:func:`box_cutoff`), ``int (u+ - u~)_z phi dV = int Pi dphi/dz dV`` (``phi_lhs``,
     ``phi_rhs``, ``phi_error``), which the weak form of the projection makes hold up to the
-    interpolation of ``phi e_z`` and to the quadrature of the grid."""
+    interpolation of ``phi e_z`` and to the quadrature of the grid. With ``cutoff`` (a groove's
+    fill) also the sums weighted by ``phi`` as :func:`box_integrals` weights them
+    (``before_phi``, ``after_phi``)."""
     w = np.where(found, grid["dV"], 0.0)
 
     def z(x):
         return np.where(found, x, 0.0)
 
-    def sums(f):
+    def sums(f, w=w):
         return {"Pz": float(np.sum(w * z(f["velocity_y"]))),
                 "KE": float(np.sum(0.5 * w * (z(f["velocity_x"]) ** 2 + z(f["velocity_y"]) ** 2))),
                 "V_grid": float(np.sum(w)), "points": int(found.sum())}
@@ -587,6 +602,8 @@ def _box_projection(grid: dict, before: dict, after: dict, found: np.ndarray) ->
     scale = max(abs(lhs), abs(rhs), 1e-300)
     out = {"z": grid["z"], "R": grid["R"], "n": grid["n"], "points": int(found.sum()),
            "before": sums(before), "after": sums(after)}
+    if cutoff:
+        out.update(before_phi=sums(before, w * grid["phi"]), after_phi=sums(after, w * grid["phi"]))
     out.update(delta_Pz=out["after"]["Pz"] - out["before"]["Pz"],
                delta_KE=out["after"]["KE"] - out["before"]["KE"], phi_lhs=lhs, phi_rhs=rhs,
                phi_error=lhs - rhs, phi_relative_error=(lhs - rhs) / scale,
@@ -595,7 +612,7 @@ def _box_projection(grid: dict, before: dict, after: dict, found: np.ndarray) ->
 
 
 def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None = None, *,
-            box: tuple[float, float] | dict | None = None) -> dict:
+            box: tuple[float, float] | dict | None = None, cutoff: bool = False) -> dict:
     """Steps 6-8: impulsive history, the projection, the restart of the history at ``t_cut``.
 
     Returns the projection diagnostics, filled into ``out`` as they are made, so that they survive
@@ -604,7 +621,8 @@ def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None
     sampled on the polar grid of that box (:func:`box_grid`) before the solve and again, with the
     pressure impulse, after it and before the old pressure is put back, for what the projection
     changed there (``out["box"]``, :func:`_box_projection`); ``box`` may also be a grid itself (a
-    groove's fill: :func:`site_grid`, a disc at its site); without it nothing else is read."""
+    groove's fill: :func:`site_grid`, a disc at its site, read with ``cutoff`` also weighted by the
+    box's cutoff); without it nothing else is read."""
     s = settings
     pb = problem
     out = {} if out is None else out
@@ -647,7 +665,8 @@ def project(problem, settings: ReconnectSettings, t_cut: float, out: dict | None
         if grid is not None:  # u+ and Pi on the box, before the old pressure is put back
             fields, found = sample_fields(pb, grid["r"], grid["zz"],
                                           ("velocity_x", "velocity_y", "pressure"))
-            out["box"] = _box_projection(grid, sampled[0], fields, found & sampled[1])
+            out["box"] = _box_projection(grid, sampled[0], fields, found & sampled[1],
+                                         **({"cutoff": True} if cutoff else {}))
         if dke < -s.energy_tolerance * before["kinetic_energy"] or \
                 abs(identity) > s.energy_tolerance * before["kinetic_energy"]:
             raise CutFailed(f"the projection broke the energy identity: delta KE {dke!r}, "

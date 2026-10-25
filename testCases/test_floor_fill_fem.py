@@ -159,6 +159,8 @@ def test_the_wedge_at_the_floor_is_filled_by_the_driver_with_the_floors_limits(f
     assert c["hard"] == [] and "G_base" not in c["flags"]
     for x in ("G1", "G2", "G3", "G3_box"):
         assert c[x] <= c["limits"][x], x
+    assert rec["budgets"]["box"]["weight"] == "cutoff"  # the box's cutoff weights its budgets
+    assert "G2_unweighted" in c and "G2_unweighted" not in c["flags"] + c["hard"]
     base = rec["base_guard"]
     assert base["ok"] and base["checked"] is False  # no jet stands on this state
     # the finger gone, the ring kept less the filled volume

@@ -194,6 +194,20 @@ def merge_impulse(closures: dict, floor_Pz: float = 0.0) -> dict:
     return out
 
 
+def unweighted_g2(before: dict, transfer: dict, fill: dict, closures: dict) -> dict:
+    """G2 as it read before the box's cutoff weighted the fill's budgets (``surgery.box_integrals``
+    with ``cutoff``): the box's axial momentum the transfer carried, less the filled region's,
+    from the sums without the cutoff (``unweighted``), against G2's limit; reported, never among
+    the flags or the hard closures. Where it misses and the weighted G2 does not, a cell at the
+    box's edge changed phase in the rebuild (r1h's event 4 at step 7239: one sample on the
+    downward jet's surface at the box's edge held the whole miss)."""
+    value = abs(transfer["unweighted"]["Pz"] - before["unweighted"]["Pz"]
+                - fill["unweighted"]["Pz"])
+    limit = float(closures["limits"]["G2"])
+    return {"value": value, "limit": limit, "beyond": bool(not value <= limit),
+            "weighted": float(closures["G2"])}
+
+
 def _spacing(P, loop: bool) -> tuple[np.ndarray, np.ndarray, float]:
     """The node spacing of a chain (``selfcontact.fold_gap``'s: the mean of the chords beside a
     node, the end chord at an end) or of a loop (periodic), the arclength at each node and the
@@ -378,7 +392,7 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
     R_b = max(gs.box_radius * delta, 2.0 * g.L_fill)
     grid = site_grid(g.r_c, g.z_c, R_b)
     global_before = pb.cut_observables()
-    box_before = box_integrals(pb, grid, {"fill": g.fill})
+    box_before = box_integrals(pb, grid, {"fill": g.fill}, cutoff=True)
     box_before.pop("fill")
     rings_before = [Chain(closed(L), ("loop", "loop")) for L in loops]
     poly_before = box_polyline_budgets([c for _, c in named] + rings_before, g.z_c, R_b,
@@ -489,27 +503,30 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
     if gs.fill == "zero":
         fill.update(_zero_inside(pb, sets, g.fill, (math.inf, -math.inf), 0.0))
         pb.invalidate_cached_mesh_data()
-    filled = box_integrals(pb, grid, {"fill": g.fill})["fill"]
-    fill.update(Pz_fill=filled["Pz"], KE_fill=filled["KE"], V_grid=filled["V_grid"])
+    filled = box_integrals(pb, grid, {"fill": g.fill}, cutoff=True)["fill"]
+    fill.update(Pz_fill=filled["Pz"], KE_fill=filled["KE"], V_grid=filled["V_grid"],
+                unweighted=filled["unweighted"])
     record["fill"] = fill
 
     stage("projection")
     record["projection"] = {}
     settings = replace(s, dt0=dt_prev, restart=gs.restart or s.restart, projection=gs.projection)
     t_now = float(record["t"])
-    project(pb, settings, t_now, record["projection"], box=grid)
+    project(pb, settings, t_now, record["projection"], box=grid, cutoff=True)
     stage("chart")
     orient_interface_chart(pb)
 
     stage("postcut")
     global_after = pb.cut_observables()
     box = record["projection"].get("box")
-    if box is not None:
-        box_transfer, box_after = box["before"], box["after"]
+    if box is not None:  # the cutoff's sums, those without it kept beside them
+        box_transfer = dict(box["before_phi"], weight="cutoff", unweighted=box["before"])
+        box_after = dict(box["after_phi"], weight="cutoff", unweighted=box["after"])
     else:
-        box_transfer = box_after = box_integrals(pb, grid)
+        box_transfer = box_after = box_integrals(pb, grid, cutoff=True)
     record["budgets"] = {
-        "box": {"r": g.r_c, "z": g.z_c, "R": R_b, "n": grid["n"], "cells": int(len(grid["r"]))},
+        "box": {"r": g.r_c, "z": g.z_c, "R": R_b, "n": grid["n"], "cells": int(len(grid["r"])),
+                "weight": "cutoff"},
         "polylines": {"before": poly_before, "after": poly_after},
         "grid": {"before": box_before, "after_transfer": box_transfer,
                  "after_projection": box_after},
@@ -523,6 +540,7 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
                               sigma={"V": gs.sigma_V, "Pz": gs.sigma_Pz, "KE": gs.sigma_KE},
                               prefix="G")
     closures = merge_impulse(closures, RING_NOISE_FLOORS["R3_box"][1] * gs.sigma_Pz)
+    closures["G2_unweighted"] = unweighted_g2(box_before, box_transfer, fill, closures)
     closures["global_identity"] = {x: record["projection"].get(x, math.nan)
                                    for x in ("delta_Pz", "Pi_on_bottom")}
     record["closures"] = closures

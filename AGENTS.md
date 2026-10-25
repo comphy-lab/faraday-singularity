@@ -442,7 +442,12 @@ add a second top-level `cases/` tree.
   that sets it there) with the projection transfer; the bulk's unlocated nodes those inside the
   filled region within a twentieth of the old surface's shortest chord there; the projection's
   box a disc at the site (`surgery.site_grid`, `box_polyline_budgets(..., r_centre=)`,
-  `project(box=<grid>)`); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
+  `project(box=<grid>)`), its integrals weighted by the cutoff `phi` of the identity G3
+  (`box_integrals(..., cutoff=True)`, `project(..., cutoff=True)`: a cell at the box's edge whose
+  sample a rebuild moves across a fast free surface weighs nothing; the unweighted sums kept as
+  `unweighted`, the unweighted G2 reported as `G2_unweighted`, never a flag,
+  `groovesurgery.unweighted_g2`; `test_fill_cutoff.py`, `test_fill_cutoff_identity.py`, runs
+  without a fill b46713a's); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
   but `G3_box` beyond its limit only a flag where the cutoff identity G3 holds and resolves it (its
   larger side at least `MERGE_RESOLVED` 0.5 of `G3_box` and at the momentum floor or above;
   `groovesurgery.merge_impulse`, `G3_merge` in the closures): the projection of a fill is the
