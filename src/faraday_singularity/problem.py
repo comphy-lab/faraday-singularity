@@ -203,6 +203,10 @@ class FaradayProblem(Problem):
         self.min_newton_iterations = 1
         self._newton_checks = 0
         self._held_tolerance: float | None = None
+        # around a step after a cut (the collapse driver sets it): (newton_tolerance, newton_floor),
+        # the tolerance of each Newton solve then max(newton_tolerance, newton_floor/dt) with dt the
+        # step that solve makes, a sub-step of pyoomph's halving included; None leaves it alone
+        self.newton_floor_rule: tuple[float, float] | None = None
         # (fingerprint of the state, {(mesh, name): value}) of the integrals last evaluated
         self._integral_cache: tuple | None = None
 
@@ -657,6 +661,17 @@ class FaradayProblem(Problem):
 
     def actions_before_newton_solve(self):
         self.release_newton_tolerance()  # a solve that failed while it was held
+        rule = self.newton_floor_rule
+        if rule is not None:
+            # the round-off floor of the time-discrete residual grows like 1/dt for the step this
+            # solve makes, which pyoomph's adaptive stepping halves below the driver's after a
+            # rejection: a tolerance fixed at the driver's newton_floor/dt is then below the floor
+            # at every halving (r1h at 7251 and r1 at 7525 at 1f509ac, demo6 at 7503: Newton
+            # stalled at 2-10 times it, the stall doubling with each halving, down to the smallest
+            # step); the driver's own step keeps its tolerance as before
+            dt = float(self.timestepper.time_pt().dt(0))
+            if dt > 0.0:
+                self.newton_solver_tolerance = max(rule[0], rule[1] / dt)
         super().actions_before_newton_solve()
         self._newton_checks = 0
 
