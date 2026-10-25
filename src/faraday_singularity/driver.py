@@ -20,7 +20,9 @@ Under sustained forcing collapses repeat. Whenever the axis becomes the lowest p
 jet was born, a new cycle starts (event ``cavity``, counter ``cycle``) and the jet must be born
 again. A jet whose bump has flattened back (rise below ``flat_aspect r_j``) counts as gone. The Newton
 tolerance is at least ``newton_floor/dt``: the residual of the time-discrete equations has a
-round-off floor that grows like ``1/dt``, so a fixed tolerance cannot be met at the smallest steps.
+round-off floor that grows like ``1/dt``, so a fixed tolerance cannot be met at the smallest steps;
+after a cut, ``dt`` is that of each sub-step pyoomph's halving makes within the driver's step
+(``FaradayProblem.newton_floor_rule``), whose floor a tolerance fixed at the driver's step stays below.
 A cavity exists once the axis is the lowest point of the free surface near it (``cavity_seen``);
 only after that can the axis rise above an off-axis minimum and the jet be born: the axis must stand
 above the base by more than ``jet_aspect r_j`` with ``r_j < jet_max_radius``, so a broad rebound of
@@ -4325,6 +4327,7 @@ class CollapseDriver:
             # temporal_error engages pyoomph's adaptive stepping: without an error estimator every
             # converged step is accepted, while a failed Newton solve is rejected and halved
             tol = max(newton_tolerance, s.newton_floor / dt)
+            self._step_newton_tolerance = newton_tolerance  # each sub-step's: _post_cut_solve
             defer = self._defers_distortion()
             rebuilds = pb.remesh_count
             try:
@@ -4529,9 +4532,14 @@ class CollapseDriver:
         pb.min_newton_iterations = r.newton_min_iterations
         pb.states_compression_level = None
         pb._step_snapshots = []  # the state the step starts from, as the net snapshots it
+        tolerance = getattr(self, "_step_newton_tolerance", None)
+        if tolerance is not None and hasattr(pb, "newton_floor_rule"):
+            pb.newton_floor_rule = (tolerance, self.s.newton_floor)
         try:
             yield
         finally:
+            if hasattr(pb, "newton_floor_rule"):
+                pb.newton_floor_rule = None
             pb.min_newton_iterations = 1
             pb.release_newton_tolerance()
             pb.states_compression_level = level

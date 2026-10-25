@@ -503,7 +503,10 @@ add a second top-level `cases/` tree.
   across a rebuild (`FaradayProblem._restore_state`: the rollback of a failed step or of an axis
   repair) puts the template's project attributes (`TEMPLATE_KEYS`: focus, cut and ring sizing)
   back on the sibling template pyoomph reloads the mesh from, which in a restarted run otherwise
-  copies the original template's (`test_restore_template_identity.py`); a rebuilt mesh's
+  copies the original template's (`test_restore_template_identity.py`); after a cut each Newton
+  solve's tolerance is `max(newton_tolerance, newton_floor/dt)` with dt the sub-step it makes
+  (`FaradayProblem.newton_floor_rule`, set by `CollapseDriver._post_cut_solve`), not the driver's
+  step alone (`test_newton_floor_identity.py`); a rebuilt mesh's
   `curved-jacobian` at the ring is read as the
   ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
   the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
