@@ -471,7 +471,9 @@ add a second top-level `cases/` tree.
   guard's reading, the wedge and its fold limits; `groove_fill`'s `base_check`, the hard closure
   `G_base`; the transfer's former gas beyond `groovesurgery.LOCATOR_BAND` of the old elements'
   curve, `floor_bulk_inside`), event `floor-fill`, `floor_fills` in the run's events; the tip of
-  a liquid finger stays the stop; `test_floor_fill.py`, `test_floor_fill_fem.py`,
+  a liquid finger stays the stop; a rebuilt mesh's `curved-jacobian` at the ring is read as the
+  ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
+  the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
   `test_floor_fill_identity.py` (runs never at the floor are 7ba32f9's).
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,

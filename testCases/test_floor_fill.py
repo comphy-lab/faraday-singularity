@@ -95,15 +95,24 @@ def test_the_wedge_of_gas_is_read_at_the_scale_of_the_floor():
 
 
 def _fake_driver(L, *, enabled=True, jet="recentre", ring=True, removed=False, h_floor=7.8125e-7,
-                 loops=1):
+                 loops=1, open_chain=None):
+    from faraday_singularity.reconnect import edge_reading
+    from faraday_singularity.ring import loop_edges
+
     events = ev.EventSettings.from_dict({"groove": {"enabled": enabled}})
     loop = {"r": L[:, 0], "z": L[:, 1]}
-    return SimpleNamespace(
+    edges = {"ring": loop_edges(L)} if loops == 1 else {}
+    if open_chain is not None:
+        edges["open"] = edge_reading(open_chain)
+    fake = SimpleNamespace(
         events=events, s=SimpleNamespace(refine_ratio=1.5, fold_stop_elements=3.0),
         _ring=lambda: ({"removed": {"k": 9} if removed else None} if ring else None),
         _jetcore=lambda: (SimpleNamespace(far_kinks=jet) if jet is not None else None),
-        _h_floor=lambda: h_floor, _post_cut_state=lambda: {"loops": [loop] * loops},
+        _h_floor=lambda: h_floor,
+        _post_cut_state=lambda: {"loops": [loop] * loops, "edges": edges},
         _t=lambda: 10.95, _taus=lambda t: {"tau": 2.5e-5, "tau_p": 2.3e-5})
+    fake._ring_jacobian_reading = lambda st: CollapseDriver._ring_jacobian_reading(fake, st)
+    return fake
 
 
 def _guard(loop, i, **kw):
@@ -136,11 +145,11 @@ def test_a_wedge_at_the_floor_is_the_request_of_its_fill_and_nothing_else_is():
                                        mouth=1.5)
     assert not plain["holds"]
     # the other triggers at the floor
-    for trig_ in ("edge-midside", "feature-below-floor"):
+    for trig_ in ("edge-midside", "feature-below-floor", "curved-jacobian"):
         assert CollapseDriver._floor_fill_request(_fake_driver(L), _guard(L, i, trigger=trig_))
     # none of these
     nothing = [_guard(L, i, chain="open"), _guard(L, i, L=1.2e-6),
-               _guard(L, i, trigger="curved-jacobian"), dict(_guard(L, i), reason="event-request"),
+               _guard(L, i, trigger="absolute-quality"), dict(_guard(L, i), reason="event-request"),
                _guard(L, i, index=None), None]
     for stop in nothing:
         assert CollapseDriver._floor_fill_request(_fake_driver(L), stop) is None, stop
@@ -194,6 +203,55 @@ def test_the_former_gas_of_a_fill_at_the_floor_is_read_beyond_the_band_of_the_ol
     assert not mask[0] and rec["in_band"] == 1
     with pytest.raises(ValueError):
         floor_bulk_inside(X, P[:-1], i_s - 1, j_s, C, 0.05 * H)  # an odd loop
+
+
+def test_a_curved_element_of_the_ring_is_read_as_the_rings_element_there():
+    """``CollapseDriver._ring_jacobian_reading``: a rebuilt mesh's ``curved-jacobian`` stop whose
+    element (its centroid) lies within a chord of the ring's nearest element, and no nearer to
+    the open chain, is that element's reading on the ring (r1 at 63293b0 on two threads, step
+    7501: a corner turning by 89.8 degrees within one element of 3.3e-6, rebuilt into an element
+    whose Jacobian bound fell to 0.09); met by the refine above the floor and by the fill at the
+    floor at a wedge of gas; any other stop as it is."""
+    from faraday_singularity.ring import loop_edges
+
+    L, i = teardrop(arc_points=121, roll=24)  # an even loop: its quadratic elements
+    e = loop_edges(L)["edges"]
+    k = int(np.argmin(np.hypot(e["mid"][:, 0] - L[i, 0], e["mid"][:, 1] - L[i, 1])))
+    c = e["mid"][k] + np.array([0.3 * e["L"][k], 0.0])  # the curved element's centroid
+    stop = {"reason": "interface-unresolved", "trigger": "curved-jacobian", "jacobian_bound": 0.09,
+            "limit": 0.2, "r": float(c[0]), "z": float(c[1]), "on_interface": True,
+            "elements_below": 1, "fresh": True}
+    far_open = np.column_stack([np.linspace(0.0, 1e-3, 41), np.full(41, 4.7)])
+    fake = _fake_driver(L, open_chain=far_open)
+    got = CollapseDriver._ring_jacobian_reading(fake, dict(stop))
+    assert got["chain"] == "ring" and got["index"] == int(e["index"][k])
+    assert got["L"] == float(e["L"][k]) and got["turn"] == float(e["turn"][k])
+    assert (got["r"], got["z"]) == (float(e["mid"][k, 0]), float(e["mid"][k, 1]))
+    assert got["element"] == {"r": stop["r"], "z": stop["z"]} and got["jacobian_bound"] == 0.09
+    assert {k_: got[k_] for k_ in stop if k_ not in ("r", "z")} == {
+        k_: v for k_, v in stop.items() if k_ not in ("r", "z")}
+    assert CollapseDriver._ring_jacobian_reading(fake, got) is got  # read once
+    # met: at the floor (elements of 1e-6) by the fill of the wedge, above it by the refine
+    req = CollapseDriver._floor_fill_request(fake, dict(stop))
+    assert req is not None and req["contact"] == "floor"
+    assert req["floor"]["guard"]["trigger"] == "curved-jacobian"
+    assert req["floor"]["guard"]["index"] == got["index"]
+    assert not CollapseDriver._ring_refine_due(fake, dict(stop))
+    above = _fake_driver(L, open_chain=far_open, h_floor=1e-7)
+    assert CollapseDriver._ring_refine_due(above, dict(stop))
+    assert CollapseDriver._floor_fill_request(above, dict(stop)) is None
+    # as it is: off the interface, beyond a chord of the ring, nearer the open chain, another
+    # trigger, the ring removed or without recentred far kinks
+    beyond = dict(stop, r=float(e["mid"][k, 0] - 3.0 * e["L"][k]))
+    near_open = np.column_stack([np.full(401, stop["r"] + 1e-8),
+                                 np.linspace(stop["z"] - 2e-5, stop["z"] + 2e-5, 401)])
+    for fk, st in ((fake, dict(stop, on_interface=False)), (fake, beyond),
+                   (_fake_driver(L, open_chain=near_open), dict(stop)),
+                   (fake, dict(stop, trigger="absolute-quality")),
+                   (_fake_driver(L, removed=True), dict(stop)),
+                   (_fake_driver(L, jet="grow"), dict(stop)), (_fake_driver(L, loops=0), dict(stop))):
+        assert CollapseDriver._ring_jacobian_reading(fk, st) == st and "chain" not in st
+    assert CollapseDriver._ring_jacobian_reading(fake, None) is None
 
 
 def _floor_request(L, i):

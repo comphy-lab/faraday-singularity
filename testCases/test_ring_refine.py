@@ -77,6 +77,7 @@ def _due_driver(*, ring=True, removed=False, jet="recentre", h_floor=H_FLOOR):
         _ring=lambda: ({"removed": 3 if removed else None} if ring else None),
         _jetcore=lambda: (SimpleNamespace(far_kinks=jet) if jet is not None else None),
         _h_floor=lambda: h_floor)
+    fake._ring_jacobian_reading = lambda st: CollapseDriver._ring_jacobian_reading(fake, st)
     return fake
 
 
@@ -87,8 +88,11 @@ def test_the_ring_refine_meets_the_rings_stops_and_no_other():
     assert due(fake, dict(STOP_R1H))  # r1h's: on a stepped mesh, beyond edge_turn_stop
     assert due(fake, dict(STOP, trigger="edge-midside", midside=0.24, limit=0.2))
     assert due(fake, dict(STOP, turn=dv.RING_REFINE_TURN_MAX))  # the cap, included
+    # a rebuilt mesh's curved element read on the ring's element (_ring_jacobian_reading; 63293b0's
+    # successor: before it this stop was not met)
+    assert due(fake, dict(STOP, trigger="curved-jacobian", limit=0.2, jacobian_bound=0.09))
     for change in ({"chain": "open"}, {"chain": "bubble"}, {"turn": dv.RING_REFINE_TURN_MAX + 0.5},
-                   {"trigger": "feature-below-floor"}, {"trigger": "curved-jacobian"},
+                   {"trigger": "feature-below-floor"}, {"trigger": "curved-jacobian", "turn": 151.0},
                    {"reason": "self-contact-approach"}, {"L": 1.5 * H_FLOOR}, {"L": math.nan}):
         assert not due(fake, dict(STOP, **change)), change
         assert not due(fake, dict(STOP_R1H, **change)), change

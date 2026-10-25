@@ -733,7 +733,10 @@ of the floor, its hard closures, and the base of the upward jet besides (`G_base
 `floor-fill` and `floor_fills` in the run's events count them. Its check of the transfer predicts
 the former gas, a few elements wide, on the old elements' quadratic curve and beyond the band of
 them that pyoomph's locator still takes (`groovesurgery.LOCATOR_BAND`, 0.07 of the element's
-length; the transfer's `bulk_band`). The tip of a finger of liquid at the floor stays a stop. With
+length; the transfer's `bulk_band`). The tip of a finger of liquid at the floor stays a stop. A
+rebuilt mesh whose curved element at the ring falls below the Jacobian bound (`curved-jacobian`)
+is read as the guard's reading of the ring's element there and met in the same way: by the ring
+refine above the floor, by the fill of a wedge of gas at it. With
 `edge_turn_snapshots` `core` only an element of the core that bends
 beyond `reconnect.edge_turn_refine` writes a profile at every step. With `prep_gap` (null for none),
 once the bubble is shorter than `prep_gap delta`, its bottom and the downward jet's tip are refined

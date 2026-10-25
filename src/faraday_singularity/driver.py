@@ -335,8 +335,11 @@ floor), where that element's apex is a wedge of gas read at the scale of the flo
 (``ring.floor_wedge``), is met by the fill of the wedge (:meth:`CollapseDriver._floor_fill_request`,
 ``groovesurgery``'s fill at the floor: ``RF``, ``contact`` ``floor``, the floor's fold limits, the
 fill's hard closures and the base of the upward jet, ``G_base``), an event ``floor-fill`` and
-``floor_fills`` in the run's events; the tip of a finger of liquid stays the stop. A run whose
-ring never meets any of these is unchanged.
+``floor_fills`` in the run's events; the tip of a finger of liquid stays the stop. A rebuilt
+mesh's curved element whose Jacobian bound falls below ``jacobian_min`` at an element of the ring
+(``curved-jacobian``) is read as the guard's reading of the ring's element there
+(:meth:`CollapseDriver._ring_jacobian_reading`) and met as those stops are: by the refine above the
+floor, by the fill of a wedge at it. A run whose ring never meets any of these is unchanged.
 
 With the block's ``groove.enabled`` (``events.GrooveEventSettings``) a closing gas groove (class
 ``A-groove``, of the open chain or the bubble; ``RF``, a fold of the ring) is met by its fill
@@ -3869,26 +3872,70 @@ class CollapseDriver:
             return m, self._stop(m)
         return m, None
 
+    def _ring_jacobian_reading(self, stop: dict | None) -> dict | None:
+        """A rebuilt mesh's ``curved-jacobian`` stop at an element on the ring's loop read as the
+        guard's reading of the ring's quadratic element there: in the ring stage before the ring's
+        removal with jetcore's recentred far kinks, a stop ``on_interface`` whose element's
+        centroid lies within a chord of the ring's nearest element (and no nearer to an element
+        of the open chain) is returned with ``chain`` ``ring`` and that element's ``index``, ``L``
+        (its chord), ``turn``, ``f`` and midpoint (``r``, ``z``; the bad element's centroid kept as
+        ``element``), so that the ring refine and the fill at the floor meet it as they meet the
+        guard's own stops on the ring (r1 at 63293b0 on 2 threads, step 7501: a corner of the ring
+        turning by 89.8 degrees within one element of 3.3e-6, just below the fresh stop, rebuilt for
+        distortion into an element whose Jacobian bound fell to 0.09 against 0.2). Any other stop
+        is returned as it is."""
+        if stop is None or stop.get("reason") != "interface-unresolved" \
+                or stop.get("trigger") != "curved-jacobian" or not stop.get("on_interface") \
+                or stop.get("chain") is not None:
+            return stop
+        ring, jet = self._ring(), self._jetcore()
+        if ring is None or ring.get("removed") is not None or jet is None \
+                or jet.far_kinks != "recentre":
+            return stop
+        edges = self._post_cut_state().get("edges") or {}
+        if "ring" not in edges:
+            return stop
+        x = np.array([float(stop["r"]), float(stop["z"])])
+
+        def nearest(name):
+            e = (edges.get(name) or {}).get("edges")
+            if e is None or not len(e["L"]):
+                return None, math.inf
+            d = np.hypot(e["mid"][:, 0] - x[0], e["mid"][:, 1] - x[1])
+            k = int(np.argmin(d))
+            return (e, k), float(d[k])
+
+        (ring_e, k), d_ring = nearest("ring")
+        _, d_open = nearest("open")
+        if not (d_ring <= float(ring_e["L"][k]) and d_ring <= d_open):
+            return stop
+        return dict(stop, chain="ring", index=int(ring_e["index"][k]), L=float(ring_e["L"][k]),
+                    turn=float(ring_e["turn"][k]), f=float(ring_e["f"][k]),
+                    r=float(ring_e["mid"][k, 0]), z=float(ring_e["mid"][k, 1]),
+                    element={"r": float(x[0]), "z": float(x[1])})
+
     def _ring_refine_due(self, stop: dict | None) -> bool:
         """Whether a stop is one :meth:`_ring_refine` meets: the guard's ``interface-unresolved``
         on the ring (``chain`` ``ring``), on a freshly built mesh (beyond ``edge_turn_stop_fresh``)
         or on one a step has run on (beyond ``edge_turn_stop``: the rim of a sheet born within a
         few steps of the ring cut, before any rebuild could refine it), trigger ``edge-turn`` up to
-        ``RING_REFINE_TURN_MAX`` or ``edge-midside``, at an element longer than ``refine_ratio``
-        times the run's ``h_floor`` (the guard's own floor), in the ring stage before the ring's
-        removal with jetcore's recentred far kinks."""
+        ``RING_REFINE_TURN_MAX`` or ``edge-midside``, or a rebuilt mesh's ``curved-jacobian`` at an
+        element on the ring (:meth:`_ring_jacobian_reading`), at an element longer than
+        ``refine_ratio`` times the run's ``h_floor`` (the guard's own floor), in the ring stage
+        before the ring's removal with jetcore's recentred far kinks."""
+        stop = self._ring_jacobian_reading(stop)
         if stop is None or stop.get("reason") != "interface-unresolved":
             return False
         if stop.get("chain") != "ring":
             return False
         trigger = stop.get("trigger")
-        if trigger not in ("edge-turn", "edge-midside"):
+        if trigger not in ("edge-turn", "edge-midside", "curved-jacobian"):
             return False
         ring, jet = self._ring(), self._jetcore()
         if ring is None or ring.get("removed") is not None or jet is None \
                 or jet.far_kinks != "recentre":
             return False
-        if trigger == "edge-turn" and not float(stop.get("turn", math.inf)) \
+        if trigger in ("edge-turn", "curved-jacobian") and not float(stop.get("turn", math.inf)) \
                 <= RING_REFINE_TURN_MAX:
             return False
         L = float(stop.get("L", math.nan))
@@ -3897,7 +3944,8 @@ class CollapseDriver:
     def _floor_fill_request(self, stop: dict | None) -> dict | None:
         """The fill at the floor of a wedge of gas of the ring (decision 22; ``groovesurgery``'s
         fill at the floor) for a stop the refine does not meet: the guard's ``interface-unresolved``
-        on the ring (trigger ``edge-turn``, ``edge-midside`` or ``feature-below-floor``) at an
+        on the ring (trigger ``edge-turn``, ``edge-midside`` or ``feature-below-floor``, or a
+        rebuilt mesh's ``curved-jacobian`` read on the ring, :meth:`_ring_jacobian_reading`) at an
         element at the run's floor (at most ``refine_ratio h_floor`` long), in the ring stage before
         the ring's removal, with jetcore's recentred far kinks and ``groove.enabled``, where the
         element's apex is a wedge of gas read at the scale of the floor (``ring.floor_wedge``: the
@@ -3910,10 +3958,11 @@ class CollapseDriver:
         from .events import GROOVE_HANDLER, _request
         from .ring import FLOOR_FOLD_RATIO, floor_wedge
 
+        stop = self._ring_jacobian_reading(stop)
         if stop is None or stop.get("reason") != "interface-unresolved":
             return None
         if stop.get("chain") != "ring" or stop.get("trigger") not in (
-                "edge-turn", "edge-midside", "feature-below-floor"):
+                "edge-turn", "edge-midside", "feature-below-floor", "curved-jacobian"):
             return None
         ring, jet = self._ring(), self._jetcore()
         if ring is None or ring.get("removed") is not None or jet is None \
@@ -3970,7 +4019,7 @@ class CollapseDriver:
         tries = 0
         while tries < RING_REFINE_TRIES and self._ring_refine_due(stop):
             tries += 1
-            m, stop = self._ring_refine_once(m, stop, tries)
+            m, stop = self._ring_refine_once(m, self._ring_jacobian_reading(stop), tries)
         if stop is not None and tries and stop.get("reason") == "interface-unresolved":
             stop["ring_refines"] = tries
         return m, stop
@@ -3979,8 +4028,8 @@ class CollapseDriver:
         """One rebuild of :meth:`_ring_refine`."""
         st, r = self.state, self.reconnect
         L, rr, zz = float(stop["L"]), float(stop["r"]), float(stop["z"])
-        if stop["trigger"] == "edge-turn":
-            factor = min(0.5, r.edge_turn_refine / float(stop["turn"]))
+        if stop["trigger"] in ("edge-turn", "curved-jacobian"):  # a curved element: by its turn
+            factor = min(0.5, r.edge_turn_refine / max(float(stop["turn"]), 1e-12))
         else:
             factor = 0.5
         target = max(self._h_floor(), factor * L)
@@ -4031,7 +4080,7 @@ class CollapseDriver:
         self._keep_landings(after)
         base = base_guard_checked(m, after)
         reading = {k: stop[k] for k in ("trigger", "turn", "midside", "limit", "L", "r", "z",
-                                        "index") if k in stop}
+                                        "index", "jacobian_bound") if k in stop}
         self._event("ring-refine", after, attempt=attempt, reading=reading, name=name,
                     target=target, radius=radius, yields=st.kinks[key]["yields"], base=base,
                     **self._axis_repair_note(), **gated)
