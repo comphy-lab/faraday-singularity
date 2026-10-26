@@ -898,6 +898,7 @@ class CollapseDriver:
         self._inversion_remeshes = 0
         self._step_snapshot = None  # after a cut: the state the last step started from
         self._axis_repairs: list[dict] = []  # after a cut: the folds of a tip repaired (this leg)
+        self._tip_edge_balances: list[dict] = []  # signed changes of the audited tip edges
         self._tip_straightens: list[dict] = []  # after a cut: curved edges of the bubble made straight
         # the remesh count at the end of the last accepted step: a mesh built since is fresh (the
         # guard of the interface and the check of its curved elements, after a cut)
@@ -2047,7 +2048,8 @@ class CollapseDriver:
         summed, and the number of events; with ring surgeries or fills of grooves made, net of what
         they filled (:meth:`_filled`, a fill a negative removal, counted among the events), so that
         the fill's own amounts make no jump in the totals of ``budget.txt`` (the projection's change
-        of the whole liquid's momentum and the noise of the rebuild still enter them)."""
+        of the whole liquid's momentum and the noise of the rebuild still enter them). Signed
+        tip-edge corrections are also subtracted, without adding to the topology-event count."""
         liquid = [e for e in self._made_events() if e.get("kind") in EVENT_CLASSES["liquid"]]
         out = {"events": len(liquid), **{key: sum((float((e.get("removed") or {}).get(key) or 0.0)
                                                    for e in liquid), 0.0)
@@ -2056,6 +2058,10 @@ class CollapseDriver:
         if filled["events"]:
             out = {"events": out["events"] + filled["events"],
                    **{key: out[key] - filled[key] for key in ("V", "Pz", "KE")}}
+        if self._tip_edge_balances:
+            out = {"events": out["events"],
+                   **{key: out[key] - sum(x[key] for x in self._tip_edge_balances)
+                      for key in ("V", "Pz", "KE")}}
         return out
 
     def _open_ring_rows(self):
@@ -2881,6 +2887,8 @@ class CollapseDriver:
                     meta["far_yields"] = st.far_yields
                 if self.events.pinch.enabled:  # with pinch only
                     meta["neck_history"] = json.loads(json.dumps(st.neck_history))
+        if self._tip_edge_balances:
+            meta["tip_edge_balances"] = [dict(x) for x in self._tip_edge_balances]
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -2984,6 +2992,7 @@ class CollapseDriver:
     def restore(self, meta: dict):
         """Resume the driver bookkeeping from a state dump's metadata."""
         st = self.state
+        self._tip_edge_balances = [dict(x) for x in meta.get("tip_edge_balances", [])]
         if meta.get("cut") is not None:
             self._check_events_meta(meta)
         for k in self._STATE_FIELDS:
@@ -3852,6 +3861,8 @@ class CollapseDriver:
                 **({"floor_fills": floors} if floors else {}),
                 **({"spline_fills": splines} if splines else {}),
                 **({"step_contact_fills": stepped} if stepped else {}),
+                **({"tip_edge_straightens": len(self._tip_edge_balances)}
+                   if self._tip_edge_balances else {}),
                 "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
                                                          "handler", "record")}
                          if stop.get("reason") in EVENT_STOPS else None)}
@@ -3996,6 +4007,212 @@ class CollapseDriver:
             self._keep_landings(m)
             return m, self._stop(m)
         return m, None
+
+    def _tip_edge_straighten(self, m: dict, stop: dict | None) -> tuple[dict, dict | None]:
+        """Meet a fresh bubble-tip edge turn by a budgeted, reversible straightening.
+
+        Only the final three quadratic elements of the downward tip qualify;
+        the ring and upward chain are excluded. Signed sliver quadrature,
+        local volume/momentum closures and the upward-base check are hard. The native
+        affected triangle is integrated independently of the interface sliver: its actual
+        volume change must match the signed curve/chord volume, and its actual momentum
+        must match the planned nodal change, at the existing R1/R2 relative bounds. Book
+        that triangle's full momentum/energy change, including the velocity reset. Refuse
+        a recurring fold, a repeated tip operation within the axis-repair window, or a
+        cumulative absolute volume above its bound. Records are events/tip_edge_<step>_<n>.json;
+        event tip-edge-straighten and persisted tip_edge_balances account for a made operation.
+        A hard refusal restores the native input and freshness (tip-edge-unclosed); later
+        events and window ends are dispatched after acceptance. The tip_edge unit/FEM tests
+        and 6ef3c4d identity pins cover this contract.
+        """
+        if stop is None or stop.get("reason") != "interface-unresolved" \
+                or stop.get("trigger") != "edge-turn" or stop.get("chain") != "bubble" \
+                or not stop.get("fresh") or not self._fresh_mesh() or self._ring() is not None:
+            return m, stop
+        jet = self._jetcore()
+        if jet is None or jet.far_kinks != "recentre" \
+                or not hasattr(self.pb, "straighten_interface_edges"):
+            return m, stop
+        from .axisrepair import AXIS_REPAIR_BOUND, AXIS_REPAIR_RECUR_STEPS
+        from .tipcontact import closures, edge_patch, patch_budget, sliver_momentum, swept_edge
+        from .surgery import box_integrals, site_grid
+
+        sigma, pb = self.events.groove, self.pb
+        if stop.get("axis_fold_recurs") is not None or self._axis_fold_of(stop) is not None:
+            return m, stop
+        segments = pb.interface_segments()
+        bubble = next((c for c in segments if not c["open"]), None)
+        if bubble is None:
+            return m, stop
+        P = np.column_stack([bubble["r"], bubble["z"]])
+        i = int(stop.get("index", -1))
+        if i < len(P) - 6 or i >= len(P) - 1 or i % 2 != 1:
+            return m, stop
+        radius = TIP_STRAIGHTEN_REACH * float(stop["L"])
+        centre = np.array([stop["r"], stop["z"]])
+        for c in segments:
+            if c["open"]:
+                Q = np.column_stack([c["r"], c["z"]])
+                midpoints = 0.5 * (Q[:-2:2] + Q[2::2])
+                if (
+                    np.min(np.linalg.norm(Q - centre, axis=1)) <= radius
+                    or np.min(np.linalg.norm(midpoints - centre, axis=1)) <= radius
+                ):
+                    return m, stop
+        read = pb.straighten_interface_edges(*centre, radius, apply=False)
+        if len(read["edges"]) != 1:
+            return m, stop
+        edge = read["edges"][0]
+        if (edge["r"], edge["z"]) != tuple(P[i]):
+            return m, stop
+        if self._tip_edge_balances and self.state.step - self._tip_edge_balances[-1]["step"] \
+                < AXIS_REPAIR_RECUR_STEPS:
+            return m, dict(stop, tip_edge_recurs={"last_step": self._tip_edge_balances[-1]["step"],
+                                                "window": AXIS_REPAIR_RECUR_STEPS})
+        if not (sigma.sigma_V > 0 and sigma.sigma_Pz > 0):
+            return m, dict(stop, tip_edge_unavailable="uncalibrated volume or momentum noise")
+        sweep = swept_edge(P[i - 1 : i + 2])
+        dV, bound = sweep["dV"], AXIS_REPAIR_BOUND * self.reconnect.delta**3
+        cumulative = sum(abs(x["V"]) for x in self._tip_edge_balances) + abs(dV)
+        if not math.isfinite(dV) or cumulative > bound or np.any(sweep["weights"] <= 0):
+            return m, dict(
+                stop, tip_edge_volume={"dV": dV, "cumulative_abs": cumulative, "bound": bound}
+            )
+        velocity = np.column_stack([bubble["u_r"], bubble["u_z"]])[i - 1 : i + 2]
+        speed = float(np.max(np.linalg.norm(velocity, axis=1)))
+        grid = site_grid(*centre, sigma.box_radius * self.reconnect.delta)
+        b = box_integrals(pb, grid, cutoff=True)
+        before = {"V": b["V_grid"], "Pz": b["Pz"], "KE": b["KE"]}
+        quad = sliver_momentum(pb, sweep) if dV < 0 else None
+        saved = pb._snapshot_state()
+        was_fresh = self._fresh_mesh()
+        n = len(self._tip_edge_balances) + 1
+        path = self.outdir / "events" / f"tip_edge_{self.state.step:08d}_{n}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "guard": stop,
+            "edge": edge,
+            "radius": radius,
+            "dV": dV,
+            "step": self.state.step,
+            "before": before,
+            "cumulative_abs_V": cumulative,
+            "cumulative_bound": bound,
+            "recurrence_window": AXIS_REPAIR_RECUR_STEPS,
+        }
+        try:
+            patch = edge_patch(pb, P[i], 0.5 * (P[i - 1] + P[i + 1]),
+                               0.5 * (velocity[0] + velocity[2]))
+            mesh_before = patch_budget(patch, initial=True)
+            mesh_planned = patch_budget(patch, planned=True)
+            applied = pb.straighten_interface_edges(*centre, radius)
+            if applied["edges"] != read["edges"]:
+                raise RuntimeError("the straightening selection changed after admission")
+            self._post_cut_cache = self._stop_cache = None
+            after_m = self.measure()
+            a = box_integrals(pb, grid, cutoff=True)
+            after = {"V": a["V_grid"], "Pz": a["Pz"], "KE": a["KE"]}
+            if dV >= 0:
+                quad = sliver_momentum(pb, sweep)
+            mesh_after = patch_budget(patch)
+            dP = mesh_after["Pz"] - mesh_before["Pz"]
+            mesh = {"before": mesh_before, "after": mesh_after, "planned": mesh_planned}
+            checks = closures(before, after, dV, dP, sigma, bound, speed, quad, mesh=mesh)
+            base = base_guard_checked(m, after_m)
+            if not base["ok"]:
+                checks["hard"].append("T_base")
+            rec.update(after=after, quadrature=quad, mesh=mesh, closures=checks, base=base)
+            if checks["hard"]:
+                raise RuntimeError("the tip edge's hard checks did not close")
+            guard = self._tip_edge_guard()
+            rec["guard_after"] = guard
+            if guard is not None:
+                checks["hard"].append("T_guard")
+                raise RuntimeError("a geometric guard still fails after straightening")
+        except Exception as exc:
+            pb._restore_state(saved)
+            self._stepped_rc = None if was_fresh else pb.remesh_count
+            pb.invalidate_cached_mesh_data()
+            pb._jacobian_cache = None
+            self._post_cut_cache = self._stop_cache = None
+            rec.update(outcome="rolled-back", error=f"{type(exc).__name__}: {exc}"[:400])
+            path.write_text(json.dumps(_plain(rec), indent=1) + "\n")
+            return self.measure(), {
+                "reason": "interface-unresolved",
+                "trigger": "tip-edge-unclosed",
+                "chain": "bubble",
+                "record": f"events/{path.name}",
+                "hard": rec.get("closures", {}).get("hard", []),
+                "error": rec["error"],
+                "guard": {k: v for k, v in stop.items() if k != "reason"},
+                **self._taus(self._t()),
+            }
+        rec["outcome"] = "made"
+        path.write_text(json.dumps(_plain(rec), indent=1) + "\n")
+        self._tip_edge_balances.append(
+            {
+                "V": dV,
+                "Pz": dP,
+                "KE": mesh_after["KE"] - mesh_before["KE"],
+                "step": self.state.step,
+                "record": f"events/{path.name}",
+            }
+        )
+        self._event(
+            "tip-edge-straighten",
+            after_m,
+            record=f"events/{path.name}",
+            closures=checks,
+            base=base,
+            dV=dV,
+            dPz=dP,
+        )
+        self._snapshot(after_m, "tip-edge-straighten")
+        # Later events and legitimate window ends are dispatched after the
+        # committed operation; the transactional audit never calls _stop.
+        found = self._stop(after_m)
+        return self.measure(), found
+
+    def _tip_edge_guard(self) -> dict | None:
+        """Read the fresh mesh's invalid-state predicates without invoking another repair.
+
+        The node polygons must be simple and mutually disjoint; their rebuild splines use
+        the configured vertex stride. Then read interface_guard and the native Jacobian
+        bound directly. A result or a topology read error becomes the transaction's T_guard;
+        event requests and window ends belong to the caller's later dispatch.
+        """
+        from .reconnect import Chain, chains_disjoint, spline_contact_stop
+        from .surgery import _named_chains
+        from shapely.geometry import LineString
+
+        named = _named_chains(self.pb)[0]
+        try:
+            chains_disjoint([c for _, c in named])
+            if any(not LineString(c.points).is_simple for _, c in named):
+                raise RuntimeError("a chain's node polygon crosses itself")
+            stride = 2 if self.reconnect.rebuild_spline == "vertices" else 1
+            sampled = [(name, Chain(c.points[::stride], c.end_types))
+                       if stride > 1 and len(c.points) % 2 == 1 else (name, c)
+                       for name, c in named]
+            contact = spline_contact_stop(sampled)
+            if contact is not None:
+                return contact
+        except RuntimeError as exc:
+            return {"reason": "interface-unresolved", "trigger": "tip-topology",
+                    "error": str(exc)[:400]}
+        guard = interface_guard(
+            {name: edge_reading(c.points) for name, c in named},
+            self.reconnect,
+            fresh=self._fresh_mesh(),
+            h_floor=self._h_floor(),
+            refine_ratio=self.s.refine_ratio,
+        )["stop"]
+        if guard is not None:
+            return guard
+        bound = self.pb.curved_jacobian_bound(self.reconnect.jacobian_min)
+        if bound is not None and bound["min"] < self.reconnect.jacobian_min:
+            return {"reason": "interface-unresolved", "trigger": "curved-jacobian", **bound}
+        return None
 
     def _axis_fold_of(self, stop: dict | None) -> tuple[str, dict] | None:
         """The fold along the axis that a guard stop sits on (``axisrepair.axis_fold``): the
@@ -4610,6 +4827,7 @@ class CollapseDriver:
             found = self._stop(m)
             if self._axis_repair_due(found):  # a jet's tip folded along the axis (nuisance)
                 m, found = self._axis_repair(m, found)
+            m, found = self._tip_edge_straighten(m, found)
             if self._ring_refine_due(found):  # a fresh mesh of the ring short of its feature
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found  # a wedge of gas at the floor
@@ -4784,6 +5002,7 @@ class CollapseDriver:
             found = self._stop(m)
             if self._axis_repair_due(found):
                 m, found = self._axis_repair(m, found)
+            m, found = self._tip_edge_straighten(m, found)
             if self._ring_refine_due(found):  # after a rebuild for distortion
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found
@@ -4808,6 +5027,7 @@ class CollapseDriver:
             m, found = self._remesh_checks(m)
             if self._axis_repair_due(found):
                 m, found = self._axis_repair(m, found)
+            m, found = self._tip_edge_straighten(m, found)
             if self._ring_refine_due(found):  # after the rule's rebuild
                 m, found = self._ring_refine(m, found)
             found = self._floor_fill_request(found) or found
