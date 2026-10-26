@@ -136,6 +136,29 @@ def test_the_events_of_a_run_in_units_of_the_cut_radius(tmp_path):
     assert near[1]["near_base"] == 1
 
 
+def test_each_surgerys_closures_and_projection_error_are_exported_in_their_places(tmp_path):
+    """A lip's rupture's S1-S6 and S3_phi (sheetsurgery.py), as a ring surgery's R, the ring's
+    removal's Q and a groove's fill's G, land in F1-F6 and phi_relative_error (the review of
+    2026-10-26, round 3, F6)."""
+    recs = []
+    for k, (kind, prefix) in enumerate((("sheet-rupture", "S"), ("piercing", "R"),
+                                         ("ring-collapse", "Q"), ("groove-fill", "G")), start=1):
+        rec = _record(k, 1e-6 + k * 1e-8)
+        rec.update(kind=kind, chain="ring", tip=None)
+        rec["closures"] = {"relative": {f"{prefix}{j}": 1e-3 * j + 1e-5 * k for j in range(1, 7)},
+                           f"{prefix}3_phi": {"phi_relative_error": 2e-4 * k},
+                           "flags": [], "hard": []}
+        recs.append(rec)
+    _write_run(tmp_path / "run", recs, _rows())
+    rows = {r["kind"]: r for r in event_table.event_rows(tmp_path / "run")}
+    for k, kind in enumerate(("sheet-rupture", "piercing", "ring-collapse", "groove-fill"),
+                             start=1):
+        row = rows[kind]
+        assert [row[f"F{j}"] for j in range(1, 7)] == pytest.approx(
+            [1e-3 * j + 1e-5 * k for j in range(1, 7)]), kind
+        assert row["phi_relative_error"] == pytest.approx(2e-4 * k), kind
+
+
 def test_the_base_of_a_jet_that_widens_after_the_events_and_of_one_that_narrows(tmp_path):
     """The run's test of the upward jet's base from its first event on: a base growing as t'^0.5
     with a growing flux widens (alpha_r_j 0.5), one shrinking as t'^-0.3 narrows; the base against
