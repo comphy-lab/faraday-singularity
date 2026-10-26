@@ -527,6 +527,43 @@ add a second top-level `cases/` tree.
   ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
   the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
   `test_floor_fill_identity.py` (runs never at the floor are 7ba32f9's).
+- A fresh bubble-tip `edge-turn` within its final three quadratic elements can be met by
+  `CollapseDriver._tip_edge_straighten` before the piercing, with recentred far kinks and
+  positive groove volume/momentum noise floors. After a native inversion failure has rolled
+  back, its terminal annular dip can use that same audit once per step: a negative initial and
+  positive final axial tangent (an interior minimum of the P2 edge), above the existing
+  edge-refinement and midside-offset thresholds. Ordinary steps
+  retain their refinement path. A refused recovery retains the original failed-step stop;
+  an unclosed audit ends the run on its restored input. The failure receipt does not locate
+  the inversion: the record labels the site unknown and the terminal geometry selects the
+  candidate. An exception after booking a recovery rolls its balances and profile counters
+  back with the native state; the operation record and a compensating event label that rollback.
+  Exactly one curved edge must qualify for
+  the existing straightening and its radius must exclude the upward chain. The exact signed
+  volume between quadratic curve and chord and positive sliver quadrature account for
+  liquid gained or removed; missing sample points, independent sliver volume/momentum bounds,
+  local box noise checks and the upward-base check are hard (`T_V`, `T_P`, `T_sliver_V`,
+  `T_sliver_P`, `T_patch_P`, `T_quad`, `T_coverage`, `T_base`, `T_guard`). Independently integrate the
+  affected native P2 triangle: its actual volume change must match the signed sliver
+  (`T_V_mesh`), the planned triangle must agree too (`T_V_plan`), and its actual momentum
+  must match the planned nodal change (`T_P_mesh`), at existing R1/R2 relative limits.
+  Book the full triangle's momentum/energy change, including its velocity reset. The sliver
+  volume bound is also a redundant preflight guard. The existing axis-repair bound and
+  five-noise box limits are used. A failed check or operation restores the native
+  input, including history values and freshness (`tip-edge-unclosed`). The audit reads only
+  geometric guards; later events and window ends are dispatched after acceptance. Axis folds
+  and their recurrence stops are excluded. The existing axis-repair recurrence window also
+  bounds repeated tip operations, and their cumulative absolute volume cannot exceed that
+  repair's volume bound; both checks persist across restarts. A made operation
+  records `events/tip_edge_<step>_<n>.json`, event `tip-edge-straighten`, and persists signed
+  `tip_edge_balances` in checkpoints and budget totals (including the affected triangle's
+  signed kinetic-energy change, while the event count is unchanged); `tip_edge_straightens`
+  counts them in results. Refusal annotations are `tip_edge_recurs` (within the recurrence window),
+  `tip_edge_unavailable` (uncalibrated volume or momentum noise) and `tip_edge_volume`
+  (cumulative absolute volume over the bound, or inadmissible sliver geometry).
+  This does not rupture a film or change a ring's topology or removal rule.
+  Tests are `test_tip_edge.py`, `test_tip_edge_fem.py`, and pins against 6ef3c4d in
+  `test_tip_edge_identity.py`.
 - Local ring contacts (`ringcontact.py`, recentred far kinks and enabled groove fill): a
   single rebuild-spline crossing within two adjacent quadratic elements, on a simple node
   polygon, is filled only after its local pocket is independently read as gas (`spline-fill`,

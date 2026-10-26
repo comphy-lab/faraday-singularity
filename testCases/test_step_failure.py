@@ -320,3 +320,78 @@ def test_a_successful_retry_reports_the_actual_endpoint(tmp_path, end):
         assert pb.t == drv.s.t_end
     else:
         assert result["stop"]["failed_step"]["error"] == "RuntimeError: OomphException"
+
+
+@pytest.mark.parametrize("outcome", ["success", "refusal", "unclosed"])
+def test_native_inversion_tip_recovery_runs_only_after_rollback(tmp_path, outcome):
+    from faraday_singularity.reconnect import ReconnectSettings
+    from faraday_singularity.events import EventSettings
+
+    class InvertedElementRemeshRequest(RuntimeError):
+        pass
+
+    class FoldingProblem(NetProblem):
+        def run(self, t_end, **kw):
+            try:
+                super().run(t_end, **kw)
+            except RuntimeError as exc:
+                raise InvertedElementRemeshRequest("mesh kept folding") from exc
+
+    pb = FoldingProblem(fail_at=2)
+    drv = _cut_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-3), max_steps=3)
+    drv.events = EventSettings()
+    drv._remesh_checks = lambda m: (m, None)
+    calls = []
+
+    def audited_tip(m, stop, *, failed_step=None):
+        if failed_step is None:
+            return m, stop  # ordinary steps do not straighten a dip
+        calls.append(failed_step)
+        assert pb.restored and pb.t == pb.restored[-1]["t"]
+        assert failed_step["error"].startswith("InvertedElementRemeshRequest:")
+        if outcome == "refusal":
+            return m, {"reason": "interface-unresolved", "trigger": "tip-dimple",
+                       "tip_edge_recurs": {"last_step": drv.state.step}}
+        if outcome == "unclosed":
+            return m, {"reason": "interface-unresolved", "trigger": "tip-edge-unclosed"}
+        drv._tip_edge_balances.append(dict(V=0.0, Pz=0.0, KE=0.0, step=drv.state.step))
+        pb.fail_at = None
+        return m, None
+
+    drv._tip_edge_straighten = audited_tip
+    result = drv.run(1e-9)
+    drv.close()
+    assert len(calls) == 1
+    if outcome == "success":
+        assert result["steps"] == 3 and result["stop"]["reason"] == "max-steps"
+    elif outcome == "refusal":
+        assert result["steps"] == 1 and result["stop"]["reason"] == "step-failed"
+        assert "tip_edge_recurs" in result["stop"]["tip_edge_retry"]
+    else:
+        assert result["steps"] == 1 and result["stop"]["trigger"] == "tip-edge-unclosed"
+        assert result["stop"]["failed_step"]["error"].startswith("InvertedElementRemeshRequest:")
+
+
+def test_a_non_inversion_failure_never_offers_a_dimple_recovery(tmp_path):
+    from faraday_singularity.reconnect import ReconnectSettings
+    from faraday_singularity.events import EventSettings
+
+    pb = NetProblem(fail_at=2)
+    drv = _cut_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-3), max_steps=3)
+    drv.events = EventSettings()
+    drv._remesh_checks = lambda m: (m, None)
+    original = drv._tip_edge_straighten
+    calls = []
+
+    def observe(m, stop, *, failed_step=None):
+        assert failed_step is None
+        calls.append(stop)
+        return original(m, stop)
+
+    drv._tip_edge_straighten = observe
+    result = drv.run(1e-9)
+    drv.close()
+    assert calls and result["steps"] == 1
+    assert result["stop"]["reason"] == "step-failed"
+    assert result["stop"]["error"].startswith("RuntimeError:")
+    assert not drv._tip_edge_balances and "tip_edge_retry" not in result["stop"]

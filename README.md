@@ -759,7 +759,15 @@ the floor open up to about a right angle (the root of the radial sheet that the 
 drives out along the plug) is filled the same way. Its check of the transfer predicts
 the former gas, a few elements wide, on the old elements' quadratic curve and beyond the band of
 them that pyoomph's locator still takes (`groovesurgery.LOCATOR_BAND`, 0.07 of the element's
-length; the transfer's `bulk_band`). Local contacts at the ring's rim can also be met under the same hard fill budgets and
+length; the transfer's `bulk_band`). A fresh curved edge beside the downward jet's tip may be put straight without a rebuild
+when its signed volume and momentum changes, their local closures and the upward-base
+check satisfy hard bounds. Repeated operations are limited by a recurrence window and a
+cumulative volume bound. An independent integral of the affected finite element checks
+its signed volume change and its momentum after the planned velocity reset; the full local
+momentum and energy changes are accounted. The sliver is also integrated on its own positive quadrature; missing
+points or a remaining guard stop restore the input. Its signed correction is retained in
+checkpoints and budget totals. This operation applies only near the bubble's tip, before
+piercing. Local contacts at the ring's rim can also be met under the same hard fill budgets and
 upward-base check. A single local crossing of the rebuild spline on a simple node polygon
 is filled only if its pocket reads as gas. With the inverted-element net's step snapshot, a crossing made by a candidate step is mapped by
 node identity to its simple input on the unchanged mesh; the input is restored before any
