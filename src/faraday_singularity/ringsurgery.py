@@ -220,7 +220,8 @@ def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict | None, scales: 
     """The closures of a ring surgery within its box, each against its limit (``RING_BUDGET_LIMITS``
     times its scale, never below the floor of ``RING_NOISE_FLOORS``, a multiple of the ring's noise
     ``sigma``: ``V``, ``Pz``, ``KE``, zero where not given): R1 the liquid volume the box gained
-    (its polylines before and after, ``poly``) against the filled volume ``V_fill``; R2 the axial
+    (its polylines before and after, ``poly``) against the filled volume ``V_fill`` (signed: a
+    removal is a negative fill, its magnitude the scale); R2 the axial
     momentum the transfer carried (``box``: before, after the transfer and the fill, after the
     projection) against the filled region's momentum ``Pz_fill``, at the scale ``P_ref``; R3 the
     projection's momentum balance in the box, the cutoff identity ``|phi_lhs - phi_rhs|`` (``phi``,
@@ -255,7 +256,9 @@ def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict | None, scales: 
               "R4": abs(after["KE"] - moved["KE"]),
               "R5": abs(poly["after"]["A"] - poly["before"]["A"] - dA),
               "R6": abs(moved["KE"] - before["KE"] - KE_fill)}
-    scale = {"R1": V, "R2": P_ref,
+    # the fill's volume signed in R1's balance, its magnitude R1's scale (a removal, such as a
+    # lip's rupture, is a negative fill, sheetsurgery.sheet_rupture)
+    scale = {"R1": abs(V), "R2": P_ref,
              "R3": (max(abs(lhs), abs(rhs)) if sides else math.nan) if projected else 0.0,
              "R3_box": P_ref, "R4": KE_ref, "R5": abs(dA), "R6": KE_ref}
     noise = {"V": 0.0, "Pz": 0.0, "KE": 0.0, **{k: float(v) for k, v in (sigma or {}).items()}}

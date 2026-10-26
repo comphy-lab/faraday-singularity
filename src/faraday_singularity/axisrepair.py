@@ -113,13 +113,12 @@ def axis_fold(P, end: str) -> dict | None:
             "r_min": float(Q[1:k, 0].min()), "k": int(k)}
 
 
-def sliver_quadrature(pb, polygon) -> dict:
-    """Integrate momentum on the sliver itself, with positive triangle Gauss weights and the
-    axisymmetric factor 2 pi r. The degree-five rule resolves a quadratic velocity times r;
-    unlike the box grid, its points and weights follow the sliver at any scale."""
+def polygon_quadrature_points(polygon) -> tuple[np.ndarray, np.ndarray, int]:
+    """The points ``X`` (``(m, 2)``) and volume weights ``dV`` (``2 pi r`` times the area weight)
+    of the seven-point, degree-five triangle rule on the constrained Delaunay triangles of
+    ``polygon``, and the triangles' count: positive weights whose points follow the polygon at any
+    scale (:func:`sliver_quadrature`; ``sheetsurgery.rim_quadrature``)."""
     import shapely
-    from .reconnect import revolved_volume
-    from .surgery import sample_fields
 
     triangles = shapely.constrained_delaunay_triangles(shapely.Polygon(polygon)).geoms
     bary = [(1 / 3, 1 / 3, 1 / 3)]
@@ -138,6 +137,17 @@ def sliver_quadrature(pb, polygon) -> dict:
         dV.extend(2 * math.pi * X[:, 0] * area * np.asarray(weights))
     X = np.asarray(points, dtype=float).reshape(-1, 2)
     dV = np.asarray(dV, dtype=float)
+    return X, dV, len(X) // len(bary)
+
+
+def sliver_quadrature(pb, polygon) -> dict:
+    """Integrate momentum on the sliver itself, with positive triangle Gauss weights and the
+    axisymmetric factor 2 pi r. The degree-five rule resolves a quadratic velocity times r;
+    unlike the box grid, its points and weights follow the sliver at any scale."""
+    from .reconnect import revolved_volume
+    from .surgery import sample_fields
+
+    X, dV, triangles = polygon_quadrature_points(polygon)
     values, found = sample_fields(pb, X[:, 0], X[:, 1], ("velocity_y",))
     V = math.fsum(dV)
     geometric = abs(float(revolved_volume(polygon)))
@@ -145,7 +155,7 @@ def sliver_quadrature(pb, polygon) -> dict:
             "V_quad": V, "V_sliver": geometric,
             "V_quad_over_V_sliver": V / geometric if geometric > 0 else math.nan,
             "V_found": math.fsum(dV[found]), "points": len(X), "found": int(found.sum()),
-            "rule": "triangle-degree-five", "triangles": len(X) // len(bary)}
+            "rule": "triangle-degree-five", "triangles": triangles}
 
 
 def axis_repair(pb, events, reconnect, outdir, chain: str, fold: dict, *, velocity,

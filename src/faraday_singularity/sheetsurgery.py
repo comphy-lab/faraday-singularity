@@ -25,8 +25,10 @@ The surgery is a rebuild the project owns, as the ring surgeries and the fill of
    loop is simple, the removed region liquid and simple, clear of the open chain by
    ``OPEN_CLEARANCE`` section widths, and at most ``MAX_REMOVED_V_B`` of the bubble's volume.
 3. **Budgets before**, within ``max(ring.box_radius delta, 2 L_rim)`` of the rim's centroid (a disc
-   at the site, ``surgery.site_grid``; the polylines clipped to it): the rim's volume, axial
-   momentum and kinetic energy on the grid, the global ones.
+   at the site, ``surgery.site_grid``; the polylines clipped to it): the box's on the grid, the
+   global ones, and the rim's volume, axial momentum and kinetic energy on the rim itself
+   (:func:`rim_quadrature`: every point located and its volume the rim's within the R1 tolerance,
+   or the rupture is refused; the grid's reading of the rim reported beside it).
 4. **Remesh at once** from the planned geometry (the template's ``pending_ring_geometry``: the open
    chain as it is and the new loop), under the driver's focus with the cap's region
    (``sheet_e<k>``, at ``max(h_floor, w / CAP_ELEMENTS)``, ``w`` the section's width); the transfer
@@ -40,7 +42,7 @@ The surgery is a rebuild the project owns, as the ring surgeries and the fill of
    every free surface, the cap's included.
 7. **Budgets after and closures** (``ringsurgery._ring_closures``, prefix ``S``, the removal a
    negative fill): S1 the liquid volume the disc loses against the rim's volume, S2 the axial
-   momentum the transfer takes away against the rim's, S3 the projection's momentum balance in the
+   momentum the transfer takes away against the rim's (its quadrature's), S3 the projection's momentum balance in the
    disc (the cutoff identity) and ``S3_box`` the disc's change of momentum by the projection, hard
    (``surgery.BudgetUnclosed``); S4-S6 (energies, area) flags; the base of the upward jet besides
    (``base_check``, the hard closure ``S_base``). Then the record, the driver's bookkeeping
@@ -103,12 +105,22 @@ def lip_thinning(samples) -> dict:
     return out
 
 
-def _arc(n: int, a: int, b: int) -> list[int]:
-    """The loop's nodes from ``a`` to ``b`` the shorter way round (both included)."""
-    d = (b - a) % n
-    if d <= n - d:
-        return [(a + k) % n for k in range(d + 1)]
-    return [(a - k) % n for k in range(n - d + 1)]
+def _arc(P, a: int, b: int) -> list[int]:
+    """The loop ``P``'s nodes from ``a`` to ``b`` (both included) the shorter way round in length,
+    as the fold detector reads a pocket (``groove.side_folds``, ``groove.sheet_reading``): the walk
+    from the lower index of the pair to the higher unless the walk through the seam is strictly
+    shorter, whatever the nodes each holds (a refined lip holds many short elements)."""
+    P = np.asarray(P, dtype=float).reshape(-1, 2)
+    n = len(P)
+    lo, hi = sorted((int(a) % n, int(b) % n))
+    inner = list(range(lo, hi + 1))
+    seam = list(range(hi, n)) + list(range(0, lo + 1))
+
+    def length(walk):
+        return float(np.sum(np.hypot(*np.diff(P[walk], axis=0).T)))
+
+    walk = seam if length(seam) < length(inner) else inner
+    return walk if walk[0] == int(a) % n else walk[::-1]
 
 
 def _cap(A, B, toward) -> np.ndarray:
@@ -128,7 +140,7 @@ def _cap(A, B, toward) -> np.ndarray:
 def sheet_rupture_geometry(P, pair, *, open_points, V_b: float, velocity=None) -> dict:
     """The rupture of the ring's loop ``P`` (counter-clockwise, its gas inside) at the lip's
     section ``pair`` (two nodes across the lip, its pocket of liquid the arc between them the
-    shorter way round and the chord): the rim, the pocket beyond the section, removed and the
+    shorter way round in length, :func:`_arc`, and the chord): the rim, the pocket beyond the section, removed and the
     remaining lip closed by the half circle of diameter the section's width bulging into the rim
     (:func:`_cap`). Returns the new loop's points (the loop with the rim's arc replaced by the cap,
     counter-clockwise), the removed region (``removed``: the rim's arc and the cap back), its area,
@@ -149,7 +161,7 @@ def sheet_rupture_geometry(P, pair, *, open_points, V_b: float, velocity=None) -
     checks: dict = {"failed": []}
     if a == b or n < 8:
         raise SheetRuptureRefused("the section's pair is not two nodes of the loop", checks)
-    arc = _arc(n, a, b)
+    arc = _arc(P, a, b)
     rim = P[arc]
     share = gas_share(rim, P)
     checks.update(side=side_of(share), gas_share=share, rim_nodes=len(arc))
@@ -209,6 +221,35 @@ def sheet_rupture_geometry(P, pair, *, open_points, V_b: float, velocity=None) -
             "A_cap": 2.0 * math.pi * float(np.sum(0.5 * (cap[1:, 0] + cap[:-1, 0])
                                                   * np.hypot(*np.diff(cap, axis=0).T))),
             "checks": checks}
+
+
+def rim_quadrature(pb, polygon, V_rim: float) -> dict:
+    """The rim's volume, axial momentum and kinetic energy integrated on the rim itself: the
+    positive triangle rule of ``axisrepair.polygon_quadrature_points`` on ``polygon`` (the removed
+    region), its points located in the liquid mesh, whatever the box grid's spacing (the grid of
+    ``surgery.site_grid``, a few hundred cells across a box of ``ring.box_radius delta``, can hold
+    no point of a rim at the floor's scale, and would log its momentum and energy as zero).
+    ``checked`` where every point is located and the rule's volume reproduces ``V_rim``, the
+    polygon's volume of revolution, within the R1 tolerance (``ringsurgery.RING_BUDGET_LIMITS``),
+    as the axis repair's sliver quadrature is checked; a rupture requires it."""
+    from .axisrepair import polygon_quadrature_points
+    from .ringsurgery import RING_BUDGET_LIMITS
+    from .surgery import sample_fields
+
+    X, dV, triangles = polygon_quadrature_points(polygon)
+    if len(X):
+        values, found = sample_fields(pb, X[:, 0], X[:, 1], ("velocity_x", "velocity_y"))
+    else:
+        values, found = {"velocity_x": np.zeros(0), "velocity_y": np.zeros(0)}, np.zeros(0, bool)
+    V = math.fsum(dV)
+    located = bool(len(X)) and bool(found.all())
+    ur, uz = values["velocity_x"], values["velocity_y"]
+    error, limit = abs(V - V_rim), RING_BUDGET_LIMITS["R1"] * abs(V_rim)
+    return {"V_quad": V, "V_rim": float(V_rim), "error": error, "limit": limit,
+            "Pz": math.fsum(dV * uz) if located else math.nan,
+            "KE": 0.5 * math.fsum(dV * (ur**2 + uz**2)) if located else math.nan,
+            "points": int(len(X)), "found": int(found.sum()), "triangles": int(triangles),
+            "rule": "triangle-degree-five", "checked": bool(located and error <= limit)}
 
 
 def sheet_rupture(problem, events, reconnect, outdir: Path, request: dict, *, k: int,
@@ -306,7 +347,13 @@ def _sheet_rupture(pb, events, s, out: Path, record: dict, progress: dict, reque
     grid = site_grid(g["r_c"], g["z_c"], R_b)
     global_before = pb.cut_observables()
     box_before = box_integrals(pb, grid, {"rim": g["removed"]}, cutoff=True)
-    rim = box_before.pop("rim")
+    rim = box_before.pop("rim")  # the grid's reading of the rim, reported beside the quadrature's
+    quad = rim_quadrature(pb, g["removed"], g["V_rim"])
+    record["rim_quadrature"] = quad
+    if not quad["checked"]:
+        raise CutRefused(f"the rim's quadrature does not resolve it: {quad['found']} of "
+                         f"{quad['points']} points located, its volume {quad['V_quad']:.6g} "
+                         f"against the rim's {g['V_rim']:.6g} (limit {quad['limit']:.3g})")
     rings_before = [Chain(closed(L), ("loop", "loop")) for L in loops]
     poly_before = box_polyline_budgets([c for _, c in named] + rings_before, g["z_c"], R_b,
                                        s.reservoir_depth, r_centre=g["r_c"])
@@ -411,8 +458,11 @@ def _sheet_rupture(pb, events, s, out: Path, record: dict, progress: dict, reque
                  "after_projection": box_after},
         "global": {"before": global_before, "after_transfer": global_transfer,
                    "after": global_after, "includes_ring": True}}
-    removed = {"V": g["V_rim"], "Pz": float(rim["Pz"]), "KE": float(rim["KE"]),
-               "V_grid": float(rim["V_grid"])}
+    # the rim's momentum and energy those of its own quadrature, which S2 and S6 hold the box's
+    # change against; the grid's reading of the rim beside them
+    removed = {"V": g["V_rim"], "Pz": float(quad["Pz"]), "KE": float(quad["KE"]),
+               "V_grid": float(rim["V_grid"]), "Pz_grid": float(rim["Pz"]),
+               "KE_grid": float(rim["KE"])}
     ring = events.ring
     closures = _ring_closures({"V": -removed["V"], "Pz": -removed["Pz"], "KE": -removed["KE"]},
                               record["budgets"]["polylines"],

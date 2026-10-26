@@ -1833,11 +1833,39 @@ class CollapseDriver:
         sizes = {g.name: g.size for g in (focus.regions if focus is not None else ())}
         h_col = self._column_size()
         floors = {"ring": h_col} if jet.ring_kink_floor and math.isfinite(h_col) else {}
-        kinks.update(far_kink_regions({k: v for k, v in st.kinks.items() if v.get("far")},
+        previous = self._lip_hold({k: v for k, v in st.kinks.items() if v.get("far")})
+        kinks.update(far_kink_regions(previous,
                                       pc["edges"], far, t=self._t(), hold=hold,
                                       h_far=jet.far_floor, h_floor=h_floor,
                                       yield_turn=jet.far_yield_turn, sizes=sizes, floors=floors))
         return kinks
+
+    def _lip_hold(self, previous: dict) -> dict:
+        """The far kinks of the last accepted step (``previous``) with the refinement that holds
+        the ring's lip renewed (decision 22, :meth:`_sheet_context`), before
+        ``jetcore.far_kink_regions`` reads which to release and every target from them, so that
+        the measurement, the remesh checks and the commit (``_commit_post_cut``) all keep it: where
+        the lip is handled (:meth:`_sheet_handled`) and was read at the state this one goes on
+        from (its last sample at ``t_prev`` or later, the start of the step; at this state's time
+        after an event, which sets ``t_prev`` NaN), each refined far kink of the ring not released
+        whose disc holds the lip's section has its ``t_set`` now; a lip no longer read holds
+        nothing. The entries renewed are copies; ``previous`` is returned as it is otherwise."""
+        st = self.state
+        samples = st.lip_samples
+        if not samples or len(samples[-1]) < 4 or not self._sheet_handled():
+            return previous
+        t = self._t()
+        t_from = st.t_prev if math.isfinite(st.t_prev) else t
+        t_read, r, z = (float(x) for x in (samples[-1][0], samples[-1][2], samples[-1][3]))
+        if t_read < t_from:
+            return previous
+        out = {}
+        for key, g in previous.items():
+            if g.get("chain") == "ring" and g.get("refined") and not g.get("released") \
+                    and math.hypot(r - float(g["r"]), z - float(g["z"])) <= float(g["radius"]):
+                g = dict(g, t_set=max(float(g["t_set"]), t))
+            out[key] = g
+        return out
 
     def _column_size(self) -> float:
         """The element size of the ring's column (the record of the ring stage's ``h_col``); NaN
@@ -3564,8 +3592,10 @@ class CollapseDriver:
         the history's, the lip's reading and a check of the upward jet's base (the hard closure
         ``S_base``): a refusal, which leaves the problem unchanged, is a resumable stop
         (``sheet-rupture-refused``), and so are hard budgets that do not close
-        (``event-unclosed``); any other failure ends the run as a failed one, raised. Made: an
-        event ``sheet-rupture``, its row of ``events.txt``, the lip's history cleared, the dumps the
+        (``event-unclosed``); any other failure ends the run as a failed one, raised. Made: the
+        lip's history cleared before the state after it is kept (``on_made``; the history in the
+        record's ``lip`` and in ``precut_e<k>``), so that a restart from ``postcut_e<k>`` goes on
+        as the run does; an event ``sheet-rupture``, its row of ``events.txt``, the dumps the
         policy drops, the meshes pruned, and the run goes on from the fresh mesh."""
         if len(self._made_events()) >= self.events.max_events:
             return m, self._event_stop(EVENT_LIMIT, request, max_events=self.events.max_events)
@@ -3580,11 +3610,17 @@ class CollapseDriver:
         def base_check():
             return base_guard_checked(m, self.measure())
 
+        def on_made(rec):  # before the state after the rupture is kept (postcut_e<k>)
+            self._on_groove_made(rec)
+            # the lip's history ends with it: the state after it starts with none, as the live
+            # run goes on (the history kept in the record's lip and in precut_e<k>)
+            st.lip_samples = []
+
         self._event_after = None
         try:
             made = sheet_rupture(self.pb, self.events, r, self.outdir, request, k=k,
                                  dt_prev=dt_prev, h_floor=self._h_floor(), lip=lip, driver=self,
-                                 on_made=self._on_groove_made, base_check=base_check)
+                                 on_made=on_made, base_check=base_check)
         except (CutRefused, BudgetUnclosed) as e:
             rec = getattr(e, "record", None) or {}
             reason = EVENT_UNCLOSED if isinstance(e, BudgetUnclosed) else SHEET_RUPTURE_REFUSED
@@ -3595,7 +3631,6 @@ class CollapseDriver:
                                        error=rec.get("error", f"{type(e).__name__}: {e}"),
                                        record=f"events/event_{k:03d}.json", **extra)
         m = self._event_after
-        st.lip_samples = []
         removed = made.get("removed") or {}
         self._event("sheet-rupture", m, k=k, w=(made.get("geometry") or {}).get("w"),
                     V=removed.get("V"), Pz=removed.get("Pz"), KE=removed.get("KE"),
@@ -4494,10 +4529,8 @@ class CollapseDriver:
         state's sample of the lip's thickness (``[t, f.gap, f.r, f.z]``, once per time, the last
         ``sheetsurgery.LIP_SAMPLES``; a rebuild at the same time adds none; a section more than
         ``LIP_JUMP`` thicknesses from the last one's is another feature, and the history restarts
-        from it), keeps the refined far
-        kink of the ring that holds the lip alive while the lip lasts (its ``t_set`` the state's,
-        so that ``jetcore.far_kink_regions`` does not release it as a feature the guard no longer
-        asks for), and returns ``h_s`` (:meth:`_sheet_rupture_thickness`), the thinning reading
+        from it; the refinement that holds the lip is kept alive from it, :meth:`_lip_hold`),
+        and returns ``h_s`` (:meth:`_sheet_rupture_thickness`), the thinning reading
         (``sheetsurgery.lip_thinning``) and ``refine_limit``, ``SHEET_REFINE_ELEMENTS h_fine``
         while the lip's elements lie above the refine's floor (``refine_ratio h_floor``), zero
         otherwise."""
@@ -4516,11 +4549,6 @@ class CollapseDriver:
             if not samples or t > samples[-1][0]:
                 samples.append([t, float(f.gap), float(f.r), float(f.z)])
                 del samples[:-LIP_SAMPLES]
-            for g in st.kinks.values():  # the refinement that holds the lip: kept while it lasts
-                if g.get("far") and g.get("chain") == "ring" and g.get("refined") \
-                        and not g.get("released") and math.hypot(
-                            f.r - float(g["r"]), f.z - float(g["z"])) <= float(g["radius"]):
-                    g["t_set"] = max(float(g["t_set"]), t)
             floor = self.s.refine_ratio * self._h_floor()
             refine = SHEET_REFINE_ELEMENTS * h_fine if h_fine > floor else 0.0
             return {"h_s": self._sheet_rupture_thickness(), "refine_limit": refine,

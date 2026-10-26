@@ -204,7 +204,7 @@ def _fold(gap, r=1.0e-3, z=4.6119):
     return SimpleNamespace(gap=gap, r=r, z=z)
 
 
-def test_the_driver_samples_the_lip_once_per_time_and_keeps_its_refinement_alive():
+def test_the_driver_samples_the_lip_once_per_time():
     kink = {"far": True, "chain": "ring", "refined": True, "released": False, "r": 1.0e-3,
             "z": 4.6119, "radius": 8e-5, "t_set": 10.0}
     other = dict(kink, r=2e-3)  # beyond the lip
@@ -215,7 +215,8 @@ def test_the_driver_samples_the_lip_once_per_time_and_keeps_its_refinement_alive
     assert out["h_s"] == SHEET_RUPTURE_FLOORS * H_FLOOR
     assert out["refine_limit"] == SHEET_REFINE_ELEMENTS * 1.8e-5
     assert out["thinning"]["thinning"] is False
-    assert kink["t_set"] == 10.95 and other["t_set"] == 10.0
+    # the hold of the lip's refinement is the measurement's (_lip_hold), not the reading's
+    assert kink["t_set"] == 10.0 and other["t_set"] == 10.0
     ctx(_fold(1.9e-5), 1.8e-5)  # a rebuild at the same time: no new sample
     assert len(f.state.lip_samples) == 1
     for k, gap in enumerate((1.9e-5, 1.8e-5, 1.7e-5)):
@@ -276,9 +277,11 @@ def test_a_rupture_due_is_met_by_the_rupture_and_a_refusal_is_its_stop(tmp_path,
              on_made, base_check, log=print):
         calls.append({"k": k, "lip": lip, "h_floor": h_floor, "dt_prev": dt_prev})
         driver._event_after = {"m": "after"}
-        return {"kind": ev.SHEET_RUPTURE, "geometry": {"w": 1.5e-6},
-                "removed": {"V": 1e-15, "Pz": 2e-12, "KE": 3e-9, "centroid": [1e-3, 4.6]},
-                "base_guard": {"ok": True}}
+        rec = {"kind": ev.SHEET_RUPTURE, "geometry": {"w": 1.5e-6},
+               "removed": {"V": 1e-15, "Pz": 2e-12, "KE": 3e-9, "centroid": [1e-3, 4.6]},
+               "base_guard": {"ok": True}}
+        on_made(rec)  # the driver's bookkeeping, as the surgery makes it once made
+        return rec
 
     import faraday_singularity.sheetsurgery as mod
 
@@ -337,3 +340,264 @@ def test_the_rupture_key_is_validated_and_written_only_where_set():
                                                             "sheet_rupture_floors": bad}})
     with pytest.raises(ValueError):  # a jetcore key needs jetcore enabled
         ev.EventSettings.from_dict({"jetcore": {"sheet_rupture_floors": 2.0}})
+
+
+# --- the review of 2026-10-26 (round 2: F1-F5) ---------------------------------------------------
+
+
+def _graded_circle(dense=202, coarse=8, R=1.6, span=0.625):
+    """A counter-clockwise circle whose arc of ``span`` radians holds ``dense`` nodes and the rest
+    of it ``coarse`` intervals: the short arc (about 1) holds most of the nodes (about 9 long)."""
+    a = np.linspace(0.0, span, dense)
+    b = np.linspace(span, 2.0 * math.pi, coarse + 1)[1:-1]
+    phi = np.concatenate([a, b])
+    return np.column_stack([2.0 + R * np.cos(phi), R * np.sin(phi)])
+
+
+def test_the_rims_arc_is_the_shorter_way_round_in_length_as_the_detector_reads_it():
+    P = _graded_circle()
+    n = len(P)
+    assert n == 202 + 7
+    # by length the dense arc, though the other way round takes fewer node steps
+    assert sh._arc(P, 0, 201) == list(range(202))
+    assert sh._arc(P, 201, 0) == list(range(201, -1, -1))
+    assert n - 201 < 201
+    # across the seam: the same arc, rolled
+    k = 100
+    Q = np.roll(P, -k, axis=0)
+    a, b = (0 - k) % n, 201 - k
+    walk = sh._arc(Q, a, b)
+    assert walk == list(range(a, n)) + list(range(0, b + 1))
+    assert sh._arc(Q, b, a) == walk[::-1]
+    assert np.allclose(Q[walk], P[:202])
+    # the detector's pocket on the sheeted ring is the surgery's rim
+    L, f = _lip()
+    a, b = f["fold"].pair
+    reading = groove.sheet_reading(L, (a, b), loop=True)
+    arc = sh._arc(L, a, b)
+    assert arc[0] == a and arc[-1] == b and len(arc) == reading["nodes"]
+
+
+def _refined_lip(m=12):
+    """The sheeted ring with every element of the lip's pocket split into ``m`` (the points on
+    their chords: the same polygon), so that the lip holds more nodes than the rest of the ring."""
+    L, f = _lip()
+    a, b = sorted(f["fold"].pair)
+    n = len(L)
+    out, pair = [], []
+    for i in range(n):
+        if i == a:
+            pair.append(len(out))
+        if i == b:
+            pair.append(len(out))
+        out.append(L[i])
+        if a <= i < b:
+            for j in range(1, m):
+                out.append(L[i] + (L[i + 1] - L[i]) * j / m)
+    return np.asarray(out), tuple(pair), f
+
+
+def test_a_lip_graded_finer_than_the_rest_of_the_ring_is_ruptured_on_its_own_pocket():
+    G2, pair, f = _refined_lip()
+    n = len(G2)
+    a, b = pair
+    assert (b - a) > n - (b - a)  # the lip holds most of the nodes
+    g = sh.sheet_rupture_geometry(G2, pair, open_points=rs.flat_open().points, V_b=1.0)
+    assert g["checks"]["side"] == "liquid" and g["checks"]["failed"] == []
+    L, _ = _lip()
+    plain = sh.sheet_rupture_geometry(L, f["fold"].pair, open_points=rs.flat_open().points,
+                                      V_b=1.0)
+    assert g["V_rim"] == pytest.approx(plain["V_rim"], rel=1e-9)
+    assert g["w"] == pytest.approx(plain["w"])
+    # across the seam: the loop rolled so that the pocket runs through its first node
+    k = (a + b) // 2
+    R = np.roll(G2, -k, axis=0)
+    g2 = sh.sheet_rupture_geometry(R, ((a - k) % n, (b - k) % n),
+                                   open_points=rs.flat_open().points, V_b=1.0)
+    assert g2["checks"]["failed"] == [] and g2["V_rim"] == pytest.approx(g["V_rim"], rel=1e-9)
+
+
+def test_a_removal_is_held_to_the_tolerance_of_its_volumes_magnitude():
+    from faraday_singularity.ringsurgery import RING_BUDGET_LIMITS, _ring_closures
+
+    V, miss = 1e-12, 0.005
+    box = {x: {"Pz": 0.0, "KE": 0.0} for x in ("before", "after_transfer", "after_projection")}
+    scales = {"V_fill": V, "U": 1.0, "P_ref": V, "KE_ref": 0.5 * V}
+    sigma = {"V": 1e-18, "Pz": 1e-30, "KE": 1e-30}
+    got = {}
+    for sign in (-1.0, 1.0):  # a removal (a lip's rupture) and a fill
+        poly = {"before": {"V_liquid": 1e-6, "A": 0.0},
+                "after": {"V_liquid": 1e-6 + sign * V * (1.0 + miss), "A": 0.0}}
+        got[sign] = _ring_closures({"V": sign * V, "Pz": 0.0, "KE": 0.0}, poly, box, None, scales,
+                                   {"A_cl": 0.0, "A_rem": 0.0}, sigma=sigma, prefix="S")
+    for c in got.values():
+        assert c["limits"]["S1"] == pytest.approx(RING_BUDGET_LIMITS["R1"] * V)
+        assert c["relative"]["S1"] == pytest.approx(miss, rel=1e-3)
+        assert "S1" not in c["hard"]
+    # beyond the tolerance: hard either way
+    poly = {"before": {"V_liquid": 1e-6, "A": 0.0}, "after": {"V_liquid": 1e-6 - 1.05 * V, "A": 0.0}}
+    c = _ring_closures({"V": -V, "Pz": 0.0, "KE": 0.0}, poly, box, None, scales,
+                       {"A_cl": 0.0, "A_rem": 0.0}, sigma=sigma, prefix="S")
+    assert "S1" in c["hard"]
+
+
+def _fields(U=800.0, lost=()):
+    """A stand-in of ``surgery.sample_fields``: a uniform axial velocity ``U`` everywhere, the
+    points of ``lost`` (their indices) not located."""
+    def sample(pb, r, z, names):
+        found = np.ones(len(r), dtype=bool)
+        found[list(lost)] = False
+        out = {"velocity_x": np.where(found, 0.0, math.nan), "velocity_y": np.where(found, U,
+                                                                                   math.nan)}
+        return {k: out[k] for k in names}, found
+    return sample
+
+
+def test_the_rims_budgets_are_its_own_quadratures_where_the_box_grid_misses_it(monkeypatch):
+    from shapely import points
+    from shapely.geometry import Polygon
+
+    from faraday_singularity import surgery
+
+    L = gsh.sheeted_ring(t=1.5625e-6, L=4e-6, h=1e-7)
+    f = gsh.sides(L, True)["liquid"]
+    g = sh.sheet_rupture_geometry(L, f["fold"].pair, open_points=rs.flat_open().points, V_b=1.0)
+    # the box's grid at the ring's box (ring.box_radius delta, 4e-3 at delta 1e-3) holds no point
+    # of the rim: its momentum and energy were logged as zero
+    grid = surgery.site_grid(g["r_c"], g["z_c"], max(4e-3, 2.0 * g["L_rim"]))
+    poly = Polygon(g["removed"])
+    assert not poly.contains(points(np.column_stack([grid["r"], grid["zz"]]))).any()
+    # the rim's own quadrature resolves it
+    monkeypatch.setattr(surgery, "sample_fields", _fields(800.0))
+    q = sh.rim_quadrature(None, g["removed"], g["V_rim"])
+    assert q["checked"] and q["found"] == q["points"] > 0
+    assert q["V_quad"] == pytest.approx(g["V_rim"], rel=1e-9)
+    assert q["Pz"] == pytest.approx(800.0 * q["V_quad"], rel=1e-12)
+    assert q["KE"] == pytest.approx(0.5 * 800.0**2 * q["V_quad"], rel=1e-12)
+    # a point not located, or a volume not the rim's: unresolved, refused by the rupture
+    monkeypatch.setattr(surgery, "sample_fields", _fields(800.0, lost=(3,)))
+    q = sh.rim_quadrature(None, g["removed"], g["V_rim"])
+    assert not q["checked"] and math.isnan(q["Pz"]) and q["found"] == q["points"] - 1
+    monkeypatch.setattr(surgery, "sample_fields", _fields(800.0))
+    assert not sh.rim_quadrature(None, g["removed"], 1.05 * g["V_rim"])["checked"]
+    assert sh.rim_quadrature(None, g["removed"], 1.005 * g["V_rim"])["checked"]
+
+
+def _kink(**kw):
+    return {"name": "kink_ring_r1_far", "far": True, "chain": "ring", "refined": True,
+            "released": False, "r": 1.0e-3, "z": 4.6119, "radius": 8e-5, "t_set": 10.0,
+            "h_before": 2e-5, "target": 5e-6, "turn": 10.0, "yields": 0, "yield_t": None, **kw}
+
+
+def _held_fake(kinks, *, t=11.0, t_prev=10.99, samples=((10.99, 5e-6, 1.0e-3, 4.6119),)):
+    f = _fake(kinks=kinks, t=t)
+    f.state.t_prev = t_prev
+    f.state.lip_samples = [list(x) for x in samples]
+    f._lip_hold = lambda previous: CollapseDriver._lip_hold(f, previous)
+    return f
+
+
+def test_the_lips_refinement_is_held_before_the_kinks_are_released():
+    from faraday_singularity.jetcore import far_kink_regions
+
+    args = dict(t=11.0, hold=lambda L: 0.5, h_far=1e-5, h_floor=H_FLOOR, yield_turn=75.0,
+                sizes={})
+    kinks = {"ring_r1_far": _kink(), "ring_r2_far": _kink(name="kink_ring_r2_far", r=2e-3),
+             "ring_r3_far": _kink(name="kink_ring_r3_far", released=True)}
+    f = _held_fake(kinks)
+    held = CollapseDriver._lip_hold(f, dict(f.state.kinks))
+    assert held["ring_r1_far"]["t_set"] == 11.0 and kinks["ring_r1_far"]["t_set"] == 10.0
+    assert held["ring_r2_far"] is kinks["ring_r2_far"]  # its disc misses the lip
+    assert held["ring_r3_far"] is kinks["ring_r3_far"]  # released
+    # the release reads the held entries: the lip's refinement stays, the rest is released
+    out = far_kink_regions(held, {}, {}, **args)
+    assert out["ring_r1_far"]["released"] is False and out["ring_r2_far"]["released"] is True
+    assert far_kink_regions(dict(kinks), {}, {}, **args)["ring_r1_far"]["released"] is True
+    # a lip not read at the state the step started from holds nothing
+    stale = _held_fake(kinks, samples=((10.98, 5e-6, 1.0e-3, 4.6119),))
+    assert CollapseDriver._lip_hold(stale, dict(kinks)) == kinks
+    # after an event (t_prev NaN) a lip read now holds
+    after = _held_fake(kinks, t_prev=math.nan, samples=((11.0, 5e-6, 1.0e-3, 4.6119),))
+    assert CollapseDriver._lip_hold(after, dict(kinks))["ring_r1_far"]["t_set"] == 11.0
+    # no lip, or the lip not handled: nothing
+    assert CollapseDriver._lip_hold(_held_fake(kinks, samples=()), dict(kinks)) == kinks
+    unhandled = _held_fake(kinks)
+    unhandled.events.ring.sigma_V = 0.0
+    assert CollapseDriver._lip_hold(unhandled, dict(kinks)) == kinks
+
+
+def test_the_measurement_holds_the_lip_through_the_remesh_checks_and_the_commit():
+    """measure (``_split_kinks``) -> stop (the lip read) -> commit (``_commit_post_cut``): the
+    refinement held at the measurement is what the commit keeps; the stop's reading of the lip
+    adds its sample and changes no kink."""
+    kinks = {"ring_r1_far": _kink()}
+    f = _held_fake(kinks)
+    f.s = SimpleNamespace(refine_ratio=1.5, coarsen_hold=1e-6)
+    f.state.far_yields = 0
+    f._jetcore = lambda: SimpleNamespace(far_kinks="recentre", sheet_rupture_floors=None,
+                                         far_floor=1e-5, ring_kink_floor=False,
+                                         far_yield_turn=75.0)
+    f._column_size = lambda: math.nan
+    m = {"time": 11.0, "kinks": CollapseDriver._split_kinks(
+        f, {}, {"edges": {}}, {"whole": True, "R_K": math.inf, "mask": []}, 1.0, None)}
+    assert m["kinks"]["ring_r1_far"]["released"] is False
+    assert m["kinks"]["ring_r1_far"]["t_set"] == 11.0
+    CollapseDriver._sheet_context(f, [np.zeros((8, 2))])(_fold(4.9e-6), 1.2e-6)  # the stop
+    assert f.state.kinks["ring_r1_far"]["t_set"] == 10.0  # the reading changes no kink
+    assert f.state.lip_samples[-1][0] == 11.0
+    focus = SimpleNamespace(region=lambda name: SimpleNamespace(size=5e-6))
+    f.pb = SimpleNamespace(active_mesh_template=lambda: SimpleNamespace(focus=focus))
+    f.events.pinch = SimpleNamespace(enabled=False)
+    f._cut_record = lambda: {"settings": {}}
+    f._post_cut_state = lambda: {"apexes": {}}
+    f._event = lambda *a, **kw: None
+    CollapseDriver._commit_post_cut(f, m)
+    assert f.state.kinks["ring_r1_far"]["released"] is False
+    assert f.state.kinks["ring_r1_far"]["t_set"] == 11.0
+    # without the lip the same sequence releases it
+    g = _held_fake({"ring_r1_far": _kink()}, samples=())
+    g.s, g.state.far_yields, g._jetcore, g._column_size = f.s, 0, f._jetcore, f._column_size
+    released = CollapseDriver._split_kinks(g, {}, {"edges": {}}, {"whole": True, "R_K": math.inf,
+                                                                   "mask": []}, 1.0, None)
+    assert released["ring_r1_far"]["released"] is True
+
+
+def test_the_state_after_a_rupture_holds_no_lip_history_as_the_live_run_goes_on(tmp_path,
+                                                                                  monkeypatch):
+    """The rupture keeps ``postcut_e<k>`` after the driver's bookkeeping (``on_made``): the lip's
+    history is cleared there, so that the state written (``_write_state`` writes ``lip_samples``
+    only where there are any) and restored (``restore`` reads none as none) is the live run's; the
+    history stays in the record's ``lip``."""
+    written = {}
+
+    def made(pb, events, reconnect, outdir, request, *, k, dt_prev, h_floor, lip, driver,
+             on_made, base_check, log=print):
+        rec = {"kind": ev.SHEET_RUPTURE, "geometry": {"w": 1.5e-6}, "lip": lip,
+               "removed": {"V": 1e-15, "Pz": 2e-12, "KE": 3e-9, "centroid": [1e-3, 4.6]},
+               "base_guard": {"ok": True}}
+        on_made(rec)  # as sheetsurgery._sheet_rupture: the bookkeeping, then postcut_e<k>
+        written["postcut"] = [list(x) for x in driver.state.lip_samples]
+        written["lip"] = lip
+        driver._event_after = {"m": "after"}
+        return rec
+
+    import faraday_singularity.sheetsurgery as mod
+
+    monkeypatch.setattr(mod, "sheet_rupture", made)
+    f = _fake()
+    f.pb, f.reconnect, f.outdir = SimpleNamespace(), SimpleNamespace(delta=1e-3), tmp_path
+    history = [[1.0, 2e-6, 1e-3, 4.6], [2.0, 1.8e-6, 1e-3, 4.6], [3.0, 1.5e-6, 1e-3, 4.6]]
+    f.state.lip_samples = [list(x) for x in history]
+    f._made_events = lambda: []
+    f._event = lambda *a, **kw: None
+    f._write_ring_event_row = f._drop_event_dumps = f._prune_meshes = lambda *a: None
+    f._cut_record = lambda: {"settings": {"dt0": 1e-9}}
+    f.measure = lambda: {}
+    booked = []
+    f._on_groove_made = lambda rec: booked.append(rec["kind"])
+    due = _contact(sheet_rupture={"h_s": 1.5625e-6, "due": True, "thinning": {"thinning": True}})
+    m, stop = CollapseDriver._meet_sheet_rupture(f, {"m": "before"}, due)
+    assert stop is None and booked == [ev.SHEET_RUPTURE]
+    assert written["postcut"] == [] == f.state.lip_samples
+    # the record keeps the history the rupture met
+    assert written["lip"]["samples"] == history and written["lip"]["due"] is True
