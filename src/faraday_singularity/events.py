@@ -446,7 +446,7 @@ class JetCoreSettings:
     * ``sheet_rupture_floors``: the thickness ``h_s`` at which a thinning liquid lip of the ring is
       ruptured, in floors of the run (``h_s = sheet_rupture_floors h_floor``; null: 2), the lip
       resolved by ``driver.SHEET_ELEMENTS`` elements across its thickness down to ``h_floor`` until
-      then (``driver.CollapseDriver._meet_sheet``, ``sheetsurgery.sheet_rupture``); written into
+      then (``driver.CollapseDriver._meet_sheet_rupture``, ``sheetsurgery.sheet_rupture``); written into
       the block only where set (:data:`EventSettings.LATE_KEYS`).
 
     A key of :data:`PENDING_KEYS` is refused away from its default until the driver makes it."""
