@@ -10,15 +10,10 @@ flux follows the line-sink law `r_j ∝ τ^(1/2)` instead. See `README.md` for t
 references.
 
 **Status:** axisymmetric solver at `Bo = 0` with linear verification cases (free decay and the
-Faraday threshold of the `J0` mode), and a collapse driver (`src/faraday_singularity/driver.py`)
-that writes the collapse and jet observables during the run (apex curvature, jet-base radius and
-speed, cone angle, running estimates of the singular time from the apex and, from the jet-base
-radius, of the origin of the jet's growth or of the time a closing base would reach the axis, crest
-and trough episodes of the axis) and stops before any pinch-off. The production runner can
-continue a run through a neck pinch-off by an explicit cut at the start of a restart
-(`src/faraday_singularity/surgery.py`, the post-cut mode of the driver); it is tested on a synthetic
-necked cavity only, not yet on a production collapse, and no study in the cut radius has been run. The repository
-holds no collapse case files or results yet.
+Faraday threshold of the `J0` mode), collapse and jet diagnostics, explicit neck reconnection and
+post-cut event handlers. The driver records apex curvature, jet-base radius and speed, cone
+angle, fitted time origins and crest/trough episodes. Synthetic finite-element regressions cover
+the post-cut handlers; independence of cut scales requires a separate acceptance study.
 
 ## Structure
 
@@ -110,9 +105,8 @@ add a second top-level `cases/` tree.
   parent did not have changes the trajectory at round-off even before a cut, so an ordinary restart
   may not add, drop or change it (`tau_end` aside). The cut (`surgery.cut`): pyoomph's planner gives the topology; its
   caps are always replaced by tangent arcs spliced at the first survivor beyond the planner's window
-  (`cap_window_factor`) with a radius of at least `delta`, which sets the geometry (`in_cut_radii`;
-  on slender threads at `delta/r_n = 1.05` a bridge of 13-14.5 `delta` and 55-58 `delta^3` of
-  removed gas), so a `delta` study needs a sensitivity to that window; the tips, the bridge and the
+  (`cap_window_factor`) with a radius of at least `delta`, which sets the geometry (`in_cut_radii`),
+  so a `delta` study needs a sensitivity to that window; the tips, the bridge and the
   focus of the cut's remesh are sized in cut radii (`tip_size`, `bridge_size`, `focus_size`,
   `focus_radius`), not by the landing run's focus, except that the bubble's bottom, the landing's
   cavity bottom with its jet, keeps the landing focus where that is finer (`focus.kept`); gmsh's
@@ -589,9 +583,7 @@ add a second top-level `cases/` tree.
   volume and `2 pi r u` integrated by the axis repair's triangle rule at the velocity sampled on
   each side), not its whole volume, a crossed cell a side cannot read so counts the midpoint rule's
   change, and a value that is not finite fails `C_P`; the midpoint rule's change is kept as `C_P_grid` with the
-  split (r1 at 7817 and r1s4 at 8208, bf80e74: one cell of dV 1.4e-11 at u_z 330-380 on the
-  plug's surface, its fraction 0.502 and 0.498 both times, 3.9e-9 and 3.6e-9 of the grid's
-  change, the matched cells 1.8e-10 and -4.1e-11, the limit 1.62e-9 unchanged). A gas kink
+  split. A gas kink
   of the ring (`fold-kink`) whose elements lie above `refine_ratio h_floor` is refined to the floor
   by the same audited route, and the fill at the floor meets it there.
   Records are `events/ring_contact_<step>_<remesh-count>_<attempt>.json`, event `ring-contact-refine`.
@@ -746,9 +738,9 @@ add a second top-level `cases/` tree.
   time, the rebuild and a hash of the dofs and pinned values), the driver locates the probe discs
   of every jet in one call (`axial_velocity_sets`), and after a cut pyoomph's snapshot before each
   step is written uncompressed: none of these changes a value written.
-- Runs of one case in fresh processes differ by about 1e-14 relative unless MKL runs on one thread
-  (`MKL_NUM_THREADS=1`; `OMP_NUM_THREADS` alone does not do it); compare runs to round-off, or set
-  it when a comparison must be exact.
+- For reproducibility checks set `MKL_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and
+  `OPENBLAS_NUM_THREADS=1`, and record them with the comparison. Threaded linear algebra can
+  change the order of floating-point operations.
 - The wave height `h` of a collapse is `h_crest` from `postProcess/collapse_table.py
   --per-episode`: the largest elevation of the axis above the mean level over the crest episode
   before the trough that collapses. It is a wave height only in rows with `crest_jet` 0: when a

@@ -4,10 +4,10 @@ Direct numerical simulation, with sharp-interface finite elements in
 [pyoomph](https://github.com/pyoomph/pyoomph), of the singular collapse of a Faraday-wave
 interface and the Worthington jet it launches.
 
-**Status:** axisymmetric solver at zero Bond number with its linear verification cases, and a
-collapse driver that records the collapse and jet observables during the run and stops before any
-pinch-off. A reconnection continues a run through a neck pinch-off by an explicit cut (below); it is
-tested on a synthetic necked cavity only, not yet on a production collapse. No collapse case files or results are in the repository yet.
+**Status:** axisymmetric solver at zero Bond number, with linear verification cases, collapse
+and jet diagnostics, explicit neck reconnection and handlers for subsequent topology changes.
+The post-cut handlers have synthetic finite-element regression tests. Independence of the cut
+scales remains a separate acceptance requirement.
 
 ## Motivation
 
@@ -112,7 +112,9 @@ criteria are stated in `verificationCases/README.md`.
 | `postProcess/` | analysis and visualisation |
 | `docs/` | approved authored documents |
 
-Run outputs are not stored in this repository.
+The documented linear verification cases are kept with their comparators. Campaign-specific
+cases, chain specifications, replay configurations and run outputs belong outside this source
+repository. Tests construct their own small cases and retain all required fixtures.
 
 ## Environment
 
@@ -120,10 +122,9 @@ pyoomph is built from source at the CoMPhy release `comphy-2026.09.21.1`
 (`f912ac10cdbb170e58aca3a337f0aa4ed13cf1e0`), pinned in `pyproject.toml` and `uv.lock`, with MPI
 enabled.
 
-Runs of one case in fresh processes differ by about 1e-14 relative unless MKL, whose threaded
-solve is the source, runs on one thread (`MKL_NUM_THREADS=1`; `OMP_NUM_THREADS` alone does not do
-it); with it they have agreed to the byte, a restart after a cut included. Compare runs to
-round-off, or set it when a comparison must be exact.
+For reproducibility checks, set `MKL_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and
+`OPENBLAS_NUM_THREADS=1`. Record these settings with the comparison; threaded linear algebra
+can change the order of floating-point operations.
 
 ## Running
 
@@ -267,10 +268,8 @@ landing state, and refused unless `min_landing_ratio <= delta/r_n <= max_landing
 units of `delta` depends on `delta/r_n`. pyoomph's planner gives the topology; each of its caps is
 replaced by a circular arc tangent to the old surface at the first surviving node beyond the
 planner's exclusion window (`cap_window_factor`) whose radius is at least `delta`, and meeting the
-axis at a right angle. On slender necks at `delta/r_n = 1.05` the bridge of liquid between the
-bubble and the cavity is then 13-14.5 `delta` long and the cut removes 55-58 `delta^3` of gas; the
-record gives the splice radii, the bridge and the removed gas in cut radii (`in_cut_radii`), and a
-study in `delta` should vary the window too. The mesh of the cut is sized in cut radii, so that the
+axis at a right angle. The record gives the splice radii, the bridge and the removed gas in cut
+radii (`in_cut_radii`); a study in `delta` should vary the window too. The mesh of the cut is sized in cut radii, so that the
 cuts of a study are meshed alike: the tips on the axis and the bridge (`tip_size`, `bridge_size`,
 kept for every later remesh) and the focus of the cut's remesh (`focus_size` within
 `focus_radius`), which replaces the focus the landing run left. Only the bubble's bottom, far from
