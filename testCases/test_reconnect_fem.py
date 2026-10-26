@@ -2062,7 +2062,8 @@ def test_after_a_cut_each_step_makes_two_newton_iterations_whatever_its_toleranc
         impose_closing_flow(pb)
         rec = surgery.cut(pb, s, tmp_path)
         post = str(rec["postcut_state"]["path"])
-        driver = types.SimpleNamespace(pb=pb, reconnect=s)
+        # Each call below reloads the post-cut mesh before entering the context.
+        driver = types.SimpleNamespace(pb=pb, reconnect=s, _fresh_mesh=lambda: True)
         tol0, level0 = pb.newton_solver_tolerance, pb.states_compression_level
 
         def step(tol, rule):
