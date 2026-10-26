@@ -529,7 +529,16 @@ add a second top-level `cases/` tree.
   `test_floor_fill_identity.py` (runs never at the floor are 7ba32f9's).
 - A fresh bubble-tip `edge-turn` within its final three quadratic elements can be met by
   `CollapseDriver._tip_edge_straighten` before the piercing, with recentred far kinks and
-  positive groove volume/momentum noise floors. Exactly one curved edge must qualify for
+  positive groove volume/momentum noise floors. After a native inversion failure has rolled
+  back, its terminal annular dip can use that same audit once per step: a negative initial and
+  positive final axial tangent (an interior minimum of the P2 edge), above the existing
+  edge-refinement and midside-offset thresholds. Ordinary steps
+  retain their refinement path. A refused recovery retains the original failed-step stop;
+  an unclosed audit ends the run on its restored input. The failure receipt does not locate
+  the inversion: the record labels the site unknown and the terminal geometry selects the
+  candidate. An exception after booking a recovery rolls its balances and profile counters
+  back with the native state; the operation record and a compensating event label that rollback.
+  Exactly one curved edge must qualify for
   the existing straightening and its radius must exclude the upward chain. The exact signed
   volume between quadratic curve and chord and positive sliver quadrature account for
   liquid gained or removed; missing sample points, independent sliver volume/momentum bounds,

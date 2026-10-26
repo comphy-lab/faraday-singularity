@@ -12,6 +12,65 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from faraday_singularity import tipcontact as t
 
 
+def test_terminal_dimple_from_a_saved_p2_cap():
+    # Three terminal nodes, with the common axial origin subtracted.
+    P = np.array([[5.857513118657744e-6, 1.1011388534321047e-6],
+                  [2.850491864724829e-6, -8.166955556276889e-8], [0.0, 0.0]])
+    reading = t.terminal_dimple(P, 30.0, 0.1)
+    assert reading is not None and reading["index"] == 1
+    assert reading["initial_tangent_z"] < 0 < reading["tangent_z"]
+    assert reading["trigger"] == "tip-dimple" and not reading["fresh"]
+    assert reading["turn"] == pytest.approx(44.909064764353296, abs=1e-7)
+    assert t.swept_edge(P)["dV"] == pytest.approx(-4.3900889792508587e-17, rel=1e-8, abs=0)
+    # Translation preserves the reading; a straight or off-axis cap does not qualify.
+    assert t.terminal_dimple(P + [0, 4.67311000646152], 30.0, 0.1) is not None
+    assert t.terminal_dimple(P, 50.0, 0.1) is None
+    assert t.terminal_dimple(P, 30.0, 0.2) is None
+    Q = P.copy()
+    Q[1] = 0.5 * (Q[0] + Q[2])
+    assert t.terminal_dimple(Q, 30.0, 0.1) is None
+    assert t.terminal_dimple(P + [1e-6, 0], 30.0, 0.1) is None
+    assert t.terminal_dimple(P[::-1], 30.0, 0.1) is None
+    Q = P.copy()
+    Q[:, 1] *= -1
+    assert t.terminal_dimple(Q, 30.0, 0.1) is None
+
+
+@pytest.mark.parametrize("angle", [50, 60])
+def test_a_coarse_convex_circular_cap_is_not_an_annular_dip(angle):
+    from faraday_singularity.reconnect import p2_edges
+
+    theta = np.radians([angle, angle / 2, 0])
+    P = np.column_stack([np.sin(theta), np.cos(theta)])
+    edge = p2_edges(P)
+    offset = np.linalg.norm(P[1] - 0.5 * (P[0] + P[2])) / edge["L"][0]
+    # This convex cap met all three old predicates, despite rising to its axis end.
+    end_tangent = 0.5 * (P[0, 1] - P[2, 1]) - 2 * (P[1, 1] - P[2, 1])
+    assert end_tangent > 0 and edge["turn"][0] > 30 and offset > 0.1
+    assert t.terminal_dimple(P, 30.0, 0.1) is None
+
+
+def test_only_a_native_inversion_failure_can_admit_a_dimple():
+    from faraday_singularity.driver import CollapseDriver
+
+    m = {"input": True}
+    fake = SimpleNamespace()
+    other = {"reason": "step-failed", "error": "RuntimeError: OomphException"}
+    assert CollapseDriver._tip_edge_straighten(fake, m, None, failed_step=other) == (m, None)
+    inverted = dict(other, error="InvertedElementRemeshRequest: folded")
+    stop = {"reason": "other"}
+    assert CollapseDriver._tip_edge_straighten(fake, m, stop, failed_step=inverted) == (m, stop)
+    fresh_calls = []
+    ordinary = SimpleNamespace(
+        _fresh_mesh=lambda: fresh_calls.append(True) or True,
+        _ring=lambda: None, _jetcore=lambda: None,
+    )
+    stop = {"reason": "interface-unresolved", "trigger": "edge-turn",
+            "chain": "bubble", "fresh": True}
+    assert CollapseDriver._tip_edge_straighten(ordinary, m, stop, failed_step=inverted) == (m, stop)
+    assert fresh_calls == [True]  # the ordinary fresh-edge eligibility path was used
+
+
 def test_a_swept_quadratic_edge_has_the_exact_revolved_sliver_volume():
     # r=R+x, z=h(1-x^2), chord z=0: 2 pi integral r z dr = 8 pi R h/3.
     R, h = 2.0, 0.2
@@ -72,7 +131,7 @@ def test_other_stops_never_enter_the_tip_operation():
             "fresh": False,
         },
     ):
-        fake = SimpleNamespace()
+        fake = SimpleNamespace(_fresh_mesh=lambda: True)
         m = {"input": True}
         assert CollapseDriver._tip_edge_straighten(fake, m, stop) == (m, stop)
 

@@ -7,6 +7,38 @@ import math
 import numpy as np
 
 
+def terminal_dimple(points, turn_limit: float, offset_limit: float) -> dict | None:
+    """Read an under-resolved annular dip on the downward tip's final P2 edge.
+
+    The chain ends on the axis, walking towards the downward tip. Opposite
+    axial tangent signs prove an interior minimum of the quadratic edge.
+    Require the existing refinement turn and midside-offset thresholds too.
+    """
+    from .reconnect import p2_edges
+    from .axisrepair import axis_fold
+
+    P = np.asarray(points, dtype=float)
+    if len(P) < 3 or len(P) % 2 != 1 or P[-1, 0] != 0:
+        return None
+    if axis_fold(P, "last") is not None:
+        return None
+    Q = P[-3:]
+    if not np.isfinite(Q).all() or np.any(Q[:-1, 0] <= 0):
+        return None
+    tangent_z = 0.5 * (Q[0, 1] - Q[2, 1]) - 2 * (Q[1, 1] - Q[2, 1])
+    initial_tangent_z = 2 * (Q[1, 1] - Q[0, 1]) - 0.5 * (Q[2, 1] - Q[0, 1])
+    e = p2_edges(Q)
+    L, turn = float(e["L"][0]), float(e["turn"][0])
+    offset = float(np.linalg.norm(Q[1] - 0.5 * (Q[0] + Q[2]))) / L if L > 0 else 0
+    if not (initial_tangent_z < 0 < tangent_z and turn > turn_limit and offset > offset_limit):
+        return None
+    return {"reason": "interface-unresolved", "trigger": "tip-dimple", "chain": "bubble",
+            "index": len(P) - 2, "r": float(Q[1, 0]), "z": float(Q[1, 1]),
+            "L": L, "turn": turn, "limit": turn_limit, "tangent_z": float(tangent_z),
+            "initial_tangent_z": float(initial_tangent_z),
+            "offset": offset, "fresh": False}
+
+
 def swept_edge(points) -> dict:
     """The signed liquid change and positive quadrature of a quadratic edge's sliver.
 

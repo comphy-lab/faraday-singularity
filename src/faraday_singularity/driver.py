@@ -4008,8 +4008,9 @@ class CollapseDriver:
             return m, self._stop(m)
         return m, None
 
-    def _tip_edge_straighten(self, m: dict, stop: dict | None) -> tuple[dict, dict | None]:
-        """Meet a fresh bubble-tip edge turn by a budgeted, reversible straightening.
+    def _tip_edge_straighten(self, m: dict, stop: dict | None, *,
+                             failed_step: dict | None = None) -> tuple[dict, dict | None]:
+        """Meet a fresh edge turn or a failed step's terminal dip by audited straightening.
 
         Only the final three quadratic elements of the downward tip qualify;
         the ring and upward chain are excluded. Signed sliver quadrature,
@@ -4024,27 +4025,45 @@ class CollapseDriver:
         A hard refusal restores the native input and freshness (tip-edge-unclosed); later
         events and window ends are dispatched after acceptance. The tip_edge unit/FEM tests
         and 6ef3c4d identity pins cover this contract.
+
+        A terminal dip is eligible only after an inversion failure was rolled back.
+        Normal steps retain ordinary refinement. Refused admission leaves that failed
+        step stopped; it never creates a new stop on an otherwise admissible state.
         """
-        if stop is None or stop.get("reason") != "interface-unresolved" \
-                or stop.get("trigger") != "edge-turn" or stop.get("chain") != "bubble" \
-                or not stop.get("fresh") or not self._fresh_mesh() or self._ring() is not None:
+        dimple = (stop is None and failed_step is not None
+                  and failed_step.get("reason") == "step-failed"
+                  and failed_step.get("error", "").startswith("InvertedElementRemeshRequest:"))
+        if not dimple and (stop is None or stop.get("reason") != "interface-unresolved"
+                or stop.get("trigger") != "edge-turn" or stop.get("chain") != "bubble"
+                or not stop.get("fresh") or not self._fresh_mesh()):
+            return m, stop
+        if self._ring() is not None:
             return m, stop
         jet = self._jetcore()
         if jet is None or jet.far_kinks != "recentre" \
                 or not hasattr(self.pb, "straighten_interface_edges"):
             return m, stop
         from .axisrepair import AXIS_REPAIR_BOUND, AXIS_REPAIR_RECUR_STEPS
-        from .tipcontact import closures, edge_patch, patch_budget, sliver_momentum, swept_edge
+        from .tipcontact import (closures, edge_patch, patch_budget, sliver_momentum,
+                                 swept_edge, terminal_dimple)
         from .surgery import box_integrals, site_grid
 
         sigma, pb = self.events.groove, self.pb
-        if stop.get("axis_fold_recurs") is not None or self._axis_fold_of(stop) is not None:
+        if stop is not None and (stop.get("axis_fold_recurs") is not None
+                                 or self._axis_fold_of(stop) is not None):
             return m, stop
         segments = pb.interface_segments()
         bubble = next((c for c in segments if not c["open"]), None)
         if bubble is None:
             return m, stop
         P = np.column_stack([bubble["r"], bubble["z"]])
+        if dimple:
+            from .problem import AXIS_MIDSIDE_LIMIT
+
+            stop = terminal_dimple(P, self.reconnect.edge_turn_refine, AXIS_MIDSIDE_LIMIT)
+            if stop is None:
+                return m, None
+            stop["fresh"] = self._fresh_mesh()
         i = int(stop.get("index", -1))
         if i < len(P) - 6 or i >= len(P) - 1 or i % 2 != 1:
             return m, stop
@@ -4100,6 +4119,9 @@ class CollapseDriver:
             "cumulative_bound": bound,
             "recurrence_window": AXIS_REPAIR_RECUR_STEPS,
         }
+        if dimple:
+            rec["failed_step"] = failed_step
+            rec["inversion_site"] = "unknown; candidate selected by terminal geometry"
         try:
             patch = edge_patch(pb, P[i], 0.5 * (P[i - 1] + P[i + 1]),
                                0.5 * (velocity[0] + velocity[2]))
@@ -4166,6 +4188,7 @@ class CollapseDriver:
             base=base,
             dV=dV,
             dPz=dP,
+            **({"inversion_site": rec["inversion_site"]} if dimple else {}),
         )
         self._snapshot(after_m, "tip-edge-straighten")
         # Later events and legitimate window ends are dispatched after the
@@ -4911,22 +4934,37 @@ class CollapseDriver:
                             failed_step_context = dict(stop)
                             retry_state = (copy.deepcopy(st.kinks), st.far_yields,
                                            st.last_remesh_step)
+                            retry_tip = (len(self._tip_edge_balances), st.snapshots,
+                                         st.last_snapshot_t, st.last_snapshot_ell)
                             retry_focus = pb.active_mesh_template().focus
                             try:
                                 retried = self._failed_step_retry(m, stop)
                             except Exception as retry_exc:  # a failed rebuild keeps the rollback
                                 st.kinks, st.far_yields, st.last_remesh_step = retry_state
+                                discarded = self._tip_edge_balances[retry_tip[0]:]
+                                del self._tip_edge_balances[retry_tip[0]:]
+                                st.snapshots, st.last_snapshot_t, st.last_snapshot_ell = retry_tip[1:]
                                 pb.active_mesh_template().focus = retry_focus
                                 self._restore_step_snapshot()
-                                m = self.measure()
                                 stop["retry_error"] = (
                                     f"{type(retry_exc).__name__}: {retry_exc}")[:400]
+                                for balance in discarded:
+                                    path = self.outdir / balance["record"]
+                                    rec = json.loads(path.read_text())
+                                    rec.update(outcome="rolled-back", retry_error=stop["retry_error"])
+                                    path.write_text(json.dumps(_plain(rec), indent=1) + "\n")
+                                if discarded:
+                                    self._event("tip-edge-rollback", m,
+                                                records=[x["record"] for x in discarded],
+                                                error=stop["retry_error"])
+                                m = self.measure()
                                 self._event("step-retry-failed", m, error=stop["retry_error"])
                                 break
                             if retried is not None:
                                 m, retry_stop = retried
                                 if (retry_stop is not None
-                                        and retry_stop.get("trigger") == "ring-refine-base"):
+                                        and retry_stop.get("trigger") in (
+                                            "ring-refine-base", "tip-edge-unclosed")):
                                     stop = dict(retry_stop, failed_step=failed_step_context)
                                     break
                                 # Guard stops and event requests are re-derived and met at the top.
@@ -5210,7 +5248,12 @@ class CollapseDriver:
         self._post_cut_cache = None
 
     def _failed_step_retry(self, m: dict, stop: dict) -> tuple[dict, dict | None] | None:
-        """After a failed step rolled back (:meth:`_failed_step_stop`), in the ring stage with
+        """After a failed step rolled back (:meth:`_failed_step_stop`), one recovery per step.
+
+        Before the ring, only a native inversion failure can admit the downward terminal
+        dip to the existing signed tip audit. A refused admission keeps the original
+        failed-step stop; a failed audit keeps its hard stop and restored input. Ordinary
+        states never enter that route. In the ring stage with
         jetcore's recentred far kinks: one retry per step, the ring's sharpest element (turning by
         more than ``edge_turn_refine`` and above the guard's floor) rebuilt in a far kink of its own
         at the size its turn asks for, as the ring refine does (:meth:`_ring_refine_once`, event
@@ -5223,7 +5266,19 @@ class CollapseDriver:
         second failure of the same step, no ring, no element to refine), the stop ``step-failed``
         then standing."""
         st, r = self.state, self.reconnect
-        if getattr(self, "_retried_step", None) == st.step or self._refined_chain() != "ring":
+        if getattr(self, "_retried_step", None) == st.step:
+            return None
+        if self._refined_chain() != "ring":
+            if not stop.get("error", "").startswith("InvertedElementRemeshRequest:"):
+                return None
+            count = len(self._tip_edge_balances)
+            self._retried_step = st.step
+            after, found = self._tip_edge_straighten(m, None, failed_step=stop)
+            if len(self._tip_edge_balances) > count or (found is not None
+                    and found.get("trigger") == "tip-edge-unclosed"):
+                return after, found
+            if found is not None:
+                stop["tip_edge_retry"] = found
             return None
         edges = (self._post_cut_state().get("edges") or {}).get("ring") or {}
         e = edges.get("edges")
