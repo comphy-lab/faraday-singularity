@@ -113,6 +113,9 @@ def _fake_driver(L, *, enabled=True, jet="recentre", ring=True, removed=False, h
         _t=lambda: 10.95, _taus=lambda t: {"tau": 2.5e-5, "tau_p": 2.3e-5})
     fake._ring_jacobian_reading = lambda st: CollapseDriver._ring_jacobian_reading(fake, st)
     fake._ring_kink_reading = lambda st: CollapseDriver._ring_kink_reading(fake, st)
+    fake._ring_spline_fill_request = lambda st: CollapseDriver._ring_spline_fill_request(fake, st)
+    fake._local_ring_fill_request = lambda *a, **kw: CollapseDriver._local_ring_fill_request(fake, *a, **kw)
+    fake._ring_liquid_reading = lambda st: CollapseDriver._ring_liquid_reading(fake, st)
     fake._refined_chain = lambda: CollapseDriver._refined_chain(fake)
     return fake
 

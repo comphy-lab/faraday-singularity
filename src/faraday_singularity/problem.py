@@ -401,13 +401,16 @@ class FaradayProblem(Problem):
                         "z": xy[1, seg], "u_r": ur[seg], "u_z": uz[seg]})
         return sorted(out, key=lambda c: float(np.min(c["z"])))
 
-    def interface_loops(self) -> list[dict]:
+    def interface_loops(self, *, validate: bool = True, with_node_ids: bool = False) -> list[dict]:
         """Every closed loop of the free surface (the ring of a pierced bubble, ``ring.py``):
         ``r, z, u_r, u_z`` of its nodes in the order of the walk around it, its start not
         repeated, checked to be ordered (``ring.validate_loop_order``), counter-clockwise in
         ``(r, z)`` and starting at its seam, the vertex node of largest ``r`` (ties to the larger
         ``z``), so that its closed polyline (``ring.closed``) has ``2N + 1`` nodes from a vertex;
-        ``open`` False, ``end_types`` ``("loop", "loop")``. Empty without a loop."""
+        ``open`` False, ``end_types`` ``("loop", "loop")``. Empty without a loop.
+        The candidate-step guard alone skips order validation to read a crossing.
+        Optional ``node_ids`` are cache indices, comparable only on an unchanged mesh;
+        they follow the same orientation and seam rotation as the coordinates."""
         from pyoomph.meshes.zeta import _find_closed_segments
 
         from .ring import orient_loop, rotate, seam_index, validate_loop_order
@@ -427,13 +430,16 @@ class FaradayProblem(Problem):
                 continue
             idx = np.array([int(i) for i in (seg[:-1] if seg[0] == seg[-1] else seg)])
             P = np.column_stack([xy[0, idx], xy[1, idx]])
-            validate_loop_order(P)
+            if validate:
+                validate_loop_order(P)
             vertex = np.array([i in vertices for i in idx])
             P, idx, vertex = orient_loop(P, idx, vertex)
             P, idx, vertex = rotate(P, seam_index(P, vertex), idx, vertex)
             out.append({"open": False, "end_types": ("loop", "loop"), "r": P[:, 0].copy(),
                         "z": P[:, 1].copy(), "u_r": np.asarray(ur)[idx],
                         "u_z": np.asarray(uz)[idx], "vertex": vertex})
+            if with_node_ids:
+                out[-1]["node_ids"] = idx.copy()
         return out
 
     def cut_observables(self) -> dict[str, float]:

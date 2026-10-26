@@ -480,8 +480,9 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
                   if len(X) else np.zeros(0, dtype=bool))
     # the bulk nodes in the old gas: inside the filled region but within a twentieth of the old
     # surface's shortest chord there, the sag of its quadratic elements; for a fill at the floor,
-    # on the old surface's curve and beyond the band of the old elements (floor_bulk_inside)
-    if request.get("floor") is not None and cls == "RF":
+    # or a local spline-contact fill, on the old surface's curve and beyond the band of the
+    # old elements (floor_bulk_inside)
+    if any(request.get(key) is not None for key in ("floor", "spline_fill", "step_fill")) and cls == "RF":
         bulk_inside, transfer["bulk_band"] = floor_bulk_inside(
             sets["bulk"][1], P, g.i_s, g.j_s, g.closure, 0.05 * g.h_arc)
     else:

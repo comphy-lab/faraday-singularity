@@ -505,7 +505,10 @@ add a second top-level `cases/` tree.
   out along the plug) is filled in the same way (`corner` in its wedge); a failed step in the ring
   stage is retried once after the ring's sharpest element above the floor is rebuilt as the ring
   refine rebuilds (`CollapseDriver._failed_step_retry`, event `step-retry`;
-  `test_landing_identity.py` pins runs meeting neither against 6eff16c); an in-memory restore
+  `test_landing_identity.py` pins runs meeting neither against 6eff16c); a retry's hard
+  `ring-refine-base` stop ends the run; other guard stops and event requests return to the
+  handlers. Stops before another accepted step keep `failed_step` context. A failed retry
+  restores its input mesh, focus and refinement bookkeeping (`step-retry-failed`, `retry_error`); an in-memory restore
   across a rebuild (`FaradayProblem._restore_state`: the rollback of a failed step or of an axis
   repair) puts the template's project attributes (`TEMPLATE_KEYS`: focus, cut and ring sizing)
   back on the sibling template pyoomph reloads the mesh from, which in a restarted run otherwise
@@ -518,11 +521,35 @@ add a second top-level `cases/` tree.
   beside the bubble's chain before the piercing has the surface's curved edges about it put
   straight within `AXIS_REPAIR_BOUND delta^3` (`CollapseDriver._tip_straighten`,
   `FaradayProblem.straighten_interface_edges`, event `tip-straighten`;
-  `test_kink_tip_identity.py`); a rebuilt mesh's
+  `test_kink_tip_identity.py`); straightening that reaches the open chain is refused,
+  and a Jacobian bound still below its limit restores the input; a rebuilt mesh's
   `curved-jacobian` at the ring is read as the
   ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
   the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
   `test_floor_fill_identity.py` (runs never at the floor are 7ba32f9's).
+- Local ring contacts (`ringcontact.py`, recentred far kinks and enabled groove fill): a
+  single rebuild-spline crossing within two adjacent quadratic elements, on a simple node
+  polygon, is filled only after its local pocket is independently read as gas (`spline-fill`,
+  `spline_fills`). A candidate step's local polygon crossing is checked before acceptance;
+  with the inverted-element net's step snapshot and an unchanged mesh, cyclic node
+  identities map its pocket back to the simple input. Other non-simple candidates also
+  roll back and keep `stepped-contact-unhandled`, without a fill.
+  Without that snapshot this candidate-step route is off.
+  The native input is restored before a gas fill (`ring-contact-step-rollback`, with discarded
+  distortion flags and the rejected diagnostics interval; `step-contact-fill`,
+  `step_contact_fills`). Unreadable or liquid pockets keep `stepped-contact-unhandled`.
+  Both fills use the existing hard G closures, `G_base`, recorded filled volume and the
+  curve/locator-band transfer prediction (`events/event_<k>.json`); refusals and failed
+  closures keep the existing resumable stops. A liquid-side kink instead uses the ring
+  refinement without rupture: positive calibrated ring volume and momentum noise floors
+  are required (`liquid_refine_unavailable` otherwise). Its hard zero-removal checks are
+  `C_V`, `C_P`, `C_loop` and `C_base`, with the existing base tolerance; an unclosed audit
+  restores the input in place, retaining event and profile counters (`ring-contact-unclosed`).
+  Records are `events/ring_contact_<step>_<remesh-count>_<attempt>.json`, event `ring-contact-refine`.
+  Unit and stand-in routes, finite-element fills/refinement/rollback, and unchanged-run pins
+  against 775df94 are in `test_ring_contact.py`, `test_ring_contact_fem.py` and
+  `test_ring_contact_identity.py`. These routes preserve one simple ring; none ruptures a
+  liquid film or changes the ring-removal threshold.
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,
   its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest
@@ -648,10 +675,3 @@ add a second top-level `cases/` tree.
 - Figures follow the `publication-plots` conventions.
 - README, `docs/` and figure captions are public-candidate: no private paths, hosts or
   provisional findings.
-
-After a failed-step retry, a hard `ring-refine-base` stop ends the run; guard stops and event
-requests return to the loop's handlers. Stops before another accepted step retain `failed_step`
-context. A failed retry rebuild restores its input mesh, focus and refinement bookkeeping and
-records `step-retry-failed` and `retry_error` on the resumable `step-failed` stop. A tip
-straightening whose radius reaches the open chain is refused, and one whose Jacobian bound still
-fails is rolled back.

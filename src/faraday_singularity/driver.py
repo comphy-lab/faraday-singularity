@@ -428,6 +428,7 @@ from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MA
                         groove_gap, interface_guard, jet_base_apex, kink_regions, post_cut_record,
                         post_cut_stops, region_spacing, tau_end_reached, tip_jet)
 from .selfcontact import InterfaceSelfIntersection, fold_gap
+from .ringcontact import RingStepContact
 from .singular import singular_time
 
 
@@ -3428,9 +3429,10 @@ class CollapseDriver:
         fold = {"ratio": s.fold_ratio, "stop": self._fold_stop(),
                 "stop_elements": s.fold_stop_elements}
         floor = request.get("floor")
+        local_fill = floor or request.get("spline_fill") or request.get("step_fill")
         base_check = None
-        if floor is not None:  # a wedge of gas of the ring at the floor: its own fold limits
-            fold = dict(floor["fold"])
+        if local_fill is not None:  # the local gas wedge's own fold limits
+            fold = dict(local_fill["fold"])
 
             def base_check():
                 return base_guard_checked(m, self.measure())
@@ -3455,6 +3457,10 @@ class CollapseDriver:
             self._event("floor-fill", m, k=k, guard=floor["guard"], wedge=floor["wedge"],
                         V_fill=(made.get("filled") or {}).get("V"),
                         base=made.get("base_guard"))
+        elif local_fill is not None:
+            kind = "step-contact-fill" if request.get("step_fill") is not None else "spline-fill"
+            self._event(kind, m, k=k, guard=local_fill["guard"], wedge=local_fill["wedge"],
+                        V_fill=(made.get("filled") or {}).get("V"), base=made.get("base_guard"))
         self._write_ring_event_row(made)
         self._drop_event_dumps()
         self._prune_meshes()
@@ -3827,6 +3833,8 @@ class CollapseDriver:
 
         last = made[-1] if made else None
         floors = sum(1 for e in made if (e.get("request") or {}).get("floor") is not None)
+        splines = sum(1 for e in made if (e.get("request") or {}).get("spline_fill") is not None)
+        stepped = sum(1 for e in made if (e.get("request") or {}).get("step_fill") is not None)
         return {"made": len(made), "max_events": self.events.max_events,
                 "by_kind": count("kind"), "by_tip": count("tip"),
                 "last": None if last is None else {key: last.get(key) for key in (
@@ -3842,6 +3850,8 @@ class CollapseDriver:
                 **({"ring": self._ring_summary()} if self._ring() is not None else {}),
                 **({"sheets": self._sheets_logged} if self._sheets_logged else {}),
                 **({"floor_fills": floors} if floors else {}),
+                **({"spline_fills": splines} if splines else {}),
+                **({"step_contact_fills": stepped} if stepped else {}),
                 "stop": ({key: stop.get(key) for key in ("reason", "k", "kind", "class",
                                                          "handler", "record")}
                          if stop.get("reason") in EVENT_STOPS else None)}
@@ -4154,14 +4164,16 @@ class CollapseDriver:
         ``RING_REFINE_TURN_MAX`` or ``edge-midside``, or a rebuilt mesh's ``curved-jacobian`` at an
         element on the ring (:meth:`_ring_jacobian_reading`), at an element longer than
         ``refine_ratio`` times the run's ``h_floor`` (the guard's own floor), in the ring stage
-        before the ring's removal with jetcore's recentred far kinks (:meth:`_refined_chain`)."""
-        stop = self._ring_jacobian_reading(stop)
+        before the ring's removal with jetcore's recentred far kinks (:meth:`_refined_chain`).
+        A liquid kink of the ring also qualifies, through :meth:`_ring_liquid_reading`, with
+        hard zero-removal balances around its rebuild (:meth:`_ring_liquid_refine`)."""
+        stop = self._ring_liquid_reading(self._ring_jacobian_reading(stop))
         if stop is None or stop.get("reason") != "interface-unresolved":
             return False
         if stop.get("chain") != "ring":
             return False
         trigger = stop.get("trigger")
-        if trigger not in ("edge-turn", "edge-midside", "curved-jacobian"):
+        if trigger not in ("edge-turn", "edge-midside", "curved-jacobian", "liquid-kink"):
             return False
         if stop.get("chain") != self._refined_chain():
             return False
@@ -4170,6 +4182,148 @@ class CollapseDriver:
             return False
         L = float(stop.get("L", math.nan))
         return math.isfinite(L) and L > self.s.refine_ratio * self._h_floor()
+
+    def _ring_liquid_reading(self, stop: dict | None) -> dict | None:
+        """A liquid kink of the ring asks for refinement, never for a fill or film rupture."""
+        if stop is None or stop.get("reason") != "self-contact-approach" \
+                or stop.get("chain") != "ring" or stop.get("side") != "liquid" \
+                or stop.get("contact") != "kink" or stop.get("trigger") != "fold-gap":
+            return stop
+        from .ringcontact import liquid_reading
+
+        noise = self.events.ring
+        if not (noise.sigma_V > 0.0 and noise.sigma_Pz > 0.0):
+            stop["liquid_refine_unavailable"] = "ring volume and momentum noise floors are not calibrated"
+            return stop
+        loops = self._post_cut_state().get("loops") or []
+        if len(loops) != 1:
+            return stop
+        return liquid_reading(np.column_stack([loops[0]["r"], loops[0]["z"]]), stop)
+
+    def _ring_spline_fill_request(self, stop: dict | None) -> dict | None:
+        """Fill a certified local gas wedge whose rebuild spline already crosses itself.
+
+        The floor's fold limits read the wedge, without pretending that a spline
+        crossing is a kink or assigning a phase from an absent side field.
+        The fill carries its usual hard closures and the upward-base check.
+        """
+        if stop is None or stop.get("trigger") != "spline-contact" or stop.get("chain") != "ring":
+            return None
+        ring, jet = self._ring(), self._jetcore()
+        if ring is None or ring.get("removed") is not None or jet is None \
+                or jet.far_kinks != "recentre" or not self.events.groove.enabled:
+            return None
+        from .ringcontact import spline_wedge
+
+        loops = self._post_cut_state().get("loops") or []
+        if len(loops) != 1:
+            return None
+        P = np.column_stack([loops[0]["r"], loops[0]["z"]])
+        wedge = spline_wedge(P, stop, stop_elements=self.s.fold_stop_elements)
+        if wedge is None:
+            return None
+        return self._local_ring_fill_request(P, wedge, stop, kind="spline")
+
+    def _local_ring_fill_request(self, P, wedge: dict, guard: dict, *, kind: str) -> dict:
+        """The common existing fill protocol for a certified local gas pocket."""
+        from .events import GROOVE_HANDLER, _request
+        from .ring import FLOOR_FOLD_RATIO
+
+        a, b = wedge["pair"]
+        mid = 0.5 * (P[a] + P[b])
+        fold = {"ratio": FLOOR_FOLD_RATIO, "stop": 0.0, "stop_elements": self.s.fold_stop_elements}
+        req = _request("ring-fold", "RF", chain="ring", contact=kind, side="gas",
+                       fold_gap=wedge["gap"], fold_r=float(mid[0]), fold_z=float(mid[1]),
+                       fold_arc=wedge["arc"], fold_h_elem=wedge["h_elem"],
+                       fold_limit=wedge["limit"], fold_pair=[a, b], kappa_g=self.events.gap.kappa_g,
+                       **{f"{kind}_fill": {"guard": dict(guard), "wedge": wedge, "fold": fold}})
+        req["handler"] = GROOVE_HANDLER
+        req.update(self._taus(self._t()))
+        return req
+
+    def _ring_step_input(self) -> dict | None:
+        """The ring before a watched step; node identities are used only without a rebuild."""
+        loops = self.pb.interface_loops(with_node_ids=True)
+        if len(loops) != 1:
+            return None
+        return {"P": np.column_stack([loops[0]["r"], loops[0]["z"]]),
+                "node_ids": loops[0]["node_ids"].copy(),
+                "remesh_count": self.pb.remesh_count}
+
+    def _ring_step_check(self, before: dict):
+        """Reject a candidate local crossing before step counters or gas work are committed."""
+        from .ringcontact import loop_node_map, step_contact
+
+        if self.pb.remesh_count != before["remesh_count"]:
+            return  # no index mapping is inferred across a rebuild
+        try:
+            loops = self.pb.interface_loops(validate=False, with_node_ids=True)
+        except RuntimeError as exc:
+            raise RingStepContact({"unreadable": str(exc)[:400],
+                                   "attempted_time": self._t()}) from exc
+        if len(loops) != 1:
+            raise RingStepContact({"unreadable": "the number of loops changed without a rebuild",
+                                   "attempted_time": self._t()})
+        P = np.column_stack([loops[0]["r"], loops[0]["z"]])
+        if len(P) != len(before["P"]):
+            raise RingStepContact({"unreadable": "the loop node count changed without a rebuild",
+                                   "attempted_time": self._t()})
+        reading = step_contact(P)
+        if reading is None:
+            from .ring import loop_crossings
+            from shapely.geometry import LinearRing
+
+            if not LinearRing(P).is_simple:
+                raise RingStepContact({"unreadable": "the crossing is outside the local fill rule",
+                                       "crossing_pairs": loop_crossings(P),
+                                       "attempted_time": self._t(),
+                                       "attempted_step": self.state.step+1})
+        if reading is not None:
+            mapping = loop_node_map(loops[0]["node_ids"], before["node_ids"])
+            reading.update(attempted_time=self._t(), attempted_step=self.state.step+1,
+                           before_time=self.state.t_prev)
+            if mapping is None:
+                reading["unreadable"] = "the loop node identities changed"
+            else:
+                indices = reading["local_indices"]
+                reading.update(node_ids=before["node_ids"].tolist(),
+                               local_node_ids=loops[0]["node_ids"][indices].tolist(),
+                               before_local=before["P"][mapping[indices]].tolist())
+            raise RingStepContact(reading)
+
+    def _meet_ring_step_contact(self, m: dict, contact: RingStepContact) -> tuple[dict, dict | None]:
+        """Restore a simple input, then fill its certified gas wedge with hard budgets.
+
+        A liquid or unreadable pocket remains a stop on the restored input. The
+        crossed candidate is never handed to the surgery or kept as an accepted state.
+        """
+        from .ringcontact import loop_node_map, step_wedge
+
+        discarded = self._distortion_flags()  # the rejected candidate cannot request a rebuild
+        self._restore_step_snapshot()
+        self._stop_cache = None
+        m = self.measure()
+        reading = dict(contact.reading)
+        loops = self.pb.interface_loops(with_node_ids=True)
+        wedge, phase = None, "unreadable"
+        if len(loops) == 1 and not reading.get("unreadable"):
+            P = np.column_stack([loops[0]["r"], loops[0]["z"]])
+            mapping = loop_node_map(reading["node_ids"], loops[0]["node_ids"])
+            if mapping is not None:
+                by_id = {int(k): i for i, k in enumerate(loops[0]["node_ids"])}
+                idx = [by_id[k] for k in reading["local_node_ids"]]
+                if np.array_equal(P[idx], reading["before_local"]):
+                    reading["local_indices"] = idx
+                    wedge, phase = step_wedge(P, reading, stop_elements=self.s.fold_stop_elements)
+        reading["pre_step_phase"] = phase
+        self._event("ring-contact-step-rollback", m, reading=reading,
+                    discarded_distortion=discarded,
+                    rejected_diagnostics={"after": m["time"], "through": reading["attempted_time"]})
+        if wedge is None:
+            return m, {"reason": "self-contact-approach", "trigger": "stepped-contact-unhandled",
+                       "chain": "ring", "contact": reading, **self._taus(self._t())}
+        request = self._local_ring_fill_request(P, wedge, reading, kind="step")
+        return self._meet_event(m, request)
 
     def _ring_kink_reading(self, stop: dict | None) -> dict | None:
         """The ring's ``self-contact-approach`` (trigger ``fold-gap``) of contact ``kink`` on its gas
@@ -4216,10 +4370,15 @@ class CollapseDriver:
         Returns the request (``ring-fold``, ``RF``, the fill as its handler, the pair, its gap and
         limit, ``contact`` ``floor``, and ``floor``: the guard's reading, the wedge and the fold
         limits the fill reads its trigger again with) for :meth:`_meet_event`; None otherwise (a
-        right turn, the tip of a finger of liquid, stays the stop)."""
+        right turn, the tip of a finger of liquid, stays the stop). A local crossing of the ring's
+        rebuild spline is first offered to :meth:`_ring_spline_fill_request`, which verifies the
+        gas wedge instead of assigning it the kink's phase or floor scale."""
         from .events import GROOVE_HANDLER, _request
         from .ring import FLOOR_CORNER_RATIO, FLOOR_FOLD_RATIO, floor_wedge
 
+        spline = self._ring_spline_fill_request(stop)
+        if spline is not None:
+            return spline
         stop = self._ring_kink_reading(self._ring_jacobian_reading(stop))
         if stop is None or stop.get("reason") != "interface-unresolved":
             return None
@@ -4288,10 +4447,72 @@ class CollapseDriver:
         tries = 0
         while tries < RING_REFINE_TRIES and self._ring_refine_due(stop):
             tries += 1
-            m, stop = self._ring_refine_once(m, self._ring_jacobian_reading(stop), tries)
+            reading = self._ring_liquid_reading(self._ring_jacobian_reading(stop))
+            if reading.get("liquid_contact") is not None:
+                m, stop = self._ring_liquid_refine(m, reading, tries)
+            else:
+                m, stop = self._ring_refine_once(m, reading, tries)
         if stop is not None and tries and stop.get("reason") == "interface-unresolved":
             stop["ring_refines"] = tries
         return m, stop
+
+    def _ring_liquid_refine(self, m: dict, reading: dict, attempt: int) -> tuple[dict, dict | None]:
+        """A topology-preserving ring refinement with hard zero-removal budgets.
+
+        A failed balance or base check rolls back to the saved state. Reaching
+        the floor or a resolved sheet-contact remains a stop for a design decision.
+        """
+        from .ringcontact import closures, sample
+        from .surgery import site_grid
+
+        ring = self.events.ring
+        grid = site_grid(reading["r"], reading["z"], ring.box_radius * self.reconnect.delta)
+        before = sample(self.pb, grid, self.reconnect.reservoir_depth)
+        saved = self.pb._snapshot_state()
+        fresh = self._fresh_mesh()
+        focus = self.pb.active_mesh_template().focus
+        st = self.state  # run() holds this object too; output counters must never rewind
+        kept = (copy.deepcopy(st.kinks), st.far_yields, st.last_remesh_step)
+        old_gate = getattr(self, "_gate_stop", None)
+        after, stop = self._ring_refine_once(m, reading, attempt)
+        sampled = sample(self.pb, grid, self.reconnect.reservoir_depth)
+        checks = closures(before, sampled, ring)
+        base = base_guard_checked(m, after)
+        if not base["ok"]:
+            checks["hard"].append("C_base")
+        rec = {"reading": reading, "attempt": attempt, "before": before, "after": sampled,
+               "closures": checks, "base": base, "step": st.step, **self._taus(self._t())}
+        path = self.outdir / "events" / f"ring_contact_{st.step:08d}_{self.pb.remesh_count}_{attempt}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        relative = f"events/{path.name}"
+        if checks["hard"]:
+            self.pb._restore_state(saved)
+            self.pb.active_mesh_template().focus = focus
+            self.pb.invalidate_cached_mesh_data()
+            st.kinks, st.far_yields, st.last_remesh_step = kept
+            self._stepped_rc = None if fresh else self.pb.remesh_count
+            gate = getattr(self, "_gate_stop", None)
+            self._gate_stop = old_gate
+            if gate is not None and gate is not old_gate:
+                # The box gate kept the state BEFORE the rejected refinement.
+                # Retain its bytes with a label that cannot masquerade as a live gate.
+                pre = Path(gate["precut"])
+                if pre.parent.resolve() == (self.outdir / "states").resolve() and pre.is_file():
+                    target = pre.with_name(f"ring_contact_prestate_{st.step:08d}_{attempt}.dump")
+                    for src, dst in ((pre, target), (pre.with_suffix(".json"), target.with_suffix(".json"))):
+                        if src.exists():
+                            if dst.exists():
+                                raise RuntimeError(f"the rolled-back gate receipt already exists: {dst}")
+                            src.rename(dst)
+                    rec["rolled_back_gate"] = {"reading": gate, "prestate": f"states/{target.name}"}
+            self._post_cut_cache = self._stop_cache = None
+            after = self.measure()
+            stop = {"reason": "interface-unresolved", "trigger": "ring-contact-unclosed",
+                    "chain": "ring", "hard": checks["hard"], "record": relative,
+                    **self._taus(self._t())}
+        path.write_text(json.dumps(_plain(rec), indent=1) + "\n")
+        self._event("ring-contact-refine", after, record=relative, closures=checks, base=base)
+        return after, stop
 
     def _ring_refine_once(self, m: dict, stop: dict, attempt: int) -> tuple[dict, dict | None]:
         """One rebuild of :meth:`_ring_refine`, on the chain of the stop (its regions
@@ -4444,6 +4665,13 @@ class CollapseDriver:
                 with self._post_cut_solve():
                     pb.run(t + dt, timestep=dt, maxstep=dt, outstep=False, temporal_error=1.0,
                            newton_solver_tolerance=tol)
+            except RingStepContact as contact:
+                m, found = self._meet_ring_step_contact(m, contact)
+                if found is None:
+                    continue
+                stop = (dict(found, failed_step=failed_step_context)
+                        if failed_step_context is not None else found)
+                break
             except RuntimeError as exc:
                 # the problem now holds a rejected iterate: stop on the last measured state ``m``,
                 # but only if oomph-lib gave up below its smallest step
@@ -4668,11 +4896,16 @@ class CollapseDriver:
         pb.min_newton_iterations = r.newton_min_iterations
         pb.states_compression_level = None
         pb._step_snapshots = []  # the state the step starts from, as the net snapshots it
+        watched = getattr(self, "events", None)
+        before = (self._ring_step_input() if watched is not None and watched.groove.enabled
+                  and self._refined_chain() == "ring" else None)
         tolerance = getattr(self, "_step_newton_tolerance", None)
         if tolerance is not None and hasattr(pb, "newton_floor_rule"):
             pb.newton_floor_rule = (tolerance, self.s.newton_floor)
         try:
             yield
+            if before is not None and pb._step_snapshots:
+                self._ring_step_check(before)
         finally:
             if hasattr(pb, "newton_floor_rule"):
                 pb.newton_floor_rule = None

@@ -759,7 +759,16 @@ the floor open up to about a right angle (the root of the radial sheet that the 
 drives out along the plug) is filled the same way. Its check of the transfer predicts
 the former gas, a few elements wide, on the old elements' quadratic curve and beyond the band of
 them that pyoomph's locator still takes (`groovesurgery.LOCATOR_BAND`, 0.07 of the element's
-length; the transfer's `bulk_band`). The tip of a finger of liquid at the floor stays a stop. A
+length; the transfer's `bulk_band`). Local contacts at the ring's rim can also be met under the same hard fill budgets and
+upward-base check. A single local crossing of the rebuild spline on a simple node polygon
+is filled only if its pocket reads as gas. With the inverted-element net's step snapshot, a crossing made by a candidate step is mapped by
+node identity to its simple input on the unchanged mesh; the input is restored before any
+fill, and distortion requests from the rejected step are discarded. Other non-simple candidates roll back without a fill; liquid or unreadable
+pockets remain stopped. Without the net snapshot this route is off. A liquid-side kink on a simple ring can instead be refined without
+rupture, with calibrated volume and momentum floors, a single-loop check and the upward-base
+check; failure restores the input. Filled volume and closures are recorded for each fill;
+the liquid refinement records zero added and removed volume. The ring remains a simple loop.
+The tip of a finger of liquid at the floor stays a stop when these guards cannot be met. A
 rebuilt mesh whose curved element at the ring falls below the Jacobian bound (`curved-jacobian`)
 is read as the guard's reading of the ring's element there and met in the same way: by the ring
 refine above the floor, by the fill of a wedge of gas at it. With
