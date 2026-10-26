@@ -4397,13 +4397,18 @@ class CollapseDriver:
     def _ring_kink_reading(self, stop: dict | None) -> dict | None:
         """The ring's ``self-contact-approach`` (trigger ``fold-gap``) of contact ``kink`` on its gas
         side (or of no side read) read as the guard's reading at the element between the fold's
-        pair (``index`` the node midway along the shorter way round, ``L`` the fold's arc, trigger
+        pair (``index`` the node midway along the shorter way round, ``L`` the fold's arc per
+        quadratic element it spans, two node steps each, so that ``L`` is the length of the
+        elements at the kink whatever the pair's spacing, ``arc`` the arc itself, trigger
         ``fold-kink``, the stop kept as ``kink``), so that the fill at the floor meets the wedge of
         gas closing across a kink as it meets the guard's stops at the floor (r1h, h3 leg 1 at
         aa48432, step 7254: the wedge of gas at the rim of the radial sheet the downward head
         drives out along the plug, r 4.28e-4, its pair 2769/2771 two nodes apart, the gap 1.3e-7
         over an arc of 9.7e-7 between elements of 1.4e-6, which the fill of a groove, made for a
-        fold across a resolved arc, does not take). Any other stop is returned as it is."""
+        fold across a resolved arc, does not take; r1f, f3 leg 1 at a100ccc, step 11580: the pair
+        2613/2616 three nodes apart, its arc of 1.36e-6 one and a half elements of 9.1e-7 at the
+        floor, which the arc itself, above ``refine_ratio h_floor`` = 1.17e-6, had kept from the
+        fill). Any other stop is returned as it is."""
         if stop is None or stop.get("reason") != "self-contact-approach" \
                 or stop.get("trigger") != "fold-gap" or stop.get("chain") != "ring" \
                 or stop.get("contact") != "kink" or stop.get("side", "gas") != "gas" \
@@ -4416,8 +4421,10 @@ class CollapseDriver:
         a, b = (int(x) % n for x in stop["fold_pair"])
         d = (b - a) % n
         apex = (a + d // 2) % n if d <= n - d else (b + (n - d) // 2) % n
+        arc = float(stop.get("fold_arc", math.nan))
+        steps = min(d, n - d)  # the node steps between the pair the shorter way round
         return {"reason": "interface-unresolved", "trigger": "fold-kink", "chain": "ring",
-                "index": int(apex), "L": float(stop.get("fold_arc", math.nan)),
+                "index": int(apex), "L": arc * 2.0 / max(2, steps), "arc": arc,
                 "r": float(loops[0]["r"][apex]), "z": float(loops[0]["z"][apex]),
                 "kink": {k: v for k, v in stop.items() if k != "reason"}}
 
