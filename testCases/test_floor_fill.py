@@ -381,6 +381,19 @@ def test_a_kink_of_the_rings_gas_at_the_floor_is_read_as_its_wedge_and_filled():
         assert req is not None and req["contact"] == "floor" and req["fold_pair"] == w["pair"]
         assert req["floor"]["guard"]["trigger"] == "fold-kink" and req["floor"]["wedge"] == w
         json.dumps(req)
+    # a pair three nodes apart (r1f at a100ccc, step 11580): L the arc per element it spans
+    L3, i3 = teardrop(h=0.45e-6)
+    n3 = len(L3)
+    f3 = _fake_driver(L3)
+    st3 = _kink(L3, i3, fold_pair=[(i3 - 1) % n3, (i3 + 2) % n3], fold_arc=1.36e-6)
+    k3 = CollapseDriver._ring_kink_reading(f3, st3)
+    assert k3["L"] == pytest.approx(1.36e-6 * 2 / 3) and k3["arc"] == 1.36e-6
+    assert k3["L"] <= 1.5 * 7.8125e-7 < k3["arc"]
+    assert CollapseDriver._floor_fill_request(f3, st3) is not None
+    # two elements each above the floor's: the stop stays
+    st4 = _kink(L3, i3, fold_pair=[(i3 - 2) % n3, (i3 + 2) % n3], fold_arc=2.4e-6)
+    assert CollapseDriver._ring_kink_reading(f3, st4)["L"] == pytest.approx(1.2e-6)
+    assert CollapseDriver._floor_fill_request(f3, st4) is None
     # the pair across the seam: the shorter way round
     L, i = teardrop(roll=0)
     n = len(L)
