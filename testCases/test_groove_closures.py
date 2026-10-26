@@ -4,7 +4,7 @@ merge_impulse`` on ``ringsurgery._ring_closures`` with prefix ``G``):
 * ``G3_box`` within its limit: the closures unchanged, no ``G3_merge``;
 * ``G3_box`` beyond its limit (the disc's momentum moved by the projection, the impulse of the merge
   the fill makes) with the cutoff identity G3 holding and resolving it (its larger side at least
-  ``MERGE_RESOLVED`` of ``G3_box`` and at the momentum floor or above): a flag, not hard;
+  ``MERGE_RESOLVED`` of the unweighted disc change and at the momentum floor or above): a flag, not hard;
 * the identity not resolving it (its sides below half the change, or below the floor), missing
   its own limit, or a side not finite: ``G3_box`` stays hard, as do the other hard closures.
 """
@@ -55,14 +55,14 @@ def test_the_impulse_of_the_merge_resolved_by_the_identity_is_a_flag():
     changes, phi = moved(0.127 * P_ref, 0.1158 * P_ref, 0.1157 * P_ref)
     c = closures(changes, phi)
     assert c["hard"] == ["G3_box"] and "G3" not in c["flags"]
-    out = gs.merge_impulse(c, floor_Pz=0.0)
+    out = gs.merge_impulse(c, floor_Pz=0.0, unweighted_delta_Pz=c["G3_box"])
     assert out["hard"] == [] and "G3_box" in out["flags"]
     m = out["G3_merge"]
     assert m["resolved"] is True and m["share"] == pytest.approx(0.1158 / 0.127)
     assert m["side"] == pytest.approx(0.1158 * P_ref) and m["floor"] == 0.0
     assert out["G3_box"] == c["G3_box"] and out["limits"] == c["limits"]
     # the floor of the closures, five sigma_Pz, below the side: still resolved
-    assert gs.merge_impulse(c, floor_Pz=0.1 * P_ref)["hard"] == []
+    assert gs.merge_impulse(c, floor_Pz=0.1 * P_ref, unweighted_delta_Pz=c["G3_box"])["hard"] == []
 
 
 @pytest.mark.parametrize("case", ["share", "floor", "identity", "nan"])
@@ -79,7 +79,7 @@ def test_an_impulse_the_identity_does_not_resolve_stays_hard(case):
     else:
         changes, phi = moved(0.127 * P_ref, math.nan, 0.1 * P_ref)
     c = closures(changes, phi)
-    out = gs.merge_impulse(c, floor_Pz=floor)
+    out = gs.merge_impulse(c, floor_Pz=floor, unweighted_delta_Pz=c["G3_box"])
     assert "G3_box" in out["hard"], case
     assert out["G3_merge"]["resolved"] is False
     if case in ("identity", "nan"):
@@ -90,6 +90,17 @@ def test_the_other_hard_closures_stay_hard_beside_a_resolved_impulse():
     P_ref = budgets()[4]["P_ref"]
     changes, phi = moved(0.127 * P_ref, 0.12 * P_ref)
     changes = changes + [("poly", "after", "V_liquid", -0.1)]  # the volume misses too
-    out = gs.merge_impulse(closures(changes, phi))
+    out = gs.merge_impulse(closures(changes, phi), unweighted_delta_Pz=0.127 * P_ref)
     assert out["hard"] == ["G1"] and out["G3_merge"]["resolved"] is True
     assert set(out["flags"]) >= {"G1", "G3_box"}
+
+
+def test_the_weighted_identity_must_resolve_the_unweighted_change():
+    changes, phi = moved(1.0, 1.0)
+    c = closures(changes, phi)
+    assert c["G3_box"] == pytest.approx(abs(phi["phi_lhs"]))
+    # The weighted identity holds, but sees only a tenth of the unweighted disc change.
+    out = gs.merge_impulse(c, unweighted_delta_Pz=10.0)
+    assert out["G3_merge"]["share"] == pytest.approx(0.1)
+    assert "G3_box" in out["hard"]
+    assert "G3_box" in gs.merge_impulse(c)["hard"]  # no unweighted evidence: fail closed

@@ -376,9 +376,15 @@ In the region away from the upward jet,
 the tip of a fast jet on the axis that folds along the axis within one element (its last element
 running up the axis, a node of it across it) is repaired: the folded nodes are dropped and the
 axis node put where the surface meets the axis, by a rebuild from the planned surface, and the
-thin sliver of gas between them becomes liquid. Its volume and momentum are hard checks above
-`1e-4 delta^3` (a fold of a tip element is far smaller), with the budgets of the rebuild and the
-base of the upward jet; a repair that misses is rolled back and the run stops resumably.
+thin sliver of gas between them becomes liquid. Its geometric volume and independently sampled
+axial momentum after transfer are hard checks above
+`1e-4 delta^3` for volume and that bound times the folded nodes' largest speed for momentum
+(a fold of a tip element is far smaller). Momentum is integrated on the sliver's own triangle
+quadrature; every point must be located and its volume must reproduce the geometric volume
+within the existing volume tolerance, or the momentum check is refused as unchecked. The budgets
+of the rebuild and the base of the upward jet are checked as well. Its transfer must keep the
+chain names and ends and the planned axis spans, with unlocated nodes only where the old chains and the sliver plus its band predict them;
+a repair that misses is rolled back and the run stops resumably.
 For sensitivity tests only, `rebuild_spline` `vertices`
 splines each rebuild through the vertices of the elements rather than every node; it is off by
 default, since smoothing would alter, and hide, the very feature under test. All these settings
@@ -692,7 +698,8 @@ radius, zero at the edge), so that a cell at the disc's edge whose sample a rebu
 fast free surface weighs nothing; the momentum the transfer carried without that weight is reported
 beside the closures (`G2_unweighted`), never a flag. The disc's change of momentum
 beyond its limit (0.05 `V_fill U`) is only a flag where the identity holds and resolves it, its
-larger side at least half the change and at the momentum floor or above: a fill joins liquid that
+larger side at least half the unweighted disc momentum change (`G3_unweighted`) and at the
+momentum floor or above: a fill joins liquid that
 moved at different velocities across the gas it removes, and the projection is the inelastic impulse
 of that merge, which near free surfaces moves momentum out of any disc about the site, balanced at
 the container's bottom, so that the identity, not the disc's change, is the momentum balance
@@ -752,7 +759,16 @@ the floor open up to about a right angle (the root of the radial sheet that the 
 drives out along the plug) is filled the same way. Its check of the transfer predicts
 the former gas, a few elements wide, on the old elements' quadratic curve and beyond the band of
 them that pyoomph's locator still takes (`groovesurgery.LOCATOR_BAND`, 0.07 of the element's
-length; the transfer's `bulk_band`). The tip of a finger of liquid at the floor stays a stop. A
+length; the transfer's `bulk_band`). Local contacts at the ring's rim can also be met under the same hard fill budgets and
+upward-base check. A single local crossing of the rebuild spline on a simple node polygon
+is filled only if its pocket reads as gas. With the inverted-element net's step snapshot, a crossing made by a candidate step is mapped by
+node identity to its simple input on the unchanged mesh; the input is restored before any
+fill, and distortion requests from the rejected step are discarded. Other non-simple candidates roll back without a fill; liquid or unreadable
+pockets remain stopped. Without the net snapshot this route is off. A liquid-side kink on a simple ring can instead be refined without
+rupture, with calibrated volume and momentum floors, a single-loop check and the upward-base
+check; failure restores the input. Filled volume and closures are recorded for each fill;
+the liquid refinement records zero added and removed volume. The ring remains a simple loop.
+The tip of a finger of liquid at the floor stays a stop when these guards cannot be met. A
 rebuilt mesh whose curved element at the ring falls below the Jacobian bound (`curved-jacobian`)
 is read as the guard's reading of the ring's element there and met in the same way: by the ring
 refine above the floor, by the fill of a wedge of gas at it. With

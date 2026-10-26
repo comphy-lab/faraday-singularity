@@ -112,6 +112,10 @@ def _fake_driver(L, *, enabled=True, jet="recentre", ring=True, removed=False, h
         _post_cut_state=lambda: {"loops": [loop] * loops, "edges": edges},
         _t=lambda: 10.95, _taus=lambda t: {"tau": 2.5e-5, "tau_p": 2.3e-5})
     fake._ring_jacobian_reading = lambda st: CollapseDriver._ring_jacobian_reading(fake, st)
+    fake._ring_kink_reading = lambda st: CollapseDriver._ring_kink_reading(fake, st)
+    fake._ring_spline_fill_request = lambda st: CollapseDriver._ring_spline_fill_request(fake, st)
+    fake._local_ring_fill_request = lambda *a, **kw: CollapseDriver._local_ring_fill_request(fake, *a, **kw)
+    fake._ring_liquid_reading = lambda st: CollapseDriver._ring_liquid_reading(fake, st)
     fake._refined_chain = lambda: CollapseDriver._refined_chain(fake)
     return fake
 
@@ -344,3 +348,56 @@ def test_a_corner_of_gas_at_the_floor_is_read_with_the_corners_ratio():
     R = L[::-1].copy()  # clockwise: its gas outside, the same corner a liquid one
     k = len(R) - 1 - i
     assert floor_wedge(R, k, stop_elements=3.0, ratio=FLOOR_CORNER_RATIO) is None
+
+
+def _kink(loop, i, **kw):
+    """The ring's ``self-contact-approach`` of a kink across the apex ``i``: its pair two nodes
+    apart, as r1h's at step 7254 (h3 leg 1 at aa48432)."""
+    n = len(loop)
+    a, b = (i - 1) % n, (i + 1) % n
+    out = {"reason": "self-contact-approach", "trigger": "fold-gap", "chain": "ring",
+           "contact": "kink", "fold_gap": float(np.hypot(*(loop[a] - loop[b]))),
+           "fold_arc": 2 * H, "fold_h_elem": 2.7 * H, "fold_limit": 5e-5,
+           "fold_pair": sorted([a, b]), "kappa_g": 0.05, "side": "gas", "tau": 2.5e-5}
+    out.update(kw)
+    return out
+
+
+def test_a_kink_of_the_rings_gas_at_the_floor_is_read_as_its_wedge_and_filled():
+    """``CollapseDriver._ring_kink_reading``: the ring's closing fold of contact ``kink`` on its gas
+    side, read as the guard's reading at the element between its pair (``fold-kink``, the node
+    midway the shorter way round, ``L`` the fold's arc), so that the fill at the floor meets the
+    wedge it closes (the wedge's own pair, the floor's limits); a liquid side, a resolved fold, the
+    open chain, an arc above the floor, or no single loop: the stop stays."""
+    for roll in (0, 23):
+        L, i = teardrop(roll=roll)
+        fake = _fake_driver(L)
+        fake._ring_kink_reading = lambda st, f=fake: CollapseDriver._ring_kink_reading(f, st)
+        reading = CollapseDriver._ring_kink_reading(fake, _kink(L, i))
+        assert reading["trigger"] == "fold-kink" and reading["index"] == i
+        assert reading["L"] == 2 * H and reading["kink"]["fold_pair"] == _kink(L, i)["fold_pair"]
+        req = CollapseDriver._floor_fill_request(fake, _kink(L, i))
+        w = floor_wedge(L, i, stop_elements=3.0)
+        assert req is not None and req["contact"] == "floor" and req["fold_pair"] == w["pair"]
+        assert req["floor"]["guard"]["trigger"] == "fold-kink" and req["floor"]["wedge"] == w
+        json.dumps(req)
+    # the pair across the seam: the shorter way round
+    L, i = teardrop(roll=0)
+    n = len(L)
+    k = CollapseDriver._ring_kink_reading(_fake_driver(L), _kink(L, 0, fold_pair=[1, n - 1]))
+    assert k["index"] == 0
+    # no side read (groove.sheets off): the wedge's own left turn decides
+    fake = _fake_driver(L)
+    fake._ring_kink_reading = lambda st: CollapseDriver._ring_kink_reading(fake, st)
+    stop = _kink(L, i)
+    stop.pop("side")
+    assert CollapseDriver._floor_fill_request(fake, stop) is not None
+    for bad in (_kink(L, i, side="liquid"), _kink(L, i, contact="fold"), _kink(L, i, chain="open"),
+                _kink(L, i, fold_arc=1.2e-6), _kink(L, i, trigger="spline-contact"),
+                _kink(L, i, fold_pair=None)):
+        assert CollapseDriver._floor_fill_request(fake, bad) is None, bad
+        if bad.get("contact") != "kink" or bad.get("chain") != "ring":
+            assert CollapseDriver._ring_kink_reading(fake, bad) is bad
+    two = _fake_driver(L, loops=2)
+    two._ring_kink_reading = lambda st: CollapseDriver._ring_kink_reading(two, st)
+    assert CollapseDriver._ring_kink_reading(two, _kink(L, i))["reason"] == "self-contact-approach"

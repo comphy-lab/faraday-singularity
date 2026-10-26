@@ -401,13 +401,16 @@ class FaradayProblem(Problem):
                         "z": xy[1, seg], "u_r": ur[seg], "u_z": uz[seg]})
         return sorted(out, key=lambda c: float(np.min(c["z"])))
 
-    def interface_loops(self) -> list[dict]:
+    def interface_loops(self, *, validate: bool = True, with_node_ids: bool = False) -> list[dict]:
         """Every closed loop of the free surface (the ring of a pierced bubble, ``ring.py``):
         ``r, z, u_r, u_z`` of its nodes in the order of the walk around it, its start not
         repeated, checked to be ordered (``ring.validate_loop_order``), counter-clockwise in
         ``(r, z)`` and starting at its seam, the vertex node of largest ``r`` (ties to the larger
         ``z``), so that its closed polyline (``ring.closed``) has ``2N + 1`` nodes from a vertex;
-        ``open`` False, ``end_types`` ``("loop", "loop")``. Empty without a loop."""
+        ``open`` False, ``end_types`` ``("loop", "loop")``. Empty without a loop.
+        The candidate-step guard alone skips order validation to read a crossing.
+        Optional ``node_ids`` are cache indices, comparable only on an unchanged mesh;
+        they follow the same orientation and seam rotation as the coordinates."""
         from pyoomph.meshes.zeta import _find_closed_segments
 
         from .ring import orient_loop, rotate, seam_index, validate_loop_order
@@ -427,13 +430,16 @@ class FaradayProblem(Problem):
                 continue
             idx = np.array([int(i) for i in (seg[:-1] if seg[0] == seg[-1] else seg)])
             P = np.column_stack([xy[0, idx], xy[1, idx]])
-            validate_loop_order(P)
+            if validate:
+                validate_loop_order(P)
             vertex = np.array([i in vertices for i in idx])
             P, idx, vertex = orient_loop(P, idx, vertex)
             P, idx, vertex = rotate(P, seam_index(P, vertex), idx, vertex)
             out.append({"open": False, "end_types": ("loop", "loop"), "r": P[:, 0].copy(),
                         "z": P[:, 1].copy(), "u_r": np.asarray(ur)[idx],
                         "u_z": np.asarray(uz)[idx], "vertex": vertex})
+            if with_node_ids:
+                out[-1]["node_ids"] = idx.copy()
         return out
 
     def cut_observables(self) -> dict[str, float]:
@@ -655,6 +661,62 @@ class FaradayProblem(Problem):
             out["repaired"] += 1
         if out["repaired"]:
             self.reapply_boundary_conditions()
+        return out
+
+    def straighten_interface_edges(self, r: float, z: float, radius: float, *,
+                                   offset_min: float = AXIS_MIDSIDE_LIMIT,
+                                   apply: bool = True) -> dict:
+        """Put on the middle of its chord the midside node of every quadratic element of the free
+        surface whose midpoint lies within ``radius`` of ``(r, z)`` and whose midside node lies
+        more than ``offset_min`` chords off that middle, at every time level the time stepper reads
+        (position and velocity, as :meth:`repair_axis_midsides` does on the axis); with ``apply``
+        false the edges are only read. Each edge's volume of revolution between its quadratic curve
+        and its chord, ``2 pi r_m (2/3) |chord| d`` (``d`` the signed offset of the midside node
+        from the chord, ``r_m`` the radius of its middle), is summed with its sign (``dV``) and in
+        magnitude (``dV_abs``). Returns the edges straightened (``edges``: the midside node's
+        place, its offset in chords, its volume) and those sums. A mesh with no such edge within
+        ``radius`` is unchanged."""
+        bulk = self.get_mesh("liquid")
+        fields = bulk.get_nodal_field_indices()
+        velocity = [fields[k] for k in ("velocity_x", "velocity_y") if k in fields]
+        n_levels = self.timestepper.nprev_values() + 1
+        out = {"edges": [], "dV": 0.0, "dV_abs": 0.0, "read": 0}
+        for e in self.get_mesh("liquid/interface").elements():
+            if e.nnode() != 3:
+                continue
+            a, mid, b = (e.node_pt(k) for k in range(3))
+            ca = np.array([a.x(0), a.x(1)])
+            cb = np.array([b.x(0), b.x(1)])
+            cm = np.array([mid.x(0), mid.x(1)])
+            if math.hypot(*(0.5 * (ca + cb) - np.array([r, z]))) > radius:
+                continue
+            out["read"] += 1
+            chord = cb - ca
+            length = float(math.hypot(*chord))
+            if length <= 0.0:
+                continue
+            offset = float(math.hypot(*(cm - 0.5 * (ca + cb)))) / length
+            if offset <= offset_min:
+                continue
+            normal = np.array([-chord[1], chord[0]]) / length
+            d = float(np.dot(cm - 0.5 * (ca + cb), normal))
+            dV = 2.0 * math.pi * float(0.5 * (ca[0] + cb[0])) * (2.0 / 3.0) * length * d
+            out["edges"].append({"r": float(cm[0]), "z": float(cm[1]), "offset": offset,
+                                 "chord": length, "dV": dV})
+            out["dV"] += dV
+            out["dV_abs"] += abs(dV)
+            if not apply:
+                continue
+            levels = range(min(n_levels, mid.ntstorage()))
+            for t in levels:
+                for i in range(2):
+                    mid.set_x_at_t(t, i, 0.5 * (a.x_at_t(t, i) + b.x_at_t(t, i)))
+                for k in velocity:
+                    mid.set_value_at_t(t, k, 0.5 * (a.value_at_t(t, k) + b.value_at_t(t, k)))
+        if apply and out["edges"]:
+            self.reapply_boundary_conditions()
+            self.invalidate_cached_mesh_data()
+            self._jacobian_cache = None
         return out
 
     # --- at least min_newton_iterations Newton iterations per solve ------------------------------

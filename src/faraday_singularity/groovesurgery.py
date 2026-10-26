@@ -161,7 +161,8 @@ def floor_bulk_inside(X, P, i_s: int, j_s: int, closure, shrink: float) -> tuple
     return out, record
 
 
-def merge_impulse(closures: dict, floor_Pz: float = 0.0) -> dict:
+def merge_impulse(closures: dict, floor_Pz: float = 0.0, *,
+                  unweighted_delta_Pz: float | None = None) -> dict:
     """The closures of a fill (``ringsurgery._ring_closures``, prefix ``G``) with ``G3_box`` read as
     the impulse of the merge the fill makes. A fill joins liquid that moved at different velocities
     across the gas it removes (the walls of the groove closing and sliding past each other); the
@@ -172,7 +173,8 @@ def merge_impulse(closures: dict, floor_Pz: float = 0.0) -> dict:
     surface's largest speed, a translation that makes no impulse) is then no test of the momentum
     balance, which is the cutoff identity G3: the disc's change equals the impulse's flux through
     its boundary. So ``G3_box`` beyond its limit stays a flag, out of ``hard``, where G3 holds and
-    resolves it: the identity's larger side at least ``MERGE_RESOLVED`` of ``G3_box`` and not below
+    resolves it: the identity's larger side at least ``MERGE_RESOLVED`` of the unweighted disc's
+    change of momentum (``unweighted_delta_Pz``, recorded as ``G3_unweighted``) and not below
     ``floor_Pz`` (the momentum floor of the closures, five ``groove.sigma_Pz``), so that the
     momentum the disc lost is a measured flux, not noise the identity cannot see; otherwise it stays
     hard.
@@ -183,12 +185,12 @@ def merge_impulse(closures: dict, floor_Pz: float = 0.0) -> dict:
     phi = closures.get("G3_phi") or {}
     sides = [abs(float(phi.get(x, math.nan))) for x in ("phi_lhs", "phi_rhs")]
     side = max(sides) if all(math.isfinite(x) for x in sides) else math.nan
-    box = float(closures["G3_box"])
+    box = abs(float(unweighted_delta_Pz)) if unweighted_delta_Pz is not None else math.nan
     share = side / box if box > 0.0 and math.isfinite(side) else math.nan
     resolved = bool("G3" not in closures.get("flags", ()) and math.isfinite(share)
                     and share >= MERGE_RESOLVED and side >= float(floor_Pz))
     out = dict(closures, G3_merge={"side": side, "share": share, "floor": float(floor_Pz),
-                                   "resolved": resolved})
+                                   "unweighted_change": box, "resolved": resolved})
     if resolved:
         out["hard"] = [x for x in closures["hard"] if x != "G3_box"]
     return out
@@ -478,8 +480,9 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
                   if len(X) else np.zeros(0, dtype=bool))
     # the bulk nodes in the old gas: inside the filled region but within a twentieth of the old
     # surface's shortest chord there, the sag of its quadratic elements; for a fill at the floor,
-    # on the old surface's curve and beyond the band of the old elements (floor_bulk_inside)
-    if request.get("floor") is not None and cls == "RF":
+    # or a local spline-contact fill, on the old surface's curve and beyond the band of the
+    # old elements (floor_bulk_inside)
+    if any(request.get(key) is not None for key in ("floor", "spline_fill", "step_fill")) and cls == "RF":
         bulk_inside, transfer["bulk_band"] = floor_bulk_inside(
             sets["bulk"][1], P, g.i_s, g.j_s, g.closure, 0.05 * g.h_arc)
     else:
@@ -539,7 +542,11 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
                               {"A_cl": g.A_cl, "A_rem": g.A_rem},
                               sigma={"V": gs.sigma_V, "Pz": gs.sigma_Pz, "KE": gs.sigma_KE},
                               prefix="G")
-    closures = merge_impulse(closures, RING_NOISE_FLOORS["R3_box"][1] * gs.sigma_Pz)
+    unweighted_delta = box_after["unweighted"]["Pz"] - box_transfer["unweighted"]["Pz"]
+    closures["G3_unweighted"] = {"delta_Pz": unweighted_delta, "value": abs(unweighted_delta),
+                                  "limit": closures["limits"]["G3_box"]}
+    closures = merge_impulse(closures, RING_NOISE_FLOORS["R3_box"][1] * gs.sigma_Pz,
+                             unweighted_delta_Pz=unweighted_delta)
     closures["G2_unweighted"] = unweighted_g2(box_before, box_transfer, fill, closures)
     closures["global_identity"] = {x: record["projection"].get(x, math.nan)
                                    for x in ("delta_Pz", "Pi_on_bottom")}

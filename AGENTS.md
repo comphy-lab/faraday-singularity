@@ -194,8 +194,13 @@ add a second top-level `cases/` tree.
   (`axisrepair.axis_repair`, `CollapseDriver._axis_repair`; decision 22, the downward jet's tip a
   nuisance): the folded nodes dropped and the axis node put where the surface meets the axis by a
   rebuild from the planned chains, the sliver filled, its volume and momentum hard above
-  `AXIS_REPAIR_BOUND delta^3` (`A_V`, `A_P`), the transfer's closures A1-A6 as a fill's, the
-  upward jet's base checked (`A_base`); event `axis-repair`, record `events/axis_repair_<n>.json`,
+  `AXIS_REPAIR_BOUND delta^3` for volume (`A_V`), and that bound times the folded nodes'
+  largest speed for the sliver's momentum (`A_P`), integrated on its own triangle quadrature;
+  every quadrature point located and its volume within the existing R1 volume tolerance, otherwise
+  a hard `A_P_coverage` miss; the box-grid sample retained for A2; the transfer's closures A1-A6 as a fill's, the
+  upward jet's base checked (`A_base`); the transfer checked as a fill's against the old chains,
+  unlocated nodes only in the sliver and its band, chain names and ends kept, axis spans as planned;
+  event `axis-repair`, record `events/axis_repair_<n>.json`,
   `axis_fold_repairs` in the run's result; a miss or a failed rebuild rolled back to the state
   before it, the resumable stop `axis-repair-unclosed` or `axis-repair-failed`, and a fold again
   at the same end within `AXIS_REPAIR_RECUR_STEPS` steps left the stop it is (`axis_fold_recurs`);
@@ -467,7 +472,8 @@ add a second top-level `cases/` tree.
   `groovesurgery.unweighted_g2`; `test_fill_cutoff.py`, `test_fill_cutoff_identity.py`, runs
   without a fill b46713a's); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
   but `G3_box` beyond its limit only a flag where the cutoff identity G3 holds and resolves it (its
-  larger side at least `MERGE_RESOLVED` 0.5 of `G3_box` and at the momentum floor or above;
+  larger side at least `MERGE_RESOLVED` 0.5 of the unweighted disc momentum change,
+  recorded as `G3_unweighted`, and at the momentum floor or above;
   `groovesurgery.merge_impulse`, `G3_merge` in the closures): the projection of a fill is the
   inelastic impulse of the merge it makes, which moves momentum out of any disc about the site
   physically, so the disc's change against `P_ref = V_fill U` tests no balance
@@ -499,18 +505,51 @@ add a second top-level `cases/` tree.
   out along the plug) is filled in the same way (`corner` in its wedge); a failed step in the ring
   stage is retried once after the ring's sharpest element above the floor is rebuilt as the ring
   refine rebuilds (`CollapseDriver._failed_step_retry`, event `step-retry`;
-  `test_landing_identity.py` pins runs meeting neither against 6eff16c); an in-memory restore
+  `test_landing_identity.py` pins runs meeting neither against 6eff16c); a retry's hard
+  `ring-refine-base` stop ends the run; other guard stops and event requests return to the
+  handlers. Stops before another accepted step keep `failed_step` context. A failed retry
+  restores its input mesh, focus and refinement bookkeeping (`step-retry-failed`, `retry_error`); an in-memory restore
   across a rebuild (`FaradayProblem._restore_state`: the rollback of a failed step or of an axis
   repair) puts the template's project attributes (`TEMPLATE_KEYS`: focus, cut and ring sizing)
   back on the sibling template pyoomph reloads the mesh from, which in a restarted run otherwise
   copies the original template's (`test_restore_template_identity.py`); after a cut each Newton
   solve's tolerance is `max(newton_tolerance, newton_floor/dt)` with dt the sub-step it makes
   (`FaradayProblem.newton_floor_rule`, set by `CollapseDriver._post_cut_solve`), not the driver's
-  step alone (`test_newton_floor_identity.py`); a rebuilt mesh's
+  step alone (`test_newton_floor_identity.py`); a closing fold of the ring's gas across a kink at
+  the floor's scale is read as the guard's reading at its apex and filled at the floor
+  (`CollapseDriver._ring_kink_reading`, trigger `fold-kink`), and a fresh mesh's curved element
+  beside the bubble's chain before the piercing has the surface's curved edges about it put
+  straight within `AXIS_REPAIR_BOUND delta^3` (`CollapseDriver._tip_straighten`,
+  `FaradayProblem.straighten_interface_edges`, event `tip-straighten`;
+  `test_kink_tip_identity.py`); straightening that reaches the open chain is refused,
+  and a Jacobian bound still below its limit restores the input; a rebuilt mesh's
   `curved-jacobian` at the ring is read as the
   ring element's reading there (`CollapseDriver._ring_jacobian_reading`) and met by the refine or
   the fill at the floor; `test_floor_fill.py`, `test_floor_fill_fem.py`,
   `test_floor_fill_identity.py` (runs never at the floor are 7ba32f9's).
+- Local ring contacts (`ringcontact.py`, recentred far kinks and enabled groove fill): a
+  single rebuild-spline crossing within two adjacent quadratic elements, on a simple node
+  polygon, is filled only after its local pocket is independently read as gas (`spline-fill`,
+  `spline_fills`). A candidate step's local polygon crossing is checked before acceptance;
+  with the inverted-element net's step snapshot and an unchanged mesh, cyclic node
+  identities map its pocket back to the simple input. Other non-simple candidates also
+  roll back and keep `stepped-contact-unhandled`, without a fill.
+  Without that snapshot this candidate-step route is off.
+  The native input is restored before a gas fill (`ring-contact-step-rollback`, with discarded
+  distortion flags and the rejected diagnostics interval; `step-contact-fill`,
+  `step_contact_fills`). Unreadable or liquid pockets keep `stepped-contact-unhandled`.
+  Both fills use the existing hard G closures, `G_base`, recorded filled volume and the
+  curve/locator-band transfer prediction (`events/event_<k>.json`); refusals and failed
+  closures keep the existing resumable stops. A liquid-side kink instead uses the ring
+  refinement without rupture: positive calibrated ring volume and momentum noise floors
+  are required (`liquid_refine_unavailable` otherwise). Its hard zero-removal checks are
+  `C_V`, `C_P`, `C_loop` and `C_base`, with the existing base tolerance; an unclosed audit
+  restores the input in place, retaining event and profile counters (`ring-contact-unclosed`).
+  Records are `events/ring_contact_<step>_<remesh-count>_<attempt>.json`, event `ring-contact-refine`.
+  Unit and stand-in routes, finite-element fills/refinement/rollback, and unchanged-run pins
+  against 775df94 are in `test_ring_contact.py`, `test_ring_contact_fem.py` and
+  `test_ring_contact_identity.py`. These routes preserve one simple ring; none ruptures a
+  liquid film or changes the ring-removal threshold.
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,
   its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest

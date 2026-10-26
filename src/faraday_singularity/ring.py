@@ -337,6 +337,8 @@ def validate_loop_order(L) -> None:
     d = loop_steps(P)
     if not d[-1] > 0.0:
         raise RuntimeError("the loop repeats its start at its end: pass it without the repeat")
+    if np.any(d <= 0.0):
+        raise RuntimeError("the loop has a zero-length interior chord")
     beside = np.minimum(np.roll(d, 1), np.roll(d, -1))
     ratio = np.where(beside > 0.0, d / np.maximum(beside, 1e-300), np.inf)
     worst = int(np.argmax(ratio))
