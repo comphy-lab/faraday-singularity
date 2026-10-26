@@ -416,6 +416,7 @@ from .episodes import ETA_HYS, EpisodeTracker
 from .events import (EVENT_CASCADE, EVENT_CLASSES, EVENT_LIMIT, EVENT_REQUEST, EVENT_SCHEMA,
                      EVENT_STOPS, EVENT_UNCLOSED, EVENT_UNHANDLED, FAR_TIPS, GROOVE_CLASSES,
                      GROOVE_FILL_REFUSED, IMPLEMENTED_HANDLERS, SHEET_CONTACT,
+                     SHEET_RUPTURE_REFUSED,
                      LIQUID_CUT_REFUSED, PRECUT_EVENT, RING_CUT_REFUSED, RING_HANDLERS,
                      RING_REMOVAL_REFUSED, SIZING_KEYS, STOP_OUTCOMES, CascadeMonitor,
                      EventSettings, event_dump_policy, event_dumps_kept, event_neck, event_tip,
@@ -542,6 +543,17 @@ RING_REFINE_TRIES = 3
 # the largest turn of the ring's element the refine meets, on a stepped or a fresh mesh (beyond it
 # the element folds back on itself, and the run stops as the guard stops it)
 RING_REFINE_TURN_MAX = 150.0
+# the ring's thinning liquid lip (decision 22, a nuisance; CollapseDriver._sheet_context,
+# _ring_sheet_reading, _meet_sheet_rupture): resolved by SHEET_ELEMENTS elements across its
+# thickness down to the floor whenever fewer than SHEET_REFINE_ELEMENTS lie across it (r1 and r1h
+# before their contacts at tau/delta^2 25.35: the lip ran with eight across at 6e-6 and met its
+# contact at one, the faces closing at about 90 over 2e-5; four keep it at least two across within a
+# halving of its thickness, the next refine due at two), and ruptured once it is thinning at
+# h_s = jetcore.sheet_rupture_floors h_floor or below (SHEET_RUPTURE_FLOORS without the key)
+SHEET_ELEMENTS = 4.0
+SHEET_REFINE_ELEMENTS = 2.0
+SHEET_RUPTURE_FLOORS = 2.0
+LIP_JUMP = 20.0  # a lip's section beyond this many thicknesses of the last is another feature
 # a fresh mesh's curved element on the bubble's chain before the piercing (CollapseDriver.
 # _tip_straighten): the surface's edges within this many times the distance of the element to the
 # surface, or the chain's spacing there, are read for their midside nodes
@@ -846,6 +858,9 @@ class _State:
     # height (events.match_neck): {"next": the next key's number, "necks": {key: {chain, z_n, r_n,
     # samples [[t, r_n], ...]}}}, from which events.closing_neck reads whether it closes
     neck_history: dict = field(default_factory=dict)
+    # in the ring stage with jetcore's recentred far kinks: the ring's liquid lip, its thinnest
+    # section's thickness over the last accepted states ([t, thickness], sheetsurgery.LIP_SAMPLES)
+    lip_samples: list = field(default_factory=list)
 
 
 def _in_ulps(dt: float, t: float) -> float | None:
@@ -1262,7 +1277,8 @@ class CollapseDriver:
                                      guard={"fresh": fresh, "h_floor": self._h_floor(),
                                             "refine_ratio": s.refine_ratio},
                                      invalid=self._jacobian_stop if fresh else None,
-                                     pinch=self._pinch_context())
+                                     pinch=self._pinch_context(),
+                                     sheet=self._sheet_context(loops))
             if stop is not None:
                 stop.update(self._taus(self._t()))
             return stop
@@ -2881,6 +2897,8 @@ class CollapseDriver:
                     meta["far_yields"] = st.far_yields
                 if self.events.pinch.enabled:  # with pinch only
                     meta["neck_history"] = json.loads(json.dumps(st.neck_history))
+                if st.lip_samples:  # the ring's lip read: other dumps keep their keys
+                    meta["lip_samples"] = [[float(x) for x in v] for v in st.lip_samples]
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -3044,6 +3062,7 @@ class CollapseDriver:
             st.kinks = {str(k): dict(v) for k, v in (meta.get("kinks") or {}).items()}
             st.far_yields = int(meta.get("far_yields", 0))
             st.neck_history = json.loads(json.dumps(meta.get("neck_history") or {}))
+            st.lip_samples = [[float(x) for x in v] for v in meta.get("lip_samples") or []]
             if self.events is not None:
                 self.pb.events = [dict(x) for x in meta.get("events") or []]
                 st.legs = [dict(x) for x in meta.get("legs") or []]
@@ -3245,6 +3264,9 @@ class CollapseDriver:
         ring's loop."""
         if request.get("handler") in RING_HANDLERS and self.events.ring.enabled:
             return self._meet_ring(m, request)
+        if request.get("kind") == SHEET_CONTACT and request.get("chain") == "ring" \
+                and (request.get("sheet_rupture") or {}).get("due") and self._sheet_handled():
+            return self._meet_sheet_rupture(m, request)
         far = self._far_head(request) if request.get("handler") not in IMPLEMENTED_HANDLERS \
             else None
         if far is None and self.events.groove.enabled and \
@@ -3466,6 +3488,54 @@ class CollapseDriver:
         self._prune_meshes()
         return m, None
 
+    def _meet_sheet_rupture(self, m: dict, request: dict) -> tuple[dict, dict | None]:
+        """Meet the ring's lip thinning at ``h_s`` or below (decision 22; the request's
+        ``sheet_rupture`` due): the event after ``max_events`` made is a resumable stop
+        (``max-events``); the rupture (``sheetsurgery.sheet_rupture``) with the run's last step as
+        the history's, the lip's reading and a check of the upward jet's base (the hard closure
+        ``S_base``): a refusal, which leaves the problem unchanged, is a resumable stop
+        (``sheet-rupture-refused``), and so are hard budgets that do not close
+        (``event-unclosed``); any other failure ends the run as a failed one, raised. Made: an
+        event ``sheet-rupture``, its row of ``events.txt``, the lip's history cleared, the dumps the
+        policy drops, the meshes pruned, and the run goes on from the fresh mesh."""
+        if len(self._made_events()) >= self.events.max_events:
+            return m, self._event_stop(EVENT_LIMIT, request, max_events=self.events.max_events)
+        from .sheetsurgery import sheet_rupture
+        from .surgery import BudgetUnclosed, CutRefused
+
+        st, r = self.state, self.reconnect
+        k = len(self._made_events()) + 1
+        dt_prev = st.dt_prev if st.dt_prev else float(self._cut_record()["settings"]["dt0"])
+        lip = {"samples": [list(x) for x in st.lip_samples], **(request.get("sheet_rupture") or {})}
+
+        def base_check():
+            return base_guard_checked(m, self.measure())
+
+        self._event_after = None
+        try:
+            made = sheet_rupture(self.pb, self.events, r, self.outdir, request, k=k,
+                                 dt_prev=dt_prev, h_floor=self._h_floor(), lip=lip, driver=self,
+                                 on_made=self._on_groove_made, base_check=base_check)
+        except (CutRefused, BudgetUnclosed) as e:
+            rec = getattr(e, "record", None) or {}
+            reason = EVENT_UNCLOSED if isinstance(e, BudgetUnclosed) else SHEET_RUPTURE_REFUSED
+            extra = {"hard": (rec.get("closures") or {}).get("hard")} if reason == \
+                EVENT_UNCLOSED else {}
+            return m, self._event_stop(reason, request, precut=e.precut,
+                                       failed_at=rec.get("failed_at"),
+                                       error=rec.get("error", f"{type(e).__name__}: {e}"),
+                                       record=f"events/event_{k:03d}.json", **extra)
+        m = self._event_after
+        st.lip_samples = []
+        removed = made.get("removed") or {}
+        self._event("sheet-rupture", m, k=k, w=(made.get("geometry") or {}).get("w"),
+                    V=removed.get("V"), Pz=removed.get("Pz"), KE=removed.get("KE"),
+                    centroid=removed.get("centroid"), base=made.get("base_guard"))
+        self._write_ring_event_row(made)
+        self._drop_event_dumps()
+        self._prune_meshes()
+        return m, None
+
     def _on_groove_made(self, rec: dict):
         """The driver's bookkeeping of a fill made (``groovesurgery.groove_fill``'s ``on_made``,
         before the state after it is kept and its record written), into its record: the event's
@@ -3520,14 +3590,16 @@ class CollapseDriver:
     def _write_ring_event_row(self, rec: dict):
         """The row of ``events.txt`` of a ring surgery made, or of the fill of a groove: its chain
         (``ring``; the chain filled for a fill), its fill as a negative removal (``V_rem``,
-        ``Pz_rem``, ``KE_rem``), its closures R1-R6 (Q1-Q6 for the removal, G1-G6 for a fill)
+        ``Pz_rem``, ``KE_rem``; a lip's rupture its removal), its closures R1-R6 (Q1-Q6 for the
+        removal, G1-G6 for a fill, S1-S6 for a lip's rupture)
         relative to their scales in ``F1``-``F6``, the cutoff identity, the transfer's counts, the
         step of the history and its wall time; every other column empty."""
         filled = rec.get("filled") or {}
         closures = rec.get("closures") or {}
         rel = closures.get("relative") or {}
         groove = rec.get("kind") in EVENT_CLASSES["gap"]
-        prefix = "Q" if rec.get("kind") == "ring-collapse" else "G" if groove else "R"
+        prefix = ("Q" if rec.get("kind") == "ring-collapse" else "G" if groove
+                  else "S" if rec.get("kind") == "sheet-rupture" else "R")
         phi = closures.get(f"{prefix}3_phi") or {}
         tr = rec.get("transfer") or {}
         neg = {key: (-float(filled[x]) if filled.get(x) is not None else None)
@@ -4167,13 +4239,14 @@ class CollapseDriver:
         before the ring's removal with jetcore's recentred far kinks (:meth:`_refined_chain`).
         A liquid kink of the ring also qualifies, through :meth:`_ring_liquid_reading`, with
         hard zero-removal balances around its rebuild (:meth:`_ring_liquid_refine`)."""
-        stop = self._ring_liquid_reading(self._ring_jacobian_reading(stop))
+        stop = self._ring_sheet_reading(self._ring_liquid_reading(self._ring_jacobian_reading(stop)))
         if stop is None or stop.get("reason") != "interface-unresolved":
             return False
         if stop.get("chain") != "ring":
             return False
         trigger = stop.get("trigger")
-        if trigger not in ("edge-turn", "edge-midside", "curved-jacobian", "liquid-kink"):
+        if trigger not in ("edge-turn", "edge-midside", "curved-jacobian", "liquid-kink",
+                           "sheet-contact"):
             return False
         if stop.get("chain") != self._refined_chain():
             return False
@@ -4325,6 +4398,87 @@ class CollapseDriver:
         request = self._local_ring_fill_request(P, wedge, reading, kind="step")
         return self._meet_event(m, request)
 
+    def _sheet_handled(self) -> bool:
+        """Whether the ring's liquid lip is resolved and ruptured (decision 22): the ring stage
+        before the ring's removal, jetcore's recentred far kinks, ``groove.enabled`` with
+        ``groove.sheets`` ``log`` (a sheet read apart from the gas's folds), and the ring's
+        calibrated noise floors, which the zero-removal budgets of its refine and the closures of
+        its rupture are floored at."""
+        ring, jet = self._ring(), self._jetcore()
+        if ring is None or ring.get("removed") is not None or jet is None \
+                or jet.far_kinks != "recentre":
+            return False
+        g, noise = self.events.groove, self.events.ring
+        return bool(g.enabled and g.sheets == "log" and noise.sigma_V > 0.0
+                    and noise.sigma_Pz > 0.0)
+
+    def _sheet_rupture_thickness(self) -> float:
+        """``h_s``: ``jetcore.sheet_rupture_floors`` (``SHEET_RUPTURE_FLOORS`` without it) times the
+        run's floor."""
+        floors = getattr(self._jetcore(), "sheet_rupture_floors", None)
+        return float(floors if floors is not None else SHEET_RUPTURE_FLOORS) * self._h_floor()
+
+    def _sheet_context(self, loops) -> object | None:
+        """The ring stage's reading of the ring's lip for its stops (``ring.ring_stage_events``'
+        ``sheet``), where it is handled (:meth:`_sheet_handled`; None otherwise): a callable of the
+        ring's liquid fold ``f`` and the element length of its finer side ``h_fine`` that adds the
+        state's sample of the lip's thickness (``[t, f.gap, f.r, f.z]``, once per time, the last
+        ``sheetsurgery.LIP_SAMPLES``; a rebuild at the same time adds none; a section more than
+        ``LIP_JUMP`` thicknesses from the last one's is another feature, and the history restarts
+        from it), keeps the refined far
+        kink of the ring that holds the lip alive while the lip lasts (its ``t_set`` the state's,
+        so that ``jetcore.far_kink_regions`` does not release it as a feature the guard no longer
+        asks for), and returns ``h_s`` (:meth:`_sheet_rupture_thickness`), the thinning reading
+        (``sheetsurgery.lip_thinning``) and ``refine_limit``, ``SHEET_REFINE_ELEMENTS h_fine``
+        while the lip's elements lie above the refine's floor (``refine_ratio h_floor``), zero
+        otherwise."""
+        if not self._sheet_handled() or len(loops) != 1:
+            return None
+        from .sheetsurgery import LIP_SAMPLES, lip_thinning
+
+        st, t = self.state, self._t()
+
+        def sheet(f, h_fine):
+            samples = st.lip_samples
+            if samples and len(samples[-1]) >= 4 and math.hypot(
+                    f.r - samples[-1][2], f.z - samples[-1][3]) > LIP_JUMP * max(f.gap,
+                                                                                samples[-1][1]):
+                samples.clear()  # another feature: its own history
+            if not samples or t > samples[-1][0]:
+                samples.append([t, float(f.gap), float(f.r), float(f.z)])
+                del samples[:-LIP_SAMPLES]
+            for g in st.kinks.values():  # the refinement that holds the lip: kept while it lasts
+                if g.get("far") and g.get("chain") == "ring" and g.get("refined") \
+                        and not g.get("released") and math.hypot(
+                            f.r - float(g["r"]), f.z - float(g["z"])) <= float(g["radius"]):
+                    g["t_set"] = max(float(g["t_set"]), t)
+            floor = self.s.refine_ratio * self._h_floor()
+            refine = SHEET_REFINE_ELEMENTS * h_fine if h_fine > floor else 0.0
+            return {"h_s": self._sheet_rupture_thickness(), "refine_limit": refine,
+                    "thinning": lip_thinning(samples)}
+
+        return sheet
+
+    def _ring_sheet_reading(self, stop: dict | None) -> dict | None:
+        """The ring's ``sheet-contact`` that is not due for its rupture read as a request to
+        resolve the lip (:meth:`_sheet_handled`): the guard's reading at the pair's middle with
+        ``L`` the element length of the lip's finer side and ``target`` ``max(h_floor,
+        gap/SHEET_ELEMENTS)``, trigger ``sheet-contact``, the request kept as ``liquid_contact``
+        (so that :meth:`_ring_refine` makes it as the liquid kink's refine, with its hard
+        zero-removal budgets, :meth:`_ring_liquid_refine`) and as ``sheet``. Any other stop is
+        returned as it is."""
+        if stop is None or stop.get("reason") != EVENT_REQUEST or stop.get("kind") != SHEET_CONTACT \
+                or stop.get("chain") != "ring" or stop.get("side") != "liquid" \
+                or (stop.get("sheet_rupture") or {}).get("due") or not self._sheet_handled():
+            return stop
+        gap, h = float(stop.get("fold_gap", math.nan)), float(stop.get("h_fine", math.nan))
+        if not (math.isfinite(gap) and math.isfinite(h)):
+            return stop
+        return {"reason": "interface-unresolved", "trigger": "sheet-contact", "chain": "ring",
+                "L": h, "r": float(stop["fold_r"]), "z": float(stop["fold_z"]),
+                "target": max(self._h_floor(), gap / SHEET_ELEMENTS), "turn": math.nan,
+                "liquid_contact": dict(stop), "sheet": {"gap": gap, "h_fine": h}}
+
     def _ring_kink_reading(self, stop: dict | None) -> dict | None:
         """The ring's ``self-contact-approach`` (trigger ``fold-gap``) of contact ``kink`` on its gas
         side (or of no side read) read as the guard's reading at the element between the fold's
@@ -4454,7 +4608,8 @@ class CollapseDriver:
         tries = 0
         while tries < RING_REFINE_TRIES and self._ring_refine_due(stop):
             tries += 1
-            reading = self._ring_liquid_reading(self._ring_jacobian_reading(stop))
+            reading = self._ring_sheet_reading(
+                self._ring_liquid_reading(self._ring_jacobian_reading(stop)))
             if reading.get("liquid_contact") is not None:
                 m, stop = self._ring_liquid_refine(m, reading, tries)
             else:
@@ -4467,7 +4622,9 @@ class CollapseDriver:
         """A topology-preserving ring refinement with hard zero-removal budgets.
 
         A failed balance or base check rolls back to the saved state. Reaching
-        the floor or a resolved sheet-contact remains a stop for a design decision.
+        the floor remains a stop. The ring's lip is resolved through this route too
+        (:meth:`_ring_sheet_reading`) and ruptured once it thins at ``h_s``
+        (:meth:`_meet_sheet_rupture`).
         """
         from .ringcontact import closures, sample
         from .surgery import site_grid
@@ -4532,6 +4689,8 @@ class CollapseDriver:
         else:
             factor = 0.5
         target = max(self._h_floor(), factor * L)
+        if stop.get("target") is not None:  # a sheet: its thickness over SHEET_ELEMENTS
+            target = max(self._h_floor(), min(target, float(stop["target"])))
         # the ring's live far kinks whose disc holds the element (the region that yielded there):
         # their radius and the chord they met carried over; a refined one whose reach holds it is
         # refined further, else the refinement is a region of its own; no other region changes

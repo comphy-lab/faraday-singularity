@@ -115,7 +115,12 @@ GROOVE_CLASSES = ("A-groove", "RF")
 GROOVE_HANDLER = "groove-fill"
 # the kinds of the events a run makes, by class: the keys of a class are fixed after its first event
 EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head", "far-head"), "gap": ("groove-fill",),
-                 "ring": ("piercing", "ring-collapse")}
+                 "ring": ("piercing", "ring-collapse", "sheet-rupture")}
+# the rupture of a thinning liquid lip of the ring (sheetsurgery.sheet_rupture): its kind, class and
+# handler, and the stop of a rupture refused
+SHEET_RUPTURE = "sheet-rupture"
+SHEET_RUPTURE_CLASS = "RS"
+SHEET_RUPTURE_REFUSED = "sheet-rupture-refused"
 # a dump of the state before an event, from which a restart may change the keys of its class
 PRECUT_EVENT = "precut-event"
 # the keys of the block that size the mesh after the cut: a restart that changes one of them does
@@ -438,6 +443,11 @@ class JetCoreSettings:
       box of radius ``liquid.box_radius delta`` about the core by at most ``box_gate_sigmas`` times
       ``liquid.sigma_V`` and ``liquid.sigma_Pz``; otherwise the run stops resumably with the state
       before the rebuild.
+    * ``sheet_rupture_floors``: the thickness ``h_s`` at which a thinning liquid lip of the ring is
+      ruptured, in floors of the run (``h_s = sheet_rupture_floors h_floor``; null: 2), the lip
+      resolved by ``driver.SHEET_ELEMENTS`` elements across its thickness down to ``h_floor`` until
+      then (``driver.CollapseDriver._meet_sheet``, ``sheetsurgery.sheet_rupture``); written into
+      the block only where set (:data:`EventSettings.LATE_KEYS`).
 
     A key of :data:`PENDING_KEYS` is refused away from its default until the driver makes it."""
     enabled: bool = False
@@ -455,10 +465,15 @@ class JetCoreSettings:
     profile_dt: float | None = None
     box_gate: bool = False
     box_gate_sigmas: float = 5.0
+    sheet_rupture_floors: float | None = None
 
     def __post_init__(self):
         for name in ("enabled", "ring_kink_floor", "box_gate"):
             _flag("jetcore", name, getattr(self, name))
+        if self.sheet_rupture_floors is not None and not (
+                _number(self.sheet_rupture_floors) and self.sheet_rupture_floors >= 1.0):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore.sheet_rupture_floors must be at "
+                             "least one floor, or null")
         for name in ("core_radius", "wall_radius", "box_gate_sigmas"):
             _positive("jetcore", name, getattr(self, name))
         for name in ("far_courant", "far_floor", "prep_gap", "profile_dt"):
@@ -676,6 +691,10 @@ class EventSettings:
     LEG_KEYS_OF_CLASSES = ("ring.after_removal",)
     # the parts written into the block only where they differ from their defaults (to_dict)
     OPTIONAL_PARTS = ("ring", "jetcore", "pinch", "groove")
+    # keys added to a part after blocks with the part were recorded (runs, dumps, the hashes of
+    # their legs): written only where they differ from their defaults, so that those blocks and
+    # their hashes are unchanged, and a record without them reads as their defaults (_completed)
+    LATE_KEYS = {"jetcore": ("sheet_rupture_floors",)}
     KEYS = ("max_events", "cascade_min_interval", "cascade_ratio", "cascade_count")  # of the leg
 
     def __post_init__(self):
@@ -736,8 +755,17 @@ class EventSettings:
 
     def to_dict(self) -> dict:
         """The block as its records hold it: every part but those of ``OPTIONAL_PARTS`` at their
-        defaults, which are left out, and the keys of its own."""
-        return {**{name: asdict(getattr(self, name)) for name, part in self.PARTS.items()
+        defaults, which are left out, each without its ``LATE_KEYS`` at their defaults, and the
+        keys of its own."""
+        def part_dict(name: str, part) -> dict:
+            d = asdict(getattr(self, name))
+            defaults = asdict(part())
+            for key in self.LATE_KEYS.get(name, ()):
+                if d[key] == defaults[key]:
+                    del d[key]
+            return d
+
+        return {**{name: part_dict(name, part) for name, part in self.PARTS.items()
                    if name not in self.OPTIONAL_PARTS or getattr(self, name) != part()},
                 **{name: getattr(self, name) for name in self.KEYS}}
 
@@ -1066,7 +1094,7 @@ RING_CUT_REFUSED = "ring-cut-refused"
 RING_REMOVAL_REFUSED = "ring-removal-refused"
 GROOVE_FILL_REFUSED = "groove-fill-refused"
 EVENT_STOPS = (EVENT_UNHANDLED, EVENT_CASCADE, EVENT_LIMIT, LIQUID_CUT_REFUSED, EVENT_UNCLOSED,
-               RING_CUT_REFUSED, RING_REMOVAL_REFUSED, GROOVE_FILL_REFUSED)
+               RING_CUT_REFUSED, RING_REMOVAL_REFUSED, GROOVE_FILL_REFUSED, SHEET_RUPTURE_REFUSED)
 # the outcome in the record of an event the run stops on before any handler is made for it
 # (events/event_<k>.json, written by the driver); a cut refused or unclosed writes its own record
 STOP_OUTCOMES = {EVENT_UNHANDLED: "unhandled", EVENT_CASCADE: "cascade", EVENT_LIMIT: "max-events"}

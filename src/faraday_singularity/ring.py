@@ -782,7 +782,8 @@ def loop_segment(loop: dict) -> dict:
 def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: dict, *,
                       neck_elements: float, fold_ratio: float, fold_stop: float,
                       fold_stop_elements: float, fold_search: float, apexes: dict | None,
-                      guard: dict | None, invalid=None, pinch: dict | None = None) -> dict | None:
+                      guard: dict | None, invalid=None, pinch: dict | None = None,
+                      sheet=None) -> dict | None:
     """The stops and events of a state of the ring stage (after the ring cut,
     ``ringsurgery.ring_cut``; ``ring`` the problem's record of the stage), on the open chain
     (``chains``, ``reconnect.Chain``) and the ring (``loops``, ``(n, 2)`` arrays as
@@ -817,7 +818,14 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
        ``groove.sheets`` ``log`` the folds of the open chain and of the ring are those of each side
        apart (``groove.side_folds``): a sheet of liquid is no event unless its faces close to the
        scale of the mesh (``sheet-contact``, without a handler). With ``pinch.enabled`` the open chain's necks land
-       only when they close, as in ``events.post_cut_events`` (``pinch``, the driver's history)."""
+       only when they close, as in ``events.post_cut_events`` (``pinch``, the driver's history).
+       With ``sheet`` (the driver's reading of the ring's lip, ``CollapseDriver._sheet_context``:
+       called with the ring's liquid fold and the element length of its finer side, it keeps the
+       lip's thickness history and returns ``h_s``, ``thinning`` and ``refine_limit``) the ring's
+       sheet is a ``sheet-contact`` also where its faces lie within ``refine_limit`` (the driver
+       resolves it, ``driver.SHEET_REFINE_ELEMENTS`` element lengths, while it can refine) and
+       where it is thinning at ``h_s`` or below (the driver ruptures it), with ``sheet_rupture``
+       (``h_s``, ``due``, the thinning reading) in the request."""
     from shapely.geometry import LineString
 
     from .events import (GROOVE_HANDLER, SHEET_CONTACT, _neck_fields, _pinch_field, _request,
@@ -996,10 +1004,17 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
             continue
         if side == "liquid":  # a sheet: no event, unless its faces close to the scale of the mesh
             contact_limit = events.groove.sheet_contact * h_fine
-            if f.gap < contact_limit:
+            lip = sheet(f, h_fine) if sheet is not None and name == "ring" else None
+            due = lip is not None and lip["thinning"]["thinning"] and f.gap <= lip["h_s"]
+            resolve = lip is not None and f.gap < lip["refine_limit"]
+            if f.gap < contact_limit or due or resolve:
+                extra = ({"sheet_rupture": {"h_s": lip["h_s"], "due": bool(due),
+                                            "refine_limit": lip["refine_limit"],
+                                            "thinning": lip["thinning"]}}
+                         if lip is not None else {})
                 grooves.append((score, "RF" if name == "ring" else "A-groove",
                                 {**rec, "h_fine": h_fine, "sheet_contact_limit": contact_limit,
-                                 "sheet_contact": True}))
+                                 "sheet_contact": True, **extra}))
             continue
         if name == "ring":
             grooves.append((score, "RF", rec))
