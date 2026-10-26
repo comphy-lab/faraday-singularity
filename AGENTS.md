@@ -560,8 +560,9 @@ add a second top-level `cases/` tree.
   goes on from alive (`CollapseDriver._lip_hold`, before `jetcore.far_kink_regions` releases and
   sizes the kinks, so that the remesh checks and the commit keep it too), and where the guard's
   elements recentre that region on themselves widens it about its new centre to hold the ball about
-  the lip that it held (`CollapseDriver._lip_cover`); the stage reads the ring's liquid fold up to
-  `h_s` also beyond the fold limit (the callback's `h_s`), as a sheet alone. A lip with
+  the lip that it held (`CollapseDriver._lip_cover`); the stage searches for and reads the ring's
+  liquid fold up to `h_s` also beyond its fold search and fold limit (the callback's `h_s`), as a
+  sheet alone, the gas's fold and the open chain's as before. A lip with
   fewer than `driver.SHEET_REFINE_ELEMENTS` elements across it, above the refine's floor, is a
   `sheet-contact` not due: it is refined to `max(h_floor, gap/driver.SHEET_ELEMENTS)` by the liquid
   kink's route with its hard zero-removal budgets (`CollapseDriver._ring_sheet_reading`, trigger

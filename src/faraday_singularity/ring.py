@@ -825,8 +825,9 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
        sheet is a ``sheet-contact`` also where its faces lie within ``refine_limit`` (the driver
        resolves it, ``driver.SHEET_REFINE_ELEMENTS`` element lengths, while it can refine) and
        where it is thinning at ``h_s`` or below (the driver ruptures it), with ``sheet_rupture``
-       (``h_s``, ``due``, the thinning reading) in the request; the ring's liquid fold is read up
-       to ``sheet.h_s`` also beyond the fold limit, as a sheet alone."""
+       (``h_s``, ``due``, the thinning reading) in the request; the ring's liquid fold is searched
+       for and read up to ``sheet.h_s`` also beyond the fold limit, as a sheet alone (its gas's
+       fold and the open chain's as without it)."""
     from shapely.geometry import LineString
 
     from .events import (GROOVE_HANDLER, SHEET_CONTACT, _neck_fields, _pinch_field, _request,
@@ -984,7 +985,13 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
                                     search_factor=fold_search))
     if L is not None:
         if sheets:
-            for side, x in side_folds(L, loop=True, **fold_kw).items():
+            ring_folds = side_folds(L, loop=True, **fold_kw)
+            if math.isfinite(lip_reach) and lip_reach > stop_abs:
+                # the lip's candidates searched out to its rupture thickness, so that a lip below
+                # h_s is found wherever h_s lies; the gas's fold as before
+                ring_folds["liquid"] = side_folds(L, loop=True,
+                                                  **dict(fold_kw, stop=lip_reach))["liquid"]
+            for side, x in ring_folds.items():
                 offer("ring", x["fold"], side, x["h_fine"])
         else:
             offer("ring", loop_fold_gap(L, ratio=fold_ratio, stop=stop_abs,
