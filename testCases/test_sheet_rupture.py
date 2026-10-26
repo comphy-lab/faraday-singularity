@@ -698,3 +698,33 @@ def test_a_thinning_lip_beyond_the_fold_limit_is_read_up_to_its_rupture_thicknes
     plain = lip(1.1 * gap, True)
     del plain.h_s
     assert _sheet_stops(L, plain) is None
+
+
+def test_a_lip_beyond_the_fold_search_is_found_up_to_its_rupture_thickness():
+    """The ring's liquid fold is searched for out to ``h_s`` (the core-sheet review, round 2, F2):
+    a lip 3e-4 thick, beyond the fold search of the ring stage (four times max(kappa_g delta,
+    2 fold_stop_elements spacing), 2e-4 here), below ``h_s`` = 4e-4 (512 floors), is read and,
+    thinning, due."""
+    L = gsh.sheeted_ring(t=3e-4, L=1.5e-3)
+    plain = groove.side_folds(L, loop=True, **gsh.FOLD)
+    assert not math.isfinite(plain["liquid"]["fold"].gap)  # beyond the stage's own search
+    wide = groove.side_folds(L, loop=True, **dict(gsh.FOLD, stop=4e-4))["liquid"]["fold"]
+    assert wide.gap == pytest.approx(3e-4, rel=1e-3)
+    seen = []
+
+    def lip(h_s, thinning):
+        def read(fold, h):
+            seen.append((fold.pair, fold.gap))
+            return {"h_s": h_s, "refine_limit": 0.0, "thinning": {"thinning": thinning}}
+        read.h_s = h_s
+        return read
+
+    req = _sheet_stops(L, lip(4e-4, True))
+    assert req is not None and req["kind"] == ev.SHEET_CONTACT and req["side"] == "liquid"
+    assert req["sheet_rupture"]["due"] is True and req["fold_gap"] == pytest.approx(wide.gap)
+    assert seen[-1] == (wide.pair, wide.gap)
+    assert _sheet_stops(L, lip(4e-4, False)) is None  # read, not thinning: no event
+    # without h_s beyond the stage's own reach, the search is the stage's (no lip found)
+    seen.clear()
+    assert _sheet_stops(L, lip(2.9e-4, True)) is None
+    assert all(g < 2.9e-4 for _, g in seen)
