@@ -165,32 +165,206 @@ def liquid_reading(points, stop: dict | None) -> dict | None:
 
 
 def sample(problem, grid: dict, reservoir_depth: float) -> dict:
-    """The existing box integrals and polyline volumes, with the ring counted as gas."""
-    from .reconnect import Chain
+    """The existing box integrals and polyline volumes, with the ring counted as gas; and, for
+    :func:`closures`, the readings of the box's cells (:func:`cell_readings`: each cell's
+    midpoint sample, and for each cell within a diagonal of a free surface its liquid fraction
+    and its velocity at its liquid part's centroid), which the record does not keep
+    (:func:`plain_sample`)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from .reconnect import Chain, closed_section
     from .ring import closed
-    from .surgery import _named_chains, box_integrals, box_polyline_budgets
+    from .surgery import _named_chains, box_integrals, box_polyline_budgets, sample_fields
 
     named, _ = _named_chains(problem)
     loops = [np.column_stack([x["r"], x["z"]]) for x in problem.interface_loops()]
     chains = [c for _, c in named] + [Chain(closed(L), ("loop", "loop")) for L in loops]
+    gas = unary_union([Polygon(closed_section(c.points, c.end_types, reservoir_depth)).buffer(0)
+                       for c in chains])
+
+    def sampler(r, z):
+        f, found = sample_fields(problem, r, z, ("velocity_y",))
+        return np.where(found, f["velocity_y"], 0.0), found
+
     return {"box": box_integrals(problem, grid, cutoff=True),
             "poly": box_polyline_budgets(chains, grid["z"], grid["R"], reservoir_depth,
-                                         r_centre=grid["r_c"]), "loops": len(loops)}
+                                         r_centre=grid["r_c"]), "loops": len(loops),
+            "_cells": cell_readings(grid, gas, sampler)}
 
 
-def closures(before: dict, after: dict, sigma) -> dict:
+def plain_sample(sampled: dict) -> dict:
+    """A sample of :func:`sample` as the record keeps it: without its cells' readings."""
+    return {k: v for k, v in sampled.items() if not k.startswith("_")}
+
+
+def _cells(grid: dict, index, points: int = 3):
+    """The polar cells ``index`` of ``grid`` (``surgery.site_grid``) as polygons: each within half
+    a radial step of its sample's distance from the centre and half an angular step of its
+    angle (``points`` along each arc), at ``r >= 0`` (a cell whose midpoint lies off the axis can
+    reach across it; the domain ends there)."""
+    import shapely
+
+    h_rho, h_th = grid["R"] / grid["n"], 2.0 * math.pi / grid["n"]
+    half = shapely.box(0.0, grid["z"] - 2.0 * grid["R"], grid["r_c"] + 2.0 * grid["R"],
+                       grid["z"] + 2.0 * grid["R"])
+    out = []
+    for k in np.asarray(index, dtype=int):
+        rho = float(grid["rho"][k])
+        th = math.atan2(float(grid["zz"][k]) - grid["z"], float(grid["r"][k]) - grid["r_c"])
+        t = np.linspace(th - 0.5 * h_th, th + 0.5 * h_th, points)
+        ring = np.column_stack([np.cos(t), np.sin(t)])
+        P = np.vstack([ring * (rho + 0.5 * h_rho), (ring * max(rho - 0.5 * h_rho, 0.0))[::-1]])
+        out.append(shapely.Polygon(P + np.array([grid["r_c"], grid["z"]])).intersection(half))
+    return np.asarray(out, dtype=object)
+
+
+def cell_readings(grid: dict, gas, sampler) -> dict:
+    """The readings of the cells of ``grid`` for :func:`momentum_change`, ``gas`` the gas the
+    polylines bound (a shapely geometry) and ``sampler(r, z)`` the axial velocity and whether each
+    point lies in the liquid: each cell's midpoint sample (``found``, ``uz``), and for each cell
+    whose midpoint lies within a cell's diagonal of the gas's boundary (``near``, the cells a
+    rebuild can move a free surface across) the volume of revolution of the cell (``V_cell``) and
+    of its liquid part (``V_liquid``: the cell less the gas) and the liquid part's axial momentum
+    (``P_liquid``, ``int u_z 2 pi r dA``), each by the seven-point, degree-five triangle rule of
+    ``axisrepair.polygon_quadrature_points`` with the velocity sampled at its points (the points
+    the finite element does not find in the liquid take the mean of those it does;
+    ``read_liquid`` false where it finds none of a part that has liquid)."""
+    import shapely
+
+    from .axisrepair import polygon_quadrature_points
+
+    uz, found = sampler(grid["r"], grid["zz"])
+    h_rho, h_th = grid["R"] / grid["n"], 2.0 * math.pi / grid["n"]
+    disc = shapely.Point(grid["r_c"], grid["z"]).buffer(grid["R"] * (1.0 + 2.0 / grid["n"]),
+                                                         quad_segs=256)
+    local = gas.intersection(disc)
+    diag = np.hypot(h_rho, np.asarray(grid["rho"]) * h_th)
+    if local.is_empty or not len(diag):
+        near = np.zeros(0, dtype=int)
+    else:  # the boundary sampled at most half the finest diagonal apart: a distance within it
+        from scipy.spatial import cKDTree
+
+        step = 0.5 * float(diag.min())
+        B = shapely.get_coordinates(shapely.segmentize(local.boundary, step))
+        d, _ = cKDTree(B).query(np.column_stack([grid["r"], grid["zz"]]))
+        near = np.flatnonzero(d <= diag + step)
+    n = len(near)
+    V_cell, V_liq, P_liq = np.zeros(n), np.zeros(n), np.zeros(n)
+    read = np.ones(n, dtype=bool)
+    if n:
+        cells = _cells(grid, near)
+        liquid = shapely.difference(cells, local)
+        points, weights, owner = [], [], []
+        for i, (cell, part) in enumerate(zip(cells, liquid)):
+            V_cell[i] = float(np.sum(polygon_quadrature_points(cell)[1]))
+            if part.is_empty or part.area <= 0.0:
+                continue
+            X, dV, _ = polygon_quadrature_points(part)
+            points.append(X)
+            weights.append(dV)
+            owner.append(np.full(len(X), i))
+        if points:
+            X, dV, own = np.vstack(points), np.concatenate(weights), np.concatenate(owner)
+            u, ok = sampler(X[:, 0], X[:, 1])
+            V_liq = np.bincount(own, weights=dV, minlength=n)
+            V_ok = np.bincount(own, weights=np.where(ok, dV, 0.0), minlength=n)
+            P_ok = np.bincount(own, weights=np.where(ok, dV * u, 0.0), minlength=n)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                P_liq = np.where(V_ok > 0.0, P_ok * V_liq / V_ok, 0.0)
+            read = (V_liq <= 0.0) | (V_ok > 0.0)
+    return {"found": found, "uz": uz, "near": near, "V_cell": V_cell, "V_liquid": V_liq,
+            "P_liquid": P_liq, "read_liquid": read}
+
+
+def momentum_change(grid: dict, before: dict, after: dict) -> dict:
+    """The axial momentum the rebuild moved within the box (``surgery.box_integrals``' midpoint
+    rule, weighted by the box's cutoff ``phi``), its cells read consistently across the rebuild
+    (:func:`cell_readings`): a cell whose midpoint lies in the liquid both times counts the change
+    of its velocity there (``matched``); a cell whose midpoint the rebuild moved across a free
+    surface (in the liquid on one side only, ``crossed``) counts the change of its liquid part's
+    momentum, ``phi dV/V_cell (P_a - P_b)``, ``P`` the volume integral of the axial velocity over
+    the cell less the polylines' gas on each side (revolved, ``2 pi r dA``), instead of the whole
+    cell that the midpoint rule moves across the surface with its sample; a crossed cell either
+    side could not read so (not near a surface by its polylines, or none of its liquid part's
+    points in the liquid) counts the midpoint rule's change, as before (``unresolved``). A value
+    that is not finite, a sample the finite element found in the liquid on either side included,
+    makes the change not finite (C_P then fails, :func:`closures`). The
+    midpoint rule's change itself is kept as ``grid``. r1 at step 7817 and r1s4 at 8208 (bf80e74):
+    the lip's refine moved one heavy cell's midpoint (dV 1.4e-11 at 2.7e-3 from the lip, 330-380
+    in u_z) across the free surface of the plug, the surface through the cell's middle both
+    times: 3.9e-9 and 3.6e-9 of the grid's change, the matched cells 1.8e-10 and -4.1e-11, the
+    limit 1.62e-9."""
+    cb, ca = before["_cells"], after["_cells"]
+    w = np.asarray(grid["dV"], dtype=float) * np.asarray(grid["phi"], dtype=float)
+    both = cb["found"] & ca["found"]
+    crossed = np.flatnonzero(cb["found"] != ca["found"])
+    matched = float(np.sum(w[both] * (ca["uz"][both] - cb["uz"][both])))
+    where = [{int(k): i for i, k in enumerate(c["near"])} for c in (cb, ca)]
+    cells = []
+    for k in crossed:
+        k = int(k)
+        grid_k = float(w[k] * (ca["uz"][k] - cb["uz"][k]))
+        sides = []
+        for c, at in zip((cb, ca), where):
+            i = at.get(k)
+            ok = i is not None and bool(c["read_liquid"][i]) and float(c["V_cell"][i]) > 0.0
+            sides.append((float(c["V_liquid"][i]), float(c["P_liquid"][i]), float(c["V_cell"][i]))
+                         if ok else None)
+        resolved = None not in sides
+        if resolved:
+            scale = float(w[k]) / sides[0][2]  # the midpoint rule's weight over the cell's volume
+            value = scale * (sides[1][1] - sides[0][1])
+        else:
+            value = grid_k
+        cells.append({"r": float(grid["r"][k]), "z": float(grid["zz"][k]),
+                      "rho": float(grid["rho"][k]), "w": float(w[k]),
+                      "uz": [float(cb["uz"][k]), float(ca["uz"][k])],
+                      "fraction": [s[0] / s[2] if s else None for s in sides],
+                      "uz_liquid": [s[1] / s[0] if s and s[0] > 0.0 else None for s in sides],
+                      "grid": grid_k, "resolved": resolved, "value": value})
+    values = [c["value"] for c in cells]
+    # every sample the finite element found in the liquid must be finite, on either side, before
+    # any of them is read (a crossed cell's midpoint included, which its liquid part replaces)
+    samples_finite = all(bool(np.all(np.isfinite(c["uz"][c["found"]]))) for c in (cb, ca))
+    finite = samples_finite and math.isfinite(matched) and all(math.isfinite(v) for v in values)
+    crossed_sum = math.fsum(values) if finite else math.nan
+    change = matched + crossed_sum if finite else math.nan
+    grid_change = float(np.sum(np.where(ca["found"], w * ca["uz"], 0.0))
+                        - np.sum(np.where(cb["found"], w * cb["uz"], 0.0)))
+    return {"change": change, "matched": matched, "crossed": crossed_sum,
+            "grid": grid_change, "cells_crossed": len(cells),
+            "cells_unresolved": sum(1 for c in cells if not c["resolved"]),
+            "largest_crossed": max(cells, key=lambda c: abs(c["grid"])
+                                   if math.isfinite(c["grid"]) else math.inf) if cells else None}
+
+
+def closures(before: dict, after: dict, sigma, grid: dict | None = None) -> dict:
     """Zero added/removed volume and momentum, with the ring surgery's existing floors.
 
     No projection or surgery is made. The two hard balances use five times the
-    calibrated ring noise, as R1 and R2 do; a nonfinite value is a failure.
+    calibrated ring noise, as R1 and R2 do; a nonfinite value is a failure. With the
+    box's ``grid`` and samples that hold their cells (:func:`sample`), C_P is the
+    momentum the rebuild moved read consistently across it (:func:`momentum_change`:
+    a cell whose midpoint crossed a free surface counts the change of its liquid part's
+    momentum, not its whole volume); the midpoint rule's change is kept as ``C_P_grid``.
     """
     from .ringsurgery import RING_NOISE_FLOORS
 
     values = {"C_V": abs(after["poly"]["V_liquid"] - before["poly"]["V_liquid"]),
               "C_P": abs(after["box"]["Pz"] - before["box"]["Pz"])}
+    split = None
+    if grid is not None and "_cells" in before and "_cells" in after:
+        split = momentum_change(grid, before, after)
+        # the reading replaces the midpoint rule's change, never a change that is not finite
+        values["C_P"] = abs(split["change"]) if math.isfinite(values["C_P"]) else math.nan
     limits = {"C_V": RING_NOISE_FLOORS["R1"][1] * sigma.sigma_V,
               "C_P": RING_NOISE_FLOORS["R2"][1] * sigma.sigma_Pz}
     hard = [k for k in values if not math.isfinite(values[k]) or not values[k] <= limits[k]]
     if before["loops"] != 1 or after["loops"] != 1:
         hard.append("C_loop")
-    return {"values": values, "limits": limits, "hard": hard, "V_added": 0.0, "V_removed": 0.0}
+    out = {"values": values, "limits": limits, "hard": hard, "V_added": 0.0, "V_removed": 0.0}
+    if split is not None:
+        out["C_P_grid"] = abs(after["box"]["Pz"] - before["box"]["Pz"])
+        out["C_P_split"] = split
+    return out

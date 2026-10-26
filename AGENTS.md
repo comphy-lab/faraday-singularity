@@ -545,6 +545,18 @@ add a second top-level `cases/` tree.
   are required (`liquid_refine_unavailable` otherwise). Its hard zero-removal checks are
   `C_V`, `C_P`, `C_loop` and `C_base`, with the existing base tolerance; an unclosed audit
   restores the input in place, retaining event and profile counters (`ring-contact-unclosed`).
+  `C_P` reads the box's cells consistently across the rebuild (`ringcontact.cell_readings`,
+  `momentum_change`): a cell whose midpoint lies in the liquid both times counts the change of its
+  velocity, a cell whose midpoint the rebuild moved across a free surface counts the change of its
+  liquid part's momentum (the cell, clipped at the axis, less each side's polylines' gas, its
+  volume and `2 pi r u` integrated by the axis repair's triangle rule at the velocity sampled on
+  each side), not its whole volume, a crossed cell a side cannot read so counts the midpoint rule's
+  change, and a value that is not finite fails `C_P`; the midpoint rule's change is kept as `C_P_grid` with the
+  split (r1 at 7817 and r1s4 at 8208, bf80e74: one cell of dV 1.4e-11 at u_z 330-380 on the
+  plug's surface, its fraction 0.502 and 0.498 both times, 3.9e-9 and 3.6e-9 of the grid's
+  change, the matched cells 1.8e-10 and -4.1e-11, the limit 1.62e-9 unchanged). A gas kink
+  of the ring (`fold-kink`) whose elements lie above `refine_ratio h_floor` is refined to the floor
+  by the same audited route, and the fill at the floor meets it there.
   Records are `events/ring_contact_<step>_<remesh-count>_<attempt>.json`, event `ring-contact-refine`.
   Unit and stand-in routes, finite-element fills/refinement/rollback, and unchanged-run pins
   against 775df94 are in `test_ring_contact.py`, `test_ring_contact_fem.py` and
@@ -560,7 +572,8 @@ add a second top-level `cases/` tree.
   goes on from alive (`CollapseDriver._lip_hold`, before `jetcore.far_kink_regions` releases and
   sizes the kinks, so that the remesh checks and the commit keep it too), and where the guard's
   elements recentre that region on themselves widens it about its new centre to hold the ball about
-  the lip that it held (`CollapseDriver._lip_cover`); the stage searches for and reads the ring's
+  the lip that it held, and where the reading leaves it recentres it on the lip, so that the lip
+  keeps its refinement as it moves (`CollapseDriver._lip_cover`); the stage searches for and reads the ring's
   liquid fold up to `h_s` also beyond its fold search and fold limit (the callback's `h_s`), as a
   sheet alone, the gas's fold and the open chain's as before. A lip with
   fewer than `driver.SHEET_REFINE_ELEMENTS` elements across it, above the refine's floor, is a

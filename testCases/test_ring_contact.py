@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -242,6 +243,107 @@ def test_zero_removal_balances_are_hard_and_nonfinite_values_fail():
     assert contact.closures(before, budget(float("nan"), float("inf")), sigma)["hard"] == ["C_V", "C_P"]
 
 
+def _box_sides(grid, *, gas_of, found_of, u_of):
+    """A sample of ``ringcontact.sample`` on a synthetic field: the polylines' gas ``gas_of``,
+    the finite-element liquid ``found_of(r, z)`` and the axial velocity ``u_of(r, z)``."""
+    w = grid["dV"] * grid["phi"]
+
+    def sampler(r, z):
+        found = found_of(np.asarray(r), np.asarray(z))
+        return np.where(found, u_of(np.asarray(r), np.asarray(z)), 0.0), found
+
+    cells = contact.cell_readings(grid, gas_of, sampler)
+    return {"poly": {"V_liquid": 1e-6}, "loops": 1,
+            "box": {"Pz": float(np.sum(w * cells["uz"]))}, "_cells": cells}
+
+
+def test_a_cell_moved_across_a_free_surface_counts_its_liquid_part_not_its_whole_volume():
+    """The lip refine's C_P (``ringcontact.momentum_change``): r1 at step 7817 and r1s4 at 8208
+    (bf80e74) stopped on a refine whose box grid moved one heavy cell's midpoint across the free
+    surface of the plug, its liquid fraction 0.502 to 0.502 and 0.498 to 0.498: its whole cell
+    counted by the midpoint rule, 3.9e-9 and 3.6e-9 against 1.62e-9, the cells in the liquid both
+    times 1.8e-10 and -4.1e-11. Read consistently, a crossed cell counts the change of its liquid
+    part's momentum (its fraction from each side's polylines, its velocity at its liquid part's
+    centroid on each side): the artefact goes, and a real change of velocity, in the liquid or in
+    the crossed cell itself, stays hard; a crossed cell that a side cannot read so counts the
+    midpoint rule's change; a cell that a thin film crosses twice reads its fraction."""
+    from shapely.geometry import box as rect
+
+    from faraday_singularity.surgery import site_grid
+
+    grid = site_grid(1.4e-3, 4.612, 4e-3)
+    w = grid["dV"] * grid["phi"]
+    k = int(np.argmax(w))
+    zc = float(grid["zz"][k])
+    sigma = SimpleNamespace(sigma_V=1.13e-13, sigma_Pz=3.24e-10)
+    limit = 5.0 * sigma.sigma_Pz
+    cell = contact._cells(grid, [k])[0]
+
+    def plane(eps, du=0.0, du_cell=0.0):  # liquid below the plane z = zc + eps, 377 + du in it
+        import shapely
+
+        def u_of(r, z):
+            inside = shapely.contains_xy(cell, r, z) if du_cell else np.zeros(len(r), bool)
+            return 377.0 + du + du_cell * inside
+        return _box_sides(grid, gas_of=rect(0.0, zc + eps, 1.0, 10.0),
+                          found_of=lambda r, z: z < zc + eps, u_of=u_of)
+
+    before, after = plane(1e-9), plane(-1e-9)
+    assert before["_cells"]["found"][k] and not after["_cells"]["found"][k]
+    c = contact.closures(before, after, sigma, grid)
+    split = c["C_P_split"]
+    big = split["largest_crossed"]
+    assert split["cells_crossed"] >= 1 and split["cells_unresolved"] == 0
+    assert big["resolved"] and 0.4 < big["fraction"][0] < 0.6 and 0.4 < big["fraction"][1] < 0.6
+    assert c["C_P_grid"] > limit  # the midpoint rule's whole cell
+    assert c["values"]["C_P"] < 1e-3 * c["C_P_grid"] and c["hard"] == []
+    assert c["values"]["C_P"] == pytest.approx(abs(split["matched"] + split["crossed"]))
+    # a change of the velocity in the liquid: hard, as before
+    moved = contact.closures(before, plane(-1e-9, du=0.05), sigma, grid)
+    assert moved["hard"] == ["C_P"] and moved["C_P_split"]["matched"] > limit
+    # a real change of the velocity in the crossed cell itself: counted there, hard
+    du = 3.0 * limit / (0.5 * w[k])
+    local = contact.closures(before, plane(-1e-9, du_cell=du), sigma, grid)
+    lk = local["C_P_split"]["largest_crossed"]
+    assert local["hard"] == ["C_P"]
+    assert lk["value"] == pytest.approx(w[k] * lk["fraction"][1] * du, rel=1e-3,
+                                        abs=1e-3 * limit)
+    # the side that holds the liquid's sample is read: the reverse crossing, the same reading
+    back = contact.closures(after, before, sigma, grid)
+    assert back["hard"] == [] and back["values"]["C_P"] == pytest.approx(c["values"]["C_P"])
+    # a crossing the polylines do not see (the finite-element surface alone moved across the
+    # midpoint): unread, the midpoint rule's change counted, hard
+    unseen = _box_sides(grid, gas_of=rect(0.0, zc + 1.0, 1.0, 10.0),
+                        found_of=lambda r, z: ~((np.abs(r - grid["r"][k]) < 1e-12)
+                                                & (np.abs(z - zc) < 1e-12)),
+                        u_of=lambda r, z: np.full(len(r), 377.0))
+    clear = _box_sides(grid, gas_of=rect(0.0, zc + 1.0, 1.0, 10.0),
+                       found_of=lambda r, z: np.ones(len(r), bool),
+                       u_of=lambda r, z: np.full(len(r), 377.0))
+    miss = contact.closures(clear, unseen, sigma, grid)
+    assert miss["C_P_split"]["cells_unresolved"] == 1 and miss["hard"] == ["C_P"]
+    assert miss["values"]["C_P"] == pytest.approx(miss["C_P_grid"])
+    # a film of gas across the cell (two crossings): its fraction read, the artefact gone
+    film_w = 0.2 * grid["R"] / grid["n"]
+
+    def film(z0):
+        return _box_sides(grid, gas_of=rect(0.0, z0, 1.0, z0 + film_w),
+                          found_of=lambda r, z: ~((z > z0) & (z < z0 + film_w)),
+                          u_of=lambda r, z: np.full(len(r), 377.0))
+
+    a, b = film(zc + 1e-9), film(zc - 1e-9)  # the midpoint below the film, then within it
+    two = contact.closures(a, b, sigma, grid)
+    tk = two["C_P_split"]["largest_crossed"]
+    assert a["_cells"]["found"][k] and not b["_cells"]["found"][k] and tk["resolved"]
+    assert 0.5 < tk["fraction"][0] < 1.0 and 0.5 < tk["fraction"][1] < 1.0
+    assert two["hard"] == [] and two["C_P_grid"] > limit
+    # samples without their cells' readings: the midpoint rule's change, as before
+    plain = contact.closures(contact.plain_sample(before), contact.plain_sample(after), sigma,
+                             grid)
+    assert plain["values"]["C_P"] == pytest.approx(c["C_P_grid"]) and plain["hard"] == ["C_P"]
+    assert "_cells" not in contact.plain_sample(before)
+
+
 def crossed_teardrop():
     P, _ = teardrop(arc_points=121)
     Q = P.copy()
@@ -301,7 +403,107 @@ def test_a_crossed_step_is_restored_before_the_local_fill_and_unknown_phases_sta
         assert stop is None and len(calls) == 1 and calls[0]["step_fill"]["guard"]["pre_step_phase"] == "gas"
 
 
-@pytest.mark.parametrize("miss", [None, "volume", "momentum", "base"])
+def test_a_crossed_cell_near_the_axis_counts_its_revolved_liquid_momentum():
+    """A crossed cell's liquid part is weighted by its volume of revolution, not its area (the
+    review of batch A, F1): a cell near the axis that a plane r = r_k crosses holds less volume on
+    its inner side than its area says. Its counted momentum change, the velocity changed in it
+    too, is the one a fine midpoint integration of 2 pi r u over the cell's liquid part gives."""
+    import shapely
+    from shapely.geometry import box as rect
+
+    from faraday_singularity.surgery import site_grid
+
+    grid = site_grid(1.4e-3, 4.612, 4e-3)
+    w = grid["dV"] * grid["phi"]
+    # the cell nearest the axis, wholly at r > 0, whose radial extent is largest against its
+    # distance from it: its inner half holds much less volume than its outer half
+    cand = np.flatnonzero((grid["r"] < 2e-4) & (grid["rho"] > 1.5e-3))
+    polys = contact._cells(grid, cand)
+    x0 = np.array([p.bounds[0] for p in polys])
+    span = np.array([p.bounds[2] - p.bounds[0] for p in polys])
+    ok = np.flatnonzero(x0 > 0.0)
+    j = ok[np.argmax(span[ok] / x0[ok])]
+    k, cell = int(cand[j]), polys[j]
+    rk = float(grid["r"][k])
+    sigma = SimpleNamespace(sigma_V=1.13e-13, sigma_Pz=3.24e-10)
+
+    def u_of(r, z, du):
+        return 100.0 + 1e5 * r + du * shapely.contains_xy(cell, r, z)
+
+    def side(eps, du):  # the liquid inside r < r_k + eps, the gas beyond
+        return _box_sides(grid, gas_of=rect(rk + eps, 0.0, 1.0, 10.0),
+                          found_of=lambda r, z: r < rk + eps, u_of=lambda r, z: u_of(r, z, du))
+
+    def fine(eps, du, n=600):  # 2 pi int r u dA over the cell's liquid part, and its volume
+        x0, y0, x1, y1 = cell.bounds
+        hx, hy = (x1 - x0) / n, (y1 - y0) / n
+        X, Y = np.meshgrid(x0 + (np.arange(n) + 0.5) * hx, y0 + (np.arange(n) + 0.5) * hy)
+        X, Y = X.ravel(), Y.ravel()
+        inside = shapely.contains_xy(cell, X, Y)
+        liquid = inside & (X < rk + eps)
+        dV = 2.0 * math.pi * X * hx * hy
+        return (float(np.sum(dV[liquid] * u_of(X[liquid], Y[liquid], du))),
+                float(np.sum(dV[liquid])), float(np.sum(dV[inside])))
+
+    du = 50.0
+    before, after = side(1e-9, 0.0), side(-1e-9, du)
+    assert before["_cells"]["found"][k] and not after["_cells"]["found"][k]
+    c = contact.closures(before, after, sigma, grid)
+    lk = c["C_P_split"]["largest_crossed"]
+    assert c["C_P_split"]["cells_crossed"] >= 1 and lk["r"] == pytest.approx(rk, abs=1e-15)
+    (Pb, Vb, Vc), (Pa, Va, _) = fine(1e-9, 0.0), fine(-1e-9, du)
+    expected = w[k] / Vc * (Pa - Pb)
+    assert lk["value"] == pytest.approx(expected, rel=2e-3)
+    planar = shapely.difference(cell, rect(rk, 0.0, 1.0, 10.0)).area / cell.area
+    assert lk["fraction"][0] == pytest.approx(Vb / Vc, rel=5e-3)  # the lattice's own error
+    assert abs(lk["fraction"][0] - planar) > 0.05  # the area fraction would miscount it
+
+
+def _two_crossed(after_P=(0.0, 0.0)):
+    """Box cells of two crossed cells (in the liquid before, in the gas after) for
+    ``momentum_change``, the second side's liquid momenta ``after_P``."""
+    grid = {"dV": np.ones(2), "phi": np.ones(2), "r": np.array([1.0, 2.0]),
+            "zz": np.zeros(2), "rho": np.ones(2)}
+
+    def cells(found, P):
+        return {"found": np.asarray(found), "uz": np.where(found, 1.0, 0.0),
+                "near": np.arange(2), "V_cell": np.ones(2), "V_liquid": np.full(2, 0.5),
+                "P_liquid": np.asarray(P, dtype=float), "read_liquid": np.ones(2, bool)}
+    return grid, cells([True, True], [0.5, 0.5]), cells([False, False], after_P)
+
+
+def test_a_crossed_midpoint_whose_velocity_is_not_finite_fails_the_momentum_balance():
+    """A crossed cell whose midpoint enters the liquid with a velocity that is not finite, its
+    liquid part's moments finite (the review of batch A, F4): the reading never replaces a change
+    that is not finite; C_P fails."""
+    grid, b, a = _two_crossed()
+    a = dict(a, found=np.array([True, False]), uz=np.array([math.nan, 0.0]))  # gas -> liquid
+    b = dict(b, found=np.array([False, True]), uz=np.array([0.0, 1.0]))
+    sigma = SimpleNamespace(sigma_V=1e-6, sigma_Pz=1e-5)
+    before = dict(budget(p=1.0), _cells=b)
+    after = dict(budget(p=math.nan), _cells=a)  # the midpoint rule's sum holds the NaN
+    split = contact.momentum_change(grid, before, after)
+    assert math.isnan(split["change"])
+    c = contact.closures(before, after, sigma, grid)
+    assert c["hard"] == ["C_P"] and math.isnan(c["values"]["C_P"])
+    # a finite midpoint rule's change but a NaN sample in the liquid: the reading fails too
+    after_f = dict(budget(p=1.0), _cells=a)
+    assert contact.closures(before, after_f, sigma, grid)["hard"] == ["C_P"]
+
+
+def test_opposite_infinite_crossed_cells_fail_the_momentum_balance():
+    grid, b, a = _two_crossed((math.inf, -math.inf))
+    sigma = SimpleNamespace(sigma_V=1e-6, sigma_Pz=1e-5)
+    before = dict(budget(), _cells=b)
+    after = dict(budget(), _cells=a)
+    split = contact.momentum_change(grid, before, after)
+    assert math.isnan(split["change"]) and math.isnan(split["crossed"])
+    c = contact.closures(before, after, sigma, grid)
+    assert c["hard"] == ["C_P"] and math.isnan(c["values"]["C_P"])
+
+
+@pytest.mark.parametrize("miss", [None, "volume", "momentum", "base", "nonfinite",
+                                  "nan-midpoint"])
 @pytest.mark.parametrize("fresh", [False, True])
 def test_refinement_is_accepted_only_with_closed_balances_and_an_unchanged_base(tmp_path, monkeypatch, miss, fresh):
     from faraday_singularity import driver as dv
@@ -309,11 +511,21 @@ def test_refinement_is_accepted_only_with_closed_balances_and_an_unchanged_base(
     from faraday_singularity.mesh import Focus
 
     before, after = budget(), budget()
+    grid = {}
     if miss == "volume": after["poly"]["V_liquid"] += 1
     if miss == "momentum": after["box"]["Pz"] += 1
+    if miss == "nonfinite":  # opposite infinities in two crossed cells: C_P fails, rolled back
+        grid, b, a = _two_crossed((math.inf, -math.inf))
+        before, after = dict(before, _cells=b), dict(after, _cells=a)
+    if miss == "nan-midpoint":  # a crossed midpoint entering the liquid at NaN: rolled back
+        grid, b, a = _two_crossed()
+        a = dict(a, found=np.array([True, False]), uz=np.array([math.nan, 0.0]))
+        b = dict(b, found=np.array([False, True]), uz=np.array([0.0, 1.0]))
+        before, after = dict(before, _cells=b), dict(after, _cells=a)
+        after["box"]["Pz"] = math.nan
     samples = iter([before, after])
     monkeypatch.setattr(contact, "sample", lambda *a: next(samples))
-    monkeypatch.setattr(surgery, "site_grid", lambda *a: {})
+    monkeypatch.setattr(surgery, "site_grid", lambda *a: grid)
     monkeypatch.setattr(dv, "base_guard_checked", lambda *a: {
         "ok": miss != "base", "checked": False, "change": {"r_j": float("nan")}})
     focus = Focus(size=.01, radius=.1, grading=.3)

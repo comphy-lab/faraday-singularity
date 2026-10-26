@@ -1882,11 +1882,18 @@ class CollapseDriver:
     def _lip_cover(self, previous: dict, regions: dict) -> dict:
         """``jetcore.far_kink_regions``' regions (``regions``) with the disc of each refinement that
         held the ring's lip before the reading (``previous``, :meth:`_holds_lip`) kept about the
-        lip: a region the guard's elements recentred on themselves (four of their chords wide,
-        which can leave the lip outside it) is widened about its new centre to hold the ball about
-        the lip that the held disc held (its radius the held disc's clearance about the lip's
-        section, at least the lip's thickness), its target kept; a region released, gone, or still
-        holding that ball is as the reading made it. The entries widened are copies."""
+        lip: a region the reading left as it was (its entry unchanged: no element of the guard
+        renewed it, even at its own centre) follows the lip, recentred on its section
+        (its radius and target as they were), so that the lip, which moves out along the plug at
+        the sheet's speed, does not leave its refinement for a rebuild to coarsen it (r1s4, fix15
+        leg 1 at bf80e74: the lip, 4.3e-6 thick, 3.0 elements across at step 8201, left the region
+        its seventh refine had set at step 8163 and met the rebuild of step 8208 with 8.8e-6
+        elements, half an element across); a region the guard's elements recentred on themselves
+        (four of their chords wide, which can leave the lip outside it) is widened about its new
+        centre to hold the ball about the lip that the held disc held (its radius the held disc's
+        clearance about the lip's section, at least the lip's thickness), its target kept; a
+        region released, gone, or still holding that ball is as the reading made it. The entries
+        moved or widened are copies."""
         lip = self._lip_read()
         if lip is None:
             return regions
@@ -1894,6 +1901,9 @@ class CollapseDriver:
         for key, g in previous.items():
             new = out.get(key)
             if new is None or new.get("released") or not self._holds_lip(g, lip):
+                continue
+            if new == g:  # the reading left it as it was (no element renewed it): it follows the lip
+                out[key] = dict(new, r=lip[0], z=lip[1])
                 continue
             clearance = max(float(g["radius"]) - math.hypot(lip[0] - float(g["r"]),
                                                             lip[1] - float(g["z"])), lip[2])
@@ -4377,15 +4387,20 @@ class CollapseDriver:
         ``refine_ratio`` times the run's ``h_floor`` (the guard's own floor), in the ring stage
         before the ring's removal with jetcore's recentred far kinks (:meth:`_refined_chain`).
         A liquid kink of the ring also qualifies, through :meth:`_ring_liquid_reading`, with
-        hard zero-removal balances around its rebuild (:meth:`_ring_liquid_refine`)."""
-        stop = self._ring_sheet_reading(self._ring_liquid_reading(self._ring_jacobian_reading(stop)))
+        hard zero-removal balances around its rebuild (:meth:`_ring_liquid_refine`), and so does a
+        closing fold of the ring's gas across a kink whose elements lie above the floor's
+        (:meth:`_ring_kink_reading`, trigger ``fold-kink``; r2, fix16 leg 1 at bf80e74, step 12662:
+        the pair 6093/6096 three nodes apart, 1.21e-6 per element against ``refine_ratio
+        h_floor`` = 1.17e-6), refined to the floor with the same audit, so that the fill at the
+        floor (:meth:`_floor_fill_request`) meets the kink there if it stays."""
+        stop = self._ring_reading(stop)
         if stop is None or stop.get("reason") != "interface-unresolved":
             return False
         if stop.get("chain") != "ring":
             return False
         trigger = stop.get("trigger")
         if trigger not in ("edge-turn", "edge-midside", "curved-jacobian", "liquid-kink",
-                           "sheet-contact"):
+                           "sheet-contact", "fold-kink"):
             return False
         if stop.get("chain") != self._refined_chain():
             return False
@@ -4394,6 +4409,15 @@ class CollapseDriver:
             return False
         L = float(stop.get("L", math.nan))
         return math.isfinite(L) and L > self.s.refine_ratio * self._h_floor()
+
+    def _ring_reading(self, stop: dict | None) -> dict | None:
+        """The stop as the ring refine reads it: a rebuilt mesh's curved element on the ring
+        (:meth:`_ring_jacobian_reading`), a gas kink of the ring as the guard's reading at the
+        element between its pair (:meth:`_ring_kink_reading`), a liquid kink
+        (:meth:`_ring_liquid_reading`) and a lip to resolve (:meth:`_ring_sheet_reading`); any
+        other stop as it is."""
+        return self._ring_sheet_reading(self._ring_liquid_reading(
+            self._ring_kink_reading(self._ring_jacobian_reading(stop))))
 
     def _ring_liquid_reading(self, stop: dict | None) -> dict | None:
         """A liquid kink of the ring asks for refinement, never for a fill or film rupture."""
@@ -4741,9 +4765,8 @@ class CollapseDriver:
         tries = 0
         while tries < RING_REFINE_TRIES and self._ring_refine_due(stop):
             tries += 1
-            reading = self._ring_sheet_reading(
-                self._ring_liquid_reading(self._ring_jacobian_reading(stop)))
-            if reading.get("liquid_contact") is not None:
+            reading = self._ring_reading(stop)
+            if reading.get("liquid_contact") is not None or reading.get("trigger") == "fold-kink":
                 m, stop = self._ring_liquid_refine(m, reading, tries)
             else:
                 m, stop = self._ring_refine_once(m, reading, tries)
@@ -4759,7 +4782,7 @@ class CollapseDriver:
         (:meth:`_ring_sheet_reading`) and ruptured once it thins at ``h_s``
         (:meth:`_meet_sheet_rupture`).
         """
-        from .ringcontact import closures, sample
+        from .ringcontact import closures, plain_sample, sample
         from .surgery import site_grid
 
         ring = self.events.ring
@@ -4773,11 +4796,12 @@ class CollapseDriver:
         old_gate = getattr(self, "_gate_stop", None)
         after, stop = self._ring_refine_once(m, reading, attempt)
         sampled = sample(self.pb, grid, self.reconnect.reservoir_depth)
-        checks = closures(before, sampled, ring)
+        checks = closures(before, sampled, ring, grid)
         base = base_guard_checked(m, after)
         if not base["ok"]:
             checks["hard"].append("C_base")
-        rec = {"reading": reading, "attempt": attempt, "before": before, "after": sampled,
+        rec = {"reading": reading, "attempt": attempt, "before": plain_sample(before),
+               "after": plain_sample(sampled),
                "closures": checks, "base": base, "step": st.step, **self._taus(self._t())}
         path = self.outdir / "events" / f"ring_contact_{st.step:08d}_{self.pb.remesh_count}_{attempt}.json"
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -116,11 +116,13 @@ def axis_fold(P, end: str) -> dict | None:
 def polygon_quadrature_points(polygon) -> tuple[np.ndarray, np.ndarray, int]:
     """The points ``X`` (``(m, 2)``) and volume weights ``dV`` (``2 pi r`` times the area weight)
     of the seven-point, degree-five triangle rule on the constrained Delaunay triangles of
-    ``polygon``, and the triangles' count: positive weights whose points follow the polygon at any
-    scale (:func:`sliver_quadrature`; ``sheetsurgery.rim_quadrature``)."""
+    ``polygon`` (the points of a ring, or a shapely polygonal geometry, holes and parts included),
+    and the triangles' count: positive weights whose points follow the polygon at any scale
+    (:func:`sliver_quadrature`; ``sheetsurgery.rim_quadrature``; ``ringcontact.cell_readings``)."""
     import shapely
 
-    triangles = shapely.constrained_delaunay_triangles(shapely.Polygon(polygon)).geoms
+    geom = polygon if isinstance(polygon, shapely.Geometry) else shapely.Polygon(polygon)
+    triangles = shapely.constrained_delaunay_triangles(geom).geoms
     bary = [(1 / 3, 1 / 3, 1 / 3)]
     weights = [0.225]
     for a, b, w in ((0.059715871789770, 0.470142064105115, 0.132394152788506),
