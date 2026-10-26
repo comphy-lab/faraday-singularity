@@ -825,7 +825,8 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
        sheet is a ``sheet-contact`` also where its faces lie within ``refine_limit`` (the driver
        resolves it, ``driver.SHEET_REFINE_ELEMENTS`` element lengths, while it can refine) and
        where it is thinning at ``h_s`` or below (the driver ruptures it), with ``sheet_rupture``
-       (``h_s``, ``due``, the thinning reading) in the request."""
+       (``h_s``, ``due``, the thinning reading) in the request; the ring's liquid fold is read up
+       to ``sheet.h_s`` also beyond the fold limit, as a sheet alone."""
     from shapely.geometry import LineString
 
     from .events import (GROOVE_HANDLER, SHEET_CONTACT, _neck_fields, _pinch_field, _request,
@@ -949,11 +950,20 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
             return _request("liquid-neck", "L-unhandled", detected_by="secondary-pinch", **found)
     closing = {}
 
+    # the driver's reading of the ring's lip (sheet) reads a liquid fold of the ring up to its
+    # rupture thickness h_s even where that lies beyond the fold limit, so that h_s, not the limit,
+    # sets which lip is ruptured; such a fold is read as a sheet alone (``beyond``)
+    lip_reach = float(getattr(sheet, "h_s", math.nan)) if sheet is not None else math.nan
+
     def offer(name, f, side=None, h_fine=math.nan):
         fold_limit = max(stop_abs, fold_stop_elements * f.h_elem)
-        if math.isfinite(f.gap) and f.gap < fold_limit:
+        if not math.isfinite(f.gap):
+            return
+        beyond = (f.gap >= fold_limit and name == "ring" and side == "liquid"
+                  and f.gap <= lip_reach)
+        if f.gap < fold_limit or beyond:
             closing.setdefault((name, tuple(f.pair)), (f.gap / fold_limit, name, f, fold_limit,
-                                                       side, h_fine))
+                                                       side, h_fine, beyond))
 
     # with groove.sheets log the fold of the open chain and of the ring on each side apart
     # (groove.side_folds), so that a sheet of liquid hides no groove of gas
@@ -981,7 +991,7 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
                                         stop_elements=fold_stop_elements,
                                         search_factor=fold_search))
     landing, kinks, grooves = [], [], []
-    for score, name, f, fold_limit, side, h_fine in closing.values():
+    for score, name, f, fold_limit, side, h_fine, beyond in closing.values():
         rec = {"chain": name, "contact": fold_contact(f.arc, f.h_elem), "fold_gap": f.gap,
                "fold_r": f.r, "fold_z": f.z, "fold_arc": f.arc, "fold_h_elem": f.h_elem,
                "fold_limit": fold_limit, "fold_pair": list(f.pair),
@@ -998,7 +1008,7 @@ def ring_stage_events(chains, loops, cut, settings, h_min: float, events, ring: 
                            apex_r=jet.get("r", math.nan), apex_z=jet.get("z", math.nan),
                            R_apex=jet.get("R_apex", math.nan),
                            groove_angle=jet.get("groove_angle", math.nan))
-        if rec["contact"] == "kink":
+        if rec["contact"] == "kink" and not beyond:
             reason = "self-contact-approach" if jet is None else "annular-contact-approach"
             kinks.append((score, {"reason": reason, "trigger": "fold-gap", **rec}))
             continue
