@@ -83,7 +83,9 @@ def test_the_key_is_left_out_of_the_block_and_its_hash_where_it_is_null():
     assert fine.changed_keys(plain.to_dict()) == [KEY]
     assert plain.changed_keys(fine.to_dict()) == [KEY]
     assert plain.changed_keys(plain.to_dict()) == []
-    assert ev.EventSettings.LATE_KEYS == {"jetcore": ("core_elements_per_scale",)}
+    # the ring line's lip key (phase1f-ring-sheet) is the part's other late key
+    assert ev.EventSettings.LATE_KEYS == {"jetcore": ("core_elements_per_scale",
+                                                      "sheet_rupture_floors")}
     # without jetcore the part is left out whole, as before
     assert "jetcore" not in ev.EventSettings.from_dict(LIQUID).to_dict()
 

@@ -115,7 +115,12 @@ GROOVE_CLASSES = ("A-groove", "RF")
 GROOVE_HANDLER = "groove-fill"
 # the kinds of the events a run makes, by class: the keys of a class are fixed after its first event
 EVENT_CLASSES = {"liquid": ("liquid-neck", "a-head", "far-head"), "gap": ("groove-fill",),
-                 "ring": ("piercing", "ring-collapse")}
+                 "ring": ("piercing", "ring-collapse", "sheet-rupture")}
+# the rupture of a thinning liquid lip of the ring (sheetsurgery.sheet_rupture): its kind, class and
+# handler, and the stop of a rupture refused
+SHEET_RUPTURE = "sheet-rupture"
+SHEET_RUPTURE_CLASS = "RS"
+SHEET_RUPTURE_REFUSED = "sheet-rupture-refused"
 # a dump of the state before an event, from which a restart may change the keys of its class
 PRECUT_EVENT = "precut-event"
 # the keys of the block that size the mesh after the cut: a restart that changes one of them does
@@ -449,6 +454,11 @@ class JetCoreSettings:
       element per scale of the guard's own rule; the core is still stepped at
       ``reconnect.courant``. Written into the block only where it is set (:meth:`EventSettings.
       to_dict`, ``LATE_KEYS``).
+    * ``sheet_rupture_floors``: the thickness ``h_s`` at which a thinning liquid lip of the ring is
+      ruptured, in floors of the run (``h_s = sheet_rupture_floors h_floor``; null: 2), the lip
+      resolved by ``driver.SHEET_ELEMENTS`` elements across its thickness down to ``h_floor`` until
+      then (``driver.CollapseDriver._meet_sheet_rupture``, ``sheetsurgery.sheet_rupture``); written into
+      the block only where set (:data:`EventSettings.LATE_KEYS`).
 
     A key of :data:`PENDING_KEYS` is refused away from its default until the driver makes it."""
     enabled: bool = False
@@ -467,10 +477,15 @@ class JetCoreSettings:
     box_gate: bool = False
     box_gate_sigmas: float = 5.0
     core_elements_per_scale: float | None = None
+    sheet_rupture_floors: float | None = None
 
     def __post_init__(self):
         for name in ("enabled", "ring_kink_floor", "box_gate"):
             _flag("jetcore", name, getattr(self, name))
+        if self.sheet_rupture_floors is not None and not (
+                _number(self.sheet_rupture_floors) and self.sheet_rupture_floors >= 1.0):
+            raise ValueError(f"collapse.{EVENTS_BLOCK}.jetcore.sheet_rupture_floors must be at "
+                             "least one floor, or null")
         for name in ("core_radius", "wall_radius", "box_gate_sigmas"):
             _positive("jetcore", name, getattr(self, name))
         for name in ("far_courant", "far_floor", "prep_gap", "profile_dt",
@@ -692,7 +707,7 @@ class EventSettings:
     # keys added to a part after blocks with the part were recorded (runs, dumps, the hashes of
     # their legs): written only where they differ from their defaults, so that those blocks and
     # their hashes are unchanged, and a record without them reads as their defaults (_completed)
-    LATE_KEYS = {"jetcore": ("core_elements_per_scale",)}
+    LATE_KEYS = {"jetcore": ("core_elements_per_scale", "sheet_rupture_floors")}
     KEYS = ("max_events", "cascade_min_interval", "cascade_ratio", "cascade_count")  # of the leg
 
     def __post_init__(self):
@@ -1092,7 +1107,7 @@ RING_CUT_REFUSED = "ring-cut-refused"
 RING_REMOVAL_REFUSED = "ring-removal-refused"
 GROOVE_FILL_REFUSED = "groove-fill-refused"
 EVENT_STOPS = (EVENT_UNHANDLED, EVENT_CASCADE, EVENT_LIMIT, LIQUID_CUT_REFUSED, EVENT_UNCLOSED,
-               RING_CUT_REFUSED, RING_REMOVAL_REFUSED, GROOVE_FILL_REFUSED)
+               RING_CUT_REFUSED, RING_REMOVAL_REFUSED, GROOVE_FILL_REFUSED, SHEET_RUPTURE_REFUSED)
 # the outcome in the record of an event the run stops on before any handler is made for it
 # (events/event_<k>.json, written by the driver); a cut refused or unclosed writes its own record
 STOP_OUTCOMES = {EVENT_UNHANDLED: "unhandled", EVENT_CASCADE: "cascade", EVENT_LIMIT: "max-events"}

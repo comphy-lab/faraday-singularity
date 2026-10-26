@@ -550,6 +550,34 @@ add a second top-level `cases/` tree.
   against 775df94 are in `test_ring_contact.py`, `test_ring_contact_fem.py` and
   `test_ring_contact_identity.py`. These routes preserve one simple ring; none ruptures a
   liquid film or changes the ring-removal threshold.
+- The ring's thinning liquid lip (decision 22; `sheetsurgery.py`; recentred far kinks, the groove
+  fill with `groove.sheets` `log`, the ring's calibrated noise floors, `CollapseDriver._sheet_handled`):
+  the ring stage's stops read the ring's liquid fold through the driver's callback
+  (`ring.ring_stage_events`' `sheet`, `CollapseDriver._sheet_context`), which keeps the lip's thickness
+  history (`lip_samples` in the dumps; once per time, restarting at a jump of `driver.LIP_JUMP`
+  thicknesses) and keeps the refined far kink that holds the lip alive while it lasts. A lip with
+  fewer than `driver.SHEET_REFINE_ELEMENTS` elements across it, above the refine's floor, is a
+  `sheet-contact` not due: it is refined to `max(h_floor, gap/driver.SHEET_ELEMENTS)` by the liquid
+  kink's route with its hard zero-removal budgets (`CollapseDriver._ring_sheet_reading`, trigger
+  `sheet-contact`, `_ring_liquid_refine`). A lip thinning (`sheetsurgery.lip_thinning`: a falling
+  least-squares slope over at least `LIP_MIN_SAMPLES` of its last `LIP_SAMPLES`, the last below the
+  first) at `h_s = jetcore.sheet_rupture_floors h_floor` (null: `driver.SHEET_RUPTURE_FLOORS`, 2; a
+  key of the leg written into the block and its hash only where set, `EventSettings.LATE_KEYS`) or
+  below is a `sheet-contact` due, met by the rupture (`CollapseDriver._meet_sheet_rupture`,
+  `sheetsurgery.sheet_rupture`): the rim beyond the thinnest section removed and the remaining lip
+  closed by a half circle of the section's diameter (`sheet_rupture_geometry`: the new loop simple
+  and counter-clockwise, the removed region liquid, clear of the open chain by `OPEN_CLEARANCE`
+  sections, at most `MAX_REMOVED_V_B V_b`), the ring stage's own rebuild with the projection
+  transfer and the cap's region, the transfer checked (unlocated interface nodes only on the cap,
+  none of the bulk or the axis), the projection, and the closures S1-S6 (`_ring_closures`, prefix
+  `S`, the removal a negative fill: S1 the volume the disc loses against the rim's, S2 the momentum
+  the transfer removes against the rim's, S3 and `S3_box` hard; S4-S6 flags) and `S_base`; event
+  `sheet-rupture` (class `RS`, `EVENT_CLASSES["ring"]`), its record with the removed V, Pz, KE, the
+  rim's centroid and the lip's history, a row of `events.txt` (`S` closures), `budget.txt` net of it
+  (`filled` the negative removal); a refusal is the resumable stop `sheet-rupture-refused`, missed
+  hard budgets `event-unclosed`. A lip at the floor thinner than one element and not thinning stays
+  the `sheet-contact` stop. `test_sheet_rupture.py`; runs that meet no lip are dd01824's
+  (`test_sheet_identity.py`).
 - The events block's `jetcore` part (`events.JetCoreSettings`, `jetcore.py`; off by default, written
   into the block and its hash only where it differs from its defaults, every key a key of the leg,
   its sizing keys among `events.SIZING_KEYS`) resolves the upward jet as before and treats the rest

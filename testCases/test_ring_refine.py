@@ -79,6 +79,7 @@ def _due_driver(*, ring=True, removed=False, jet="recentre", h_floor=H_FLOOR):
         _h_floor=lambda: h_floor, _post_cut_state=lambda: {"edges": {}})
     fake._ring_jacobian_reading = lambda st: CollapseDriver._ring_jacobian_reading(fake, st)
     fake._ring_liquid_reading = lambda st: CollapseDriver._ring_liquid_reading(fake, st)
+    fake._ring_sheet_reading = lambda st: CollapseDriver._ring_sheet_reading(fake, st)
     fake._refined_chain = lambda: CollapseDriver._refined_chain(fake)
     return fake
 
