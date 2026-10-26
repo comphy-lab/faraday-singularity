@@ -59,6 +59,7 @@ class NetProblem(CutProblem):
     def _restore_state(self, snap):
         self.restored.append(snap)
         self.t = snap["t"]
+        self.remesh_count += 1  # pyoomph load_state calls actions_after_remeshing
 
     def invalidate_cached_mesh_data(self):
         pass
@@ -78,6 +79,9 @@ def test_a_failed_step_after_a_cut_is_a_resumable_stop_on_the_state_it_started_f
     recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
     pb = NetProblem(fail_at=2)
     drv = _cut_driver(tmp_path, pb, recon, max_steps=5)
+    from faraday_singularity.events import EventSettings
+    drv.events = EventSettings()
+    drv._remesh_checks = lambda m: (m, None)  # keep the accepted mesh stepped-on
     out = drv.run(1e-9)
     drv.close()
     stop = out["stop"]
@@ -87,7 +91,8 @@ def test_a_failed_step_after_a_cut_is_a_resumable_stop_on_the_state_it_started_f
     assert pb.t == t_start and stop["dt_attempted"] > 0.0 and stop["net_rebuilds"] == 0
     end = Path(stop["end_state"])
     assert end.is_file() and end.name == "state_00000001.dump"
-    assert json.loads(end.with_suffix(".json").read_text())["time"] == t_start
+    meta = json.loads(end.with_suffix(".json").read_text())
+    assert meta["time"] == t_start and meta["mesh_fresh"] is False
     failed = [e for e in _events(tmp_path) if e["event"] == "step-failed"]
     assert len(failed) == 1 and failed[0]["dt_attempted"] == stop["dt_attempted"]
     assert any(p.name.startswith("profile_000001_lastgood") for p in (tmp_path / "profiles").iterdir())
@@ -166,3 +171,152 @@ def test_a_failed_step_in_the_ring_stage_is_retried_once_after_a_refine_of_the_s
     assert CollapseDriver._failed_step_retry(fake(chain=None), {"m": 0}, {}) is None
     flat = np.array([10.0, 20.0, 120.0, 25.0])
     assert CollapseDriver._failed_step_retry(fake(turns=flat), {"m": 0}, {}) is None
+
+
+@pytest.mark.parametrize("outcome", ["none", "base", "error", "success"])
+def test_the_run_loop_keeps_the_retry_stop_and_rolls_back_a_failed_retry(tmp_path, outcome):
+    from faraday_singularity.reconnect import ReconnectSettings
+    pb = NetProblem(fail_at=2)
+    drv = _cut_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-3), max_steps=3)
+    from faraday_singularity.events import EventSettings
+    drv.events = EventSettings()
+    drv._remesh_checks = lambda m: (m, None)  # keep the accepted mesh stepped-on
+    calls = []
+    def retry(m, stop):
+        calls.append(pb.t)
+        if outcome == "none":
+            return None
+        if outcome == "base":
+            return m, {"reason": "interface-unresolved", "trigger": "ring-refine-base"}
+        if outcome == "error":
+            pb.t += 0.1  # a failed rebuild must not leak this rejected state
+            raise RuntimeError("retry rebuild failed")
+        pb.fail_at = None
+        return m, None
+    drv._failed_step_retry = retry
+    result = drv.run(1e-9)
+    drv.close()
+    assert len(calls) == 1
+    stop = result["stop"]
+    if outcome == "base":
+        assert stop["trigger"] == "ring-refine-base" and pb.calls == 2
+    elif outcome == "success":
+        assert stop["reason"] == "max-steps" and result["steps"] == 3
+    else:
+        assert stop["reason"] == "step-failed" and result["steps"] == 1
+        if outcome == "error":
+            assert "retry rebuild failed" in stop["retry_error"] and len(pb.restored) == 2
+            assert pb.t == calls[0]
+    meta = json.loads(Path(stop["end_state"]).with_suffix(".json").read_text())
+    assert meta["mesh_fresh"] is False
+    if outcome == "base":
+        assert stop["failed_step"]["error"] == "RuntimeError: OomphException"
+
+
+def test_the_retry_does_not_refine_a_ring_element_beyond_the_turn_cap():
+    from types import SimpleNamespace
+    from faraday_singularity.driver import CollapseDriver, RING_REFINE_TURN_MAX
+    f = SimpleNamespace(state=SimpleNamespace(step=1),
+        reconnect=SimpleNamespace(edge_turn_refine=30), s=SimpleNamespace(refine_ratio=1.5),
+        _h_floor=lambda: 1e-6, _refined_chain=lambda: "ring",
+        _post_cut_state=lambda: {"edges": {"ring": {"edges": {
+            "turn": np.array([RING_REFINE_TURN_MAX + 1]), "L": np.array([1e-5])}}}})
+    assert CollapseDriver._failed_step_retry(f, {}, {}) is None
+
+
+def test_a_loop_with_a_repeated_interior_node_is_refused():
+    L = _graded_loop()
+    L = np.insert(L, 5, L[5], axis=0)
+    with pytest.raises(RuntimeError, match="zero-length"):
+        ring.validate_loop_order(L)
+
+
+
+@pytest.mark.parametrize("kind", ["guard", "event"])
+def test_a_retry_reenters_the_loop_handlers_for_a_guard_or_event(tmp_path, kind):
+    from faraday_singularity.reconnect import ReconnectSettings
+    from faraday_singularity.events import EventSettings, EVENT_REQUEST
+    pb = NetProblem(fail_at=2)
+    drv = _cut_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-3), max_steps=3)
+    drv.events = EventSettings()
+    drv._remesh_checks = lambda m: (m, None)
+    handled = []
+    original_stop = drv._stop
+    request = ({"reason": "interface-unresolved", "trigger": "edge-turn", "chain": "ring"}
+               if kind == "guard" else {"reason": EVENT_REQUEST, "kind": "ring-fold"})
+    def retry(m, stop):
+        drv._stop = lambda m: request
+        return m, request
+    def handle(m, stop):
+        handled.append(stop)
+        drv._stop = original_stop
+        pb.fail_at = None
+        return m, None
+    drv._failed_step_retry = retry
+    drv._ring_refine_due = lambda stop: kind == "guard" and stop is request
+    drv._ring_refine = handle
+    drv._meet_event = handle
+    result = drv.run(1e-9)
+    drv.close()
+    assert handled == [request]
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 3
+
+
+def test_a_retry_rebuild_failure_restores_its_focus_and_refinement_bookkeeping(tmp_path):
+    import copy
+    from faraday_singularity.events import EventSettings
+    from faraday_singularity.mesh import Focus, FocusRegion
+    from faraday_singularity.reconnect import ReconnectSettings
+    pb = NetProblem(fail_at=2)
+    focus = Focus(size=1e-4, radius=0.1, grading=0.3, regions=(
+        FocusRegion("original", size=1e-4, r=0.0, z=4.6, radius=0.1),))
+    pb.template.focus = focus
+    drv = _cut_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-3), max_steps=3)
+    drv.events = EventSettings()
+    drv._remesh_checks = lambda m: (m, None)
+    expected = {}
+    def fail_rebuild(*args, **kwargs):
+        assert pb.template.focus != expected["focus"]
+        assert drv.state.far_yields > expected["far_yields"]
+        raise RuntimeError("synthetic gmsh failure")
+    pb.force_remesh = fail_rebuild
+    drv._refined_chain = lambda: "ring"
+    def retry(m, stop):
+        expected.update(kinks=copy.deepcopy(drv.state.kinks), far_yields=drv.state.far_yields,
+                        last_remesh_step=drv.state.last_remesh_step, focus=pb.template.focus)
+        return drv._ring_refine_once(m, {"reason": "interface-unresolved", "trigger": "edge-turn",
+            "chain": "ring", "index": 3, "turn": 85, "L": 1e-5, "r": 1e-4, "z": 4.6}, 1)
+    drv._failed_step_retry = retry
+    result = drv.run(1e-9)
+    drv.close()
+    assert "synthetic gmsh failure" in result["stop"]["retry_error"]
+    assert drv.state.kinks == expected["kinks"]
+    assert drv.state.far_yields == expected["far_yields"]
+    assert drv.state.last_remesh_step == expected["last_remesh_step"]
+    assert pb.active_mesh_template().focus == expected["focus"]
+    meta = json.loads(Path(result["stop"]["end_state"]).with_suffix(".json").read_text())
+    assert meta["focus"] == expected["focus"].to_dict()
+    assert meta["kinks"] == expected["kinks"]
+    assert meta.get("far_yields", 0) == expected["far_yields"]
+
+
+@pytest.mark.parametrize("end", ["end-time", "dt-floor"])
+def test_a_successful_retry_reports_the_actual_endpoint(tmp_path, end):
+    from faraday_singularity.reconnect import ReconnectSettings
+    pb = NetProblem(fail_at=2)
+    drv = _cut_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-3),
+                      max_steps=100, t_end=1e-5)
+    drv._remesh_checks = lambda m: (m, None)
+    def retry(m, stop):
+        pb.fail_at = None
+        if end == "dt-floor":
+            drv._dt_min = lambda: math.inf
+        return m, None
+    drv._failed_step_retry = retry
+    result = drv.run(1e-9)
+    drv.close()
+    assert result["stop"]["reason"] == end
+    if end == "end-time":
+        assert pb.t == drv.s.t_end
+    else:
+        assert result["stop"]["failed_step"]["error"] == "RuntimeError: OomphException"

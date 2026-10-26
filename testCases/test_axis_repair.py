@@ -105,6 +105,7 @@ class Pb:
     def __init__(self, P):
         self.P = P
         self.snapshots, self.restored = [], []
+        self.remesh_count = 0
 
     def interface_segments(self):
         return _segs(self.P)
@@ -115,6 +116,7 @@ class Pb:
 
     def _restore_state(self, s):
         self.restored.append(s)
+        self.remesh_count += 1
 
     def invalidate_cached_mesh_data(self):
         pass
@@ -127,7 +129,7 @@ def _fake(tmp_path, P, *, jet="recentre", ring=None, step=7338):
         pb=Pb(P), events=events, reconnect=SimpleNamespace(delta=DELTA), outdir=tmp_path,
         state=SimpleNamespace(step=step, last_remesh_step=None),
         _jetcore=lambda: (SimpleNamespace(far_kinks=jet) if jet is not None else None),
-        _ring=lambda: ring, _t=lambda: 10.9547, _taus=lambda t: {"tau": 7.6e-7, "tau_p": 6.2e-7},
+        _fresh_mesh=lambda: False, _ring=lambda: ring, _t=lambda: 10.9547, _taus=lambda t: {"tau": 7.6e-7, "tau_p": 6.2e-7},
         measure=lambda: {"m": "after"}, _keep_landings=lambda m: None, _snapshot=lambda m, r: None,
         _stop=lambda m: None, _post_cut_cache=None, _axis_repairs=[], logged=[])
     fake._event = lambda name, m, **kw: fake.logged.append((name, kw))
@@ -232,7 +234,8 @@ def test_a_curved_element_beside_the_bubbles_tip_is_put_straight_and_nothing_els
         pb.curved_jacobian_bound = lambda limit: {"min": after}
         f = SimpleNamespace(pb=pb, reconnect=SimpleNamespace(delta=DELTA, jacobian_min=0.2),
                             state=SimpleNamespace(step=7339), _tip_straightens=[], logged=[],
-                            _post_cut_cache="x", _ring=lambda: ring, _t=lambda: 10.95,
+                            _post_cut_cache="x", _fresh_mesh=lambda: False,
+                            _ring=lambda: ring, _t=lambda: 10.95,
                             _jetcore=lambda: (SimpleNamespace(far_kinks=jet) if jet else None))
         f._event = lambda name, m, **kw: f.logged.append((name, kw))
         return f, calls
@@ -252,9 +255,67 @@ def test_a_curved_element_beside_the_bubbles_tip_is_put_straight_and_nothing_els
     f, calls = fake(after=0.1)
     out = CollapseDriver._tip_straighten(f, dict(bad))
     assert out["tip_straighten"]["jacobian_bound_after"] == 0.1 and not f.logged
+    assert out["tip_straighten"]["rolled_back"] and f.pb.restored == ["snap"]
+    assert f._stepped_rc == f.pb.remesh_count
     # near the open chain, in the ring stage, without the recentred kinks, off the surface: as it is
     for kw, stop in (({}, dict(bad, r=5e-4, z=4.7)), ({"ring": {"removed": None}}, dict(bad)),
                      ({"jet": "grow"}, dict(bad)), ({"jet": None}, dict(bad)),
                      ({}, dict(bad, on_interface=False))):
         f, calls = fake(**kw)
         assert CollapseDriver._tip_straighten(f, stop) == stop and not calls, (kw, stop)
+
+
+    # The bubble may be nearest while the repair radius also reaches the upward chain.
+    f, calls = fake()
+    segments = f.pb.interface_segments()
+    next(c for c in segments if c["open"])["z"][0] = bad["z"]
+    f.pb.interface_segments = lambda: segments
+    assert CollapseDriver._tip_straighten(f, dict(bad)) == bad and not calls
+
+
+def test_the_axis_repair_volume_bound_is_checked_before_a_rebuild(tmp_path, monkeypatch):
+    from faraday_singularity import surgery
+    from faraday_singularity.reconnect import ReconnectSettings
+    P = tip()
+    f = ar.axis_fold(P, "last")
+    f["V_sliver"] = 2 * ar.AXIS_REPAIR_BOUND * DELTA**3
+    pb = Pb(P)
+    pb.get_current_time = lambda **kw: 0.0
+    fake = _fake(tmp_path, P)
+    with pytest.raises(surgery.BudgetUnclosed) as error:
+        ar.axis_repair(pb, fake.events, ReconnectSettings(delta=DELTA), tmp_path,
+                       "bubble", f, velocity=np.zeros((len(P)+1, 2)))
+    assert error.value.record["closures"]["hard"] == ["A_V"]
+    assert pb.remesh_count == 0
+
+def test_a_fold_whose_walk_exhausts_the_search_is_not_repaired():
+    P = tip()
+    P[-18:, 0] = 0.0
+    assert ar.axis_fold(P, "last") is None
+
+
+def test_the_slivers_own_quadrature_resolves_its_volume_at_small_scales(monkeypatch):
+    from faraday_singularity import surgery
+    def constant(pb, r, z, names):
+        return {"velocity_y": np.full(len(r), -7.0)}, np.ones(len(r), dtype=bool)
+    monkeypatch.setattr(surgery, "sample_fields", constant)
+    for scale in (1.0, 1e-3, 1e-6):
+        polygon = np.array([[0, 0], [2, 0], [1, 1], [0, 2]], dtype=float) * scale
+        polygon[:, 1] += 4.67
+        q = ar.sliver_quadrature(None, polygon)
+        assert q["points"] >= 7 and q["found"] == q["points"]
+        assert q["V_quad_over_V_sliver"] == pytest.approx(1.0, rel=1e-9)
+        assert q["Pz"] == pytest.approx(-7 * q["V_sliver"], rel=1e-9)
+
+
+def test_an_over_bound_axis_repair_does_not_snapshot_or_restore_the_driver(tmp_path):
+    P = tip()
+    fake = _fake(tmp_path, P)
+    fold = ar.axis_fold(P, "last")
+    fold["V_sliver"] = 2 * ar.AXIS_REPAIR_BOUND * DELTA**3
+    fake._axis_fold_of = lambda stop: ("last", fold)
+    fake.pb.get_current_time = lambda **kw: 10.9547
+    before = {"m": "input"}
+    after, stop = CollapseDriver._axis_repair(fake, before, _guard(P))
+    assert after is before and stop["reason"] == "axis-repair-unclosed"
+    assert fake.pb.snapshots == [] and fake.pb.restored == [] and fake.pb.remesh_count == 0

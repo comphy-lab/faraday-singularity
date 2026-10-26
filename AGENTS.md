@@ -194,8 +194,13 @@ add a second top-level `cases/` tree.
   (`axisrepair.axis_repair`, `CollapseDriver._axis_repair`; decision 22, the downward jet's tip a
   nuisance): the folded nodes dropped and the axis node put where the surface meets the axis by a
   rebuild from the planned chains, the sliver filled, its volume and momentum hard above
-  `AXIS_REPAIR_BOUND delta^3` (`A_V`, `A_P`), the transfer's closures A1-A6 as a fill's, the
-  upward jet's base checked (`A_base`); event `axis-repair`, record `events/axis_repair_<n>.json`,
+  `AXIS_REPAIR_BOUND delta^3` for volume (`A_V`), and that bound times the folded nodes'
+  largest speed for the sliver's momentum (`A_P`), integrated on its own triangle quadrature;
+  every quadrature point located and its volume within the existing R1 volume tolerance, otherwise
+  a hard `A_P_coverage` miss; the box-grid sample retained for A2; the transfer's closures A1-A6 as a fill's, the
+  upward jet's base checked (`A_base`); the transfer checked as a fill's against the old chains,
+  unlocated nodes only in the sliver and its band, chain names and ends kept, axis spans as planned;
+  event `axis-repair`, record `events/axis_repair_<n>.json`,
   `axis_fold_repairs` in the run's result; a miss or a failed rebuild rolled back to the state
   before it, the resumable stop `axis-repair-unclosed` or `axis-repair-failed`, and a fold again
   at the same end within `AXIS_REPAIR_RECUR_STEPS` steps left the stop it is (`axis_fold_recurs`);
@@ -467,7 +472,8 @@ add a second top-level `cases/` tree.
   `groovesurgery.unweighted_g2`; `test_fill_cutoff.py`, `test_fill_cutoff_identity.py`, runs
   without a fill b46713a's); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
   but `G3_box` beyond its limit only a flag where the cutoff identity G3 holds and resolves it (its
-  larger side at least `MERGE_RESOLVED` 0.5 of `G3_box` and at the momentum floor or above;
+  larger side at least `MERGE_RESOLVED` 0.5 of the unweighted disc momentum change,
+  recorded as `G3_unweighted`, and at the momentum floor or above;
   `groovesurgery.merge_impulse`, `G3_merge` in the closures): the projection of a fill is the
   inelastic impulse of the merge it makes, which moves momentum out of any disc about the site
   physically, so the disc's change against `P_ref = V_fill U` tests no balance
@@ -642,3 +648,10 @@ add a second top-level `cases/` tree.
 - Figures follow the `publication-plots` conventions.
 - README, `docs/` and figure captions are public-candidate: no private paths, hosts or
   provisional findings.
+
+After a failed-step retry, a hard `ring-refine-base` stop ends the run; guard stops and event
+requests return to the loop's handlers. Stops before another accepted step retain `failed_step`
+context. A failed retry rebuild restores its input mesh, focus and refinement bookkeeping and
+records `step-retry-failed` and `retry_error` on the resumable `step-failed` stop. A tip
+straightening whose radius reaches the open chain is refused, and one whose Jacobian bound still
+fails is rolled back.

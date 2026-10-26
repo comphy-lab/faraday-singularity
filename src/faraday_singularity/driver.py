@@ -1428,7 +1428,8 @@ class CollapseDriver:
         folded tip meshed the surface's edge beside the new end, where it bends by 2e-6 within a
         chord of 4.4e-6, with its midside node a quarter of the chord off, the element's bound
         0.054 against 0.2. Otherwise the stop is returned (with ``tip_straighten``, the reading,
-        where it was tried)."""
+        where it was tried). A radius reaching the open chain is refused; a straightening whose
+        Jacobian bound still fails is rolled back at every history level."""
         from .axisrepair import AXIS_REPAIR_BOUND
 
         jet = self._jetcore()
@@ -1449,17 +1450,31 @@ class CollapseDriver:
         if near is None or near[1]:  # nearest the open chain: the upward jet's, not a nuisance
             return stop
         radius = TIP_STRAIGHTEN_REACH * max(near[0], near[2])
+        for chain in self.pb.interface_segments():
+            if not chain["open"]:
+                continue
+            P = np.column_stack([chain["r"], chain["z"]])
+            centres = 0.5 * (P[:-2:2] + P[2::2])
+            if (np.any(np.hypot(P[:, 0] - x[0], P[:, 1] - x[1]) <= radius)
+                    or np.any(np.hypot(centres[:, 0] - x[0], centres[:, 1] - x[1]) <= radius)):
+                return stop
         limit = AXIS_REPAIR_BOUND * self.reconnect.delta ** 3
         read = self.pb.straighten_interface_edges(x[0], x[1], radius, apply=False)
         reading = {"radius": radius, "edges": read["edges"], "dV": read["dV"],
                    "dV_abs": read["dV_abs"], "bound_dV": limit}
         if not read["edges"] or read["dV_abs"] > limit:
             return dict(stop, tip_straighten=reading)
+        snapshot, was_fresh = self.pb._snapshot_state(), self._fresh_mesh()
         self.pb.straighten_interface_edges(x[0], x[1], radius)
         self._post_cut_cache = None
         j = self.pb.curved_jacobian_bound(self.reconnect.jacobian_min)
         reading.update(jacobian_bound_after=j["min"] if j is not None else None)
         if j is not None and j["min"] < self.reconnect.jacobian_min:
+            self.pb._restore_state(snapshot)
+            self._stepped_rc = None if was_fresh else self.pb.remesh_count
+            self.pb.invalidate_cached_mesh_data()
+            self._post_cut_cache = None
+            reading["rolled_back"] = True
             return dict(stop, tip_straighten=reading)
         self._tip_straightens.append({"step": self.state.step, **reading})
         here = {"time": self._t(), "r_j": math.nan, "z_axis": math.nan, "ell": math.nan,
@@ -4019,7 +4034,7 @@ class CollapseDriver:
         for the cap of option B; a fold at the same end within ``AXIS_REPAIR_RECUR_STEPS`` steps of
         the last repair there is not repaired again (the stop as it is, ``axis_fold_recurs``).
         Returns the state the run goes on from and its stop."""
-        from .axisrepair import AXIS_REPAIR_RECUR_STEPS, axis_repair
+        from .axisrepair import AXIS_REPAIR_BOUND, AXIS_REPAIR_RECUR_STEPS, axis_repair
         from .surgery import BudgetUnclosed, _named_chains
 
         end, fold = self._axis_fold_of(stop)
@@ -4031,7 +4046,9 @@ class CollapseDriver:
         n = len(self._axis_repairs) + 1
         segs = _named_chains(pb)[1]
         velocity = np.column_stack([segs["bubble"]["u_r"], segs["bubble"]["u_z"]])
-        snapshot = pb._snapshot_state()
+        within_bound = fold["V_sliver"] <= AXIS_REPAIR_BOUND * self.reconnect.delta**3
+        snapshot = pb._snapshot_state() if within_bound else None
+        was_fresh = self._fresh_mesh()
         path = self.outdir / "events" / f"axis_repair_{n:03d}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -4045,16 +4062,18 @@ class CollapseDriver:
         except BudgetUnclosed as e:
             record, reason = getattr(e, "record", {}), "axis-repair-unclosed"
         except Exception as e:  # noqa: BLE001  (a rebuild that fails: rolled back, a stop)
-            record = {"kind": "axis-repair", "outcome": "failed",
+            record = {**(getattr(e, "record", None) or {}), "kind": "axis-repair", "outcome": "failed",
                       "error": f"{type(e).__name__}: {e}"[:400]}
             reason = "axis-repair-failed"
         record.update(n=n, step=st.step, guard=stop, **self._taus(self._t()))
         path.write_text(json.dumps(_plain(record), indent=1) + "\n")
         if reason is not None:
-            pb._restore_state(snapshot)
-            pb.invalidate_cached_mesh_data()
-            self._post_cut_cache = None
-            m = self.measure()
+            if snapshot is not None:
+                pb._restore_state(snapshot)
+                self._stepped_rc = None if was_fresh else pb.remesh_count
+                pb.invalidate_cached_mesh_data()
+                self._post_cut_cache = None
+                m = self.measure()
             return m, {"reason": reason, "chain": "bubble", "end": end,
                        "hard": (record.get("closures") or {}).get("hard"),
                        "error": record.get("error"), "record": f"events/{path.name}",
@@ -4365,6 +4384,7 @@ class CollapseDriver:
         if r is not None:
             self._arm_post_cut_nets()
         self._tick()  # step timing only
+        failed_step_context = None
         while True:
             found = self._stop(m)
             if self._axis_repair_due(found):  # a jet's tip folded along the axis (nuisance)
@@ -4378,10 +4398,12 @@ class CollapseDriver:
                 if found is None:  # made: every stop again on the fresh mesh
                     continue
             if found is not None:
-                stop = found
+                stop = (dict(found, failed_step=failed_step_context)
+                        if failed_step_context is not None else found)
                 break
             t = self._t()
             if s.t_end - t <= max(1e-14, 8 * math.ulp(s.t_end)):
+                stop = {"reason": "end-time"}
                 break
             if r is not None and tau_end_reached(t - t_cut, r.tau_end):
                 stop = {"reason": "tau-end", "tau_end": r.tau_end, **self._taus(t)}
@@ -4440,9 +4462,28 @@ class CollapseDriver:
                         failed = self._failed_step_stop(exc, dt, rebuilds)
                         if failed is not None:  # rolled back: a resumable stop on that state
                             m, stop = failed
-                            retried = self._failed_step_retry(m, stop)
-                            if retried is not None:  # the ring's sharpest element refined: the
-                                m, stop = retried[0], None  # loop's top reads the new mesh again
+                            failed_step_context = dict(stop)
+                            retry_state = (copy.deepcopy(st.kinks), st.far_yields,
+                                           st.last_remesh_step)
+                            retry_focus = pb.active_mesh_template().focus
+                            try:
+                                retried = self._failed_step_retry(m, stop)
+                            except Exception as retry_exc:  # a failed rebuild keeps the rollback
+                                st.kinks, st.far_yields, st.last_remesh_step = retry_state
+                                pb.active_mesh_template().focus = retry_focus
+                                self._restore_step_snapshot()
+                                m = self.measure()
+                                stop["retry_error"] = (
+                                    f"{type(retry_exc).__name__}: {retry_exc}")[:400]
+                                self._event("step-retry-failed", m, error=stop["retry_error"])
+                                break
+                            if retried is not None:
+                                m, retry_stop = retried
+                                if (retry_stop is not None
+                                        and retry_stop.get("trigger") == "ring-refine-base"):
+                                    stop = dict(retry_stop, failed_step=failed_step_context)
+                                    break
+                                # Guard stops and event requests are re-derived and met at the top.
                                 continue
                             break
                     raise
@@ -4454,6 +4495,7 @@ class CollapseDriver:
                 break
             self._tick("solve")
             st.step += 1
+            failed_step_context = None
             dt = self._t() - t
             st.dt_prev = dt
             inside = pb.remesh_count - rebuilds  # rebuilds pyoomph made inside the step
@@ -4555,6 +4597,8 @@ class CollapseDriver:
             if self._t() - st.last_state_t >= self._state_interval():
                 self.save_state()
             self._write_timing(dt)
+        if failed_step_context is not None:
+            stop.setdefault("failed_step", failed_step_context)
         # with the events block, a cut whose hard budgets do not close leaves the problem holding
         # a cut that is not accepted: nothing more is read from it, and the run ends on the state
         # before the event, which the cut kept
@@ -4618,6 +4662,8 @@ class CollapseDriver:
         if r is None or not hasattr(pb, "release_newton_tolerance"):  # a FaradayProblem only
             yield
             return
+        self._step_snapshot = None  # release the previous full snapshot before making this one's
+        self._step_was_fresh = self._fresh_mesh()
         level = pb.states_compression_level
         pb.min_newton_iterations = r.newton_min_iterations
         pb.states_compression_level = None
@@ -4694,15 +4740,21 @@ class CollapseDriver:
             return None
         pb = self.pb
         inside = pb.remesh_count - rebuilds
-        pb._restore_state(snap)
-        pb.invalidate_cached_mesh_data()
-        self._post_cut_cache = None
+        self._restore_step_snapshot()
         m = self.measure()
         stop = {"reason": "step-failed", "error": f"{type(exc).__name__}: {exc}"[:400],
                 "dt_attempted": dt, "net_rebuilds": int(inside), **self._taus(self._t())}
         self._event("step-failed", m, error=stop["error"], dt_attempted=dt,
                     net_rebuilds=int(inside))
         return m, stop
+
+    def _restore_step_snapshot(self):
+        """Restore the failed step's input and its mesh age. Loading a dump increments pyoomph's
+        remesh counter even when it restores a mesh that had already accepted a step."""
+        self.pb._restore_state(self._step_snapshot)
+        self._stepped_rc = None if self._step_was_fresh else self.pb.remesh_count
+        self.pb.invalidate_cached_mesh_data()
+        self._post_cut_cache = None
 
     def _failed_step_retry(self, m: dict, stop: dict) -> tuple[dict, dict | None] | None:
         """After a failed step rolled back (:meth:`_failed_step_stop`), in the ring stage with
@@ -4713,7 +4765,8 @@ class CollapseDriver:
         mesh (r1h at b36c9c1, step 7251: the root of the radial sheet the downward head drives out
         along the plug, an element of 1.55e-5 turning by 85.6 degrees, below the guard's stop, and
         the step from it failed at every size). Returns the state and the stop of the rebuilt mesh,
-        from which the loop's top goes on (its stops read again), or None where no retry is made (a
+        from which the loop's top goes on (its guard/event stops read again; a non-rederived
+        ring-refine-base stop ends the run), or None where no retry is made (a
         second failure of the same step, no ring, no element to refine), the stop ``step-failed``
         then standing."""
         st, r = self.state, self.reconnect
@@ -4724,7 +4777,8 @@ class CollapseDriver:
         if e is None or not len(e["L"]):
             return None
         floor = self.s.refine_ratio * self._h_floor()
-        ok = (e["turn"] > r.edge_turn_refine) & (e["L"] > floor)
+        ok = ((e["turn"] > r.edge_turn_refine) & (e["turn"] <= RING_REFINE_TURN_MAX)
+              & (e["L"] > floor))
         if not ok.any():
             return None
         k = int(np.argmax(np.where(ok, e["turn"], -1.0)))

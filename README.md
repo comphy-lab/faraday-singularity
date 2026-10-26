@@ -376,9 +376,15 @@ In the region away from the upward jet,
 the tip of a fast jet on the axis that folds along the axis within one element (its last element
 running up the axis, a node of it across it) is repaired: the folded nodes are dropped and the
 axis node put where the surface meets the axis, by a rebuild from the planned surface, and the
-thin sliver of gas between them becomes liquid. Its volume and momentum are hard checks above
-`1e-4 delta^3` (a fold of a tip element is far smaller), with the budgets of the rebuild and the
-base of the upward jet; a repair that misses is rolled back and the run stops resumably.
+thin sliver of gas between them becomes liquid. Its geometric volume and independently sampled
+axial momentum after transfer are hard checks above
+`1e-4 delta^3` for volume and that bound times the folded nodes' largest speed for momentum
+(a fold of a tip element is far smaller). Momentum is integrated on the sliver's own triangle
+quadrature; every point must be located and its volume must reproduce the geometric volume
+within the existing volume tolerance, or the momentum check is refused as unchecked. The budgets
+of the rebuild and the base of the upward jet are checked as well. Its transfer must keep the
+chain names and ends and the planned axis spans, with unlocated nodes only where the old chains and the sliver plus its band predict them;
+a repair that misses is rolled back and the run stops resumably.
 For sensitivity tests only, `rebuild_spline` `vertices`
 splines each rebuild through the vertices of the elements rather than every node; it is off by
 default, since smoothing would alter, and hide, the very feature under test. All these settings
@@ -692,7 +698,8 @@ radius, zero at the edge), so that a cell at the disc's edge whose sample a rebu
 fast free surface weighs nothing; the momentum the transfer carried without that weight is reported
 beside the closures (`G2_unweighted`), never a flag. The disc's change of momentum
 beyond its limit (0.05 `V_fill U`) is only a flag where the identity holds and resolves it, its
-larger side at least half the change and at the momentum floor or above: a fill joins liquid that
+larger side at least half the unweighted disc momentum change (`G3_unweighted`) and at the
+momentum floor or above: a fill joins liquid that
 moved at different velocities across the gas it removes, and the projection is the inelastic impulse
 of that merge, which near free surfaces moves momentum out of any disc about the site, balanced at
 the container's bottom, so that the identity, not the disc's change, is the momentum balance
