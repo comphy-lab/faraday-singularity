@@ -728,3 +728,60 @@ def test_a_lip_beyond_the_fold_search_is_found_up_to_its_rupture_thickness():
     seen.clear()
     assert _sheet_stops(L, lip(2.9e-4, True)) is None
     assert all(g < 2.9e-4 for _, g in seen)
+
+
+def test_the_lips_region_follows_the_lip_where_the_reading_leaves_it():
+    """A refined region that holds the lip and that the reading leaves where it was (no element of
+    the guard asks within its reach) is recentred on the lip's section, its radius and target
+    kept, so that the lip, moving out along the plug, keeps its refinement (r1s4, fix15 leg 1 at
+    bf80e74: the lip left the region of its seventh refine and met a rebuild at 8.8e-6, half an
+    element across, at step 8208)."""
+    lip = (1.05e-3, 4.6119)
+    kinks = {"ring_r1_far": _kink(r=1.0e-3, z=4.6119, radius=8e-5, target=1.25e-6)}
+    f = _held_fake(kinks, samples=((10.99, 5e-6) + lip,))
+    f.s = SimpleNamespace(refine_ratio=1.5, coarsen_hold=1e-6)
+    f.state.far_yields = 0
+    f._jetcore = lambda: SimpleNamespace(far_kinks="recentre", sheet_rupture_floors=None,
+                                         far_floor=1e-5, ring_kink_floor=False,
+                                         far_yield_turn=75.0)
+    f._column_size = lambda: math.nan
+    core = {"whole": True, "R_K": math.inf, "mask": []}
+    got = CollapseDriver._split_kinks(f, {}, {"edges": {}}, core, 1.0, None)["ring_r1_far"]
+    assert (got["r"], got["z"]) == lip and got["radius"] == 8e-5
+    assert got["target"] == 1.25e-6 and got["released"] is False
+    assert kinks["ring_r1_far"]["r"] == 1.0e-3  # a copy
+    # a lip no longer read: the region as the reading made it (released by its hold)
+    stale = _held_fake(dict(kinks), samples=((10.98, 5e-6) + lip,))
+    stale.s, stale.state.far_yields, stale._jetcore = f.s, 0, f._jetcore
+    stale._column_size = f._column_size
+    left = CollapseDriver._split_kinks(stale, {}, {"edges": {}}, core, 1.0, None)["ring_r1_far"]
+    assert (left["r"], left["z"]) == (1.0e-3, 4.6119) and left["released"] is True
+
+
+def test_a_guard_renewal_at_the_regions_own_centre_keeps_both_the_element_and_the_lip():
+    """The guard renews the held region at its own centre, four of its element's chords wide (the
+    review of batch A, F2): not a region left as it was, so it is not moved onto the lip; it is
+    widened about the element to hold the lip's ball, the element and the lip both inside."""
+    from faraday_singularity.jetcore import far_kink_regions
+
+    centre, lip = (1.0e-3, 4.6119), (1.05e-3, 4.6119)
+    kinks = {"ring_r1_far": _kink(r=centre[0], z=centre[1], radius=8e-5, target=1.25e-6)}
+    f = _held_fake(kinks, samples=((10.99, 5e-6) + lip,))
+    f.s = SimpleNamespace(refine_ratio=1.5, coarsen_hold=1e-6)
+    f.state.far_yields = 0
+    f._jetcore = lambda: SimpleNamespace(far_kinks="recentre", sheet_rupture_floors=None,
+                                         far_floor=1e-5, ring_kink_floor=False,
+                                         far_yield_turn=75.0)
+    f._column_size = lambda: math.nan
+    pc = {"edges": {"ring": _ring_edges([centre], 2e-6, 40.0)}}
+    refine = {"ring": np.array([0])}
+    core = {"whole": True, "R_K": math.inf, "mask": []}
+    held = CollapseDriver._lip_hold(f, dict(kinks))
+    plain = far_kink_regions(held, pc["edges"], refine, t=11.0, hold=lambda L: 1.0, h_far=1e-5,
+                             h_floor=H_FLOOR, yield_turn=75.0, sizes={})["ring_r1_far"]
+    assert (plain["r"], plain["z"]) == centre and plain["radius"] == pytest.approx(8e-6)
+    got = CollapseDriver._split_kinks(f, refine, pc, core, 1.0, None)["ring_r1_far"]
+    assert (got["r"], got["z"]) == centre  # about the element, not moved onto the lip
+    clearance = 8e-5 - 5e-5
+    assert got["radius"] == pytest.approx(5e-5 + clearance)
+    assert math.hypot(lip[0] - got["r"], lip[1] - got["z"]) + clearance <= got["radius"] * (1 + 1e-12)

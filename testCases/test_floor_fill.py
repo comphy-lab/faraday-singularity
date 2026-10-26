@@ -117,6 +117,7 @@ def _fake_driver(L, *, enabled=True, jet="recentre", ring=True, removed=False, h
     fake._local_ring_fill_request = lambda *a, **kw: CollapseDriver._local_ring_fill_request(fake, *a, **kw)
     fake._ring_liquid_reading = lambda st: CollapseDriver._ring_liquid_reading(fake, st)
     fake._ring_sheet_reading = lambda st: CollapseDriver._ring_sheet_reading(fake, st)
+    fake._ring_reading = lambda st: CollapseDriver._ring_reading(fake, st)
     fake._refined_chain = lambda: CollapseDriver._refined_chain(fake)
     return fake
 
@@ -391,10 +392,22 @@ def test_a_kink_of_the_rings_gas_at_the_floor_is_read_as_its_wedge_and_filled():
     assert k3["L"] == pytest.approx(1.36e-6 * 2 / 3) and k3["arc"] == 1.36e-6
     assert k3["L"] <= 1.5 * 7.8125e-7 < k3["arc"]
     assert CollapseDriver._floor_fill_request(f3, st3) is not None
-    # two elements each above the floor's: the stop stays
+    # two elements each above the floor's: not the fill's; the ring's audited refine meets it,
+    # to the floor (r2, fix16 leg 1 at bf80e74, step 12662), and the fill at the floor then
     st4 = _kink(L3, i3, fold_pair=[(i3 - 2) % n3, (i3 + 2) % n3], fold_arc=2.4e-6)
     assert CollapseDriver._ring_kink_reading(f3, st4)["L"] == pytest.approx(1.2e-6)
     assert CollapseDriver._floor_fill_request(f3, st4) is None
+    reading = CollapseDriver._ring_reading(f3, st4)
+    assert reading["trigger"] == "fold-kink" and reading["L"] == pytest.approx(1.2e-6)
+    assert CollapseDriver._ring_refine_due(f3, st4) and not CollapseDriver._ring_refine_due(f3, st3)
+    f3._ring_refine_due = lambda st: CollapseDriver._ring_refine_due(f3, st)
+    f3._ring_refine_once = lambda *a: pytest.fail("a gas kink's refine is the audited one")
+    audited = []
+    f3._ring_liquid_refine = lambda m, rd, attempt: (audited.append((rd, attempt)) or ({"m": 1},
+                                                                                     None))
+    assert CollapseDriver._ring_refine(f3, {"m": 0}, dict(st4)) == ({"m": 1}, None)
+    assert len(audited) == 1 and audited[0][0]["trigger"] == "fold-kink"
+    assert audited[0][0]["kink"]["fold_pair"] == st4["fold_pair"]
     # the pair across the seam: the shorter way round
     L, i = teardrop(roll=0)
     n = len(L)
