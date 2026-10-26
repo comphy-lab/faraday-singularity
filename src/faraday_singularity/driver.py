@@ -1834,37 +1834,72 @@ class CollapseDriver:
         h_col = self._column_size()
         floors = {"ring": h_col} if jet.ring_kink_floor and math.isfinite(h_col) else {}
         previous = self._lip_hold({k: v for k, v in st.kinks.items() if v.get("far")})
-        kinks.update(far_kink_regions(previous,
-                                      pc["edges"], far, t=self._t(), hold=hold,
-                                      h_far=jet.far_floor, h_floor=h_floor,
-                                      yield_turn=jet.far_yield_turn, sizes=sizes, floors=floors))
+        regions = far_kink_regions(previous, pc["edges"], far, t=self._t(), hold=hold,
+                                   h_far=jet.far_floor, h_floor=h_floor,
+                                   yield_turn=jet.far_yield_turn, sizes=sizes, floors=floors)
+        kinks.update(self._lip_cover(previous, regions))
         return kinks
 
-    def _lip_hold(self, previous: dict) -> dict:
-        """The far kinks of the last accepted step (``previous``) with the refinement that holds
-        the ring's lip renewed (decision 22, :meth:`_sheet_context`), before
-        ``jetcore.far_kink_regions`` reads which to release and every target from them, so that
-        the measurement, the remesh checks and the commit (``_commit_post_cut``) all keep it: where
-        the lip is handled (:meth:`_sheet_handled`) and was read at the state this one goes on
-        from (its last sample at ``t_prev`` or later, the start of the step; at this state's time
-        after an event, which sets ``t_prev`` NaN), each refined far kink of the ring not released
-        whose disc holds the lip's section has its ``t_set`` now; a lip no longer read holds
-        nothing. The entries renewed are copies; ``previous`` is returned as it is otherwise."""
+    def _lip_read(self):
+        """The ring's lip as the measurement holds it (decision 22, :meth:`_sheet_context`): its last
+        sample ``(r, z, thickness)`` where the lip is handled (:meth:`_sheet_handled`) and was read
+        at the state this one goes on from (the sample at ``t_prev`` or later, the start of the
+        step; at this state's time after an event, which sets ``t_prev`` NaN); None otherwise (a
+        lip no longer read holds nothing)."""
         st = self.state
         samples = st.lip_samples
         if not samples or len(samples[-1]) < 4 or not self._sheet_handled():
-            return previous
+            return None
         t = self._t()
         t_from = st.t_prev if math.isfinite(st.t_prev) else t
-        t_read, r, z = (float(x) for x in (samples[-1][0], samples[-1][2], samples[-1][3]))
-        if t_read < t_from:
+        if float(samples[-1][0]) < t_from:
+            return None
+        return float(samples[-1][2]), float(samples[-1][3]), float(samples[-1][1])
+
+    @staticmethod
+    def _holds_lip(g: dict, lip) -> bool:
+        """Whether the far kink ``g`` is the refinement that holds the lip ``lip`` (``(r, z,
+        thickness)``): a refined region of the ring, not released, whose disc holds the lip's
+        section."""
+        return (lip is not None and g.get("chain") == "ring" and bool(g.get("refined"))
+                and not g.get("released")
+                and math.hypot(lip[0] - float(g["r"]), lip[1] - float(g["z"])) <= float(g["radius"]))
+
+    def _lip_hold(self, previous: dict) -> dict:
+        """The far kinks of the last accepted step (``previous``) with the refinement that holds
+        the ring's lip (:meth:`_lip_read`, :meth:`_holds_lip`) renewed, its ``t_set`` now, before
+        ``jetcore.far_kink_regions`` reads which to release and every target from them, so that
+        the measurement, the remesh checks and the commit (``_commit_post_cut``) all keep it; its
+        disc is kept about the lip after the reading by :meth:`_lip_cover`. The entries renewed
+        are copies; ``previous`` is returned as it is otherwise."""
+        lip = self._lip_read()
+        if lip is None:
             return previous
-        out = {}
+        t = self._t()
+        return {key: (dict(g, t_set=max(float(g["t_set"]), t)) if self._holds_lip(g, lip) else g)
+                for key, g in previous.items()}
+
+    def _lip_cover(self, previous: dict, regions: dict) -> dict:
+        """``jetcore.far_kink_regions``' regions (``regions``) with the disc of each refinement that
+        held the ring's lip before the reading (``previous``, :meth:`_holds_lip`) kept about the
+        lip: a region the guard's elements recentred on themselves (four of their chords wide,
+        which can leave the lip outside it) is widened about its new centre to hold the ball about
+        the lip that the held disc held (its radius the held disc's clearance about the lip's
+        section, at least the lip's thickness), its target kept; a region released, gone, or still
+        holding that ball is as the reading made it. The entries widened are copies."""
+        lip = self._lip_read()
+        if lip is None:
+            return regions
+        out = dict(regions)
         for key, g in previous.items():
-            if g.get("chain") == "ring" and g.get("refined") and not g.get("released") \
-                    and math.hypot(r - float(g["r"]), z - float(g["z"])) <= float(g["radius"]):
-                g = dict(g, t_set=max(float(g["t_set"]), t))
-            out[key] = g
+            new = out.get(key)
+            if new is None or new.get("released") or not self._holds_lip(g, lip):
+                continue
+            clearance = max(float(g["radius"]) - math.hypot(lip[0] - float(g["r"]),
+                                                            lip[1] - float(g["z"])), lip[2])
+            need = math.hypot(lip[0] - float(new["r"]), lip[1] - float(new["z"])) + clearance
+            if need > float(new["radius"]):
+                out[key] = dict(new, radius=need)
         return out
 
     def _column_size(self) -> float:
@@ -4554,6 +4589,7 @@ class CollapseDriver:
             return {"h_s": self._sheet_rupture_thickness(), "refine_limit": refine,
                     "thinning": lip_thinning(samples)}
 
+        sheet.h_s = self._sheet_rupture_thickness()  # the stage reads a lip up to h_s
         return sheet
 
     def _ring_sheet_reading(self, stop: dict | None) -> dict | None:

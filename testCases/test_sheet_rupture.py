@@ -186,6 +186,9 @@ def _fake(*, ring=True, removed=False, jet="recentre", enabled=True, sheets="log
         _h_floor=lambda: H_FLOOR, _t=lambda: t)
     f._sheet_handled = lambda: CollapseDriver._sheet_handled(f)
     f._sheet_rupture_thickness = lambda: CollapseDriver._sheet_rupture_thickness(f)
+    f._lip_read = lambda: CollapseDriver._lip_read(f)
+    f._holds_lip = CollapseDriver._holds_lip
+    f._lip_cover = lambda previous, regions: CollapseDriver._lip_cover(f, previous, regions)
     return f
 
 
@@ -212,7 +215,7 @@ def test_the_driver_samples_the_lip_once_per_time():
     ctx = CollapseDriver._sheet_context(f, [np.zeros((8, 2))])
     out = ctx(_fold(2.0e-5), 1.8e-5)
     assert f.state.lip_samples == [[10.95, 2.0e-5, 1.0e-3, 4.6119]]
-    assert out["h_s"] == SHEET_RUPTURE_FLOORS * H_FLOOR
+    assert out["h_s"] == SHEET_RUPTURE_FLOORS * H_FLOOR == ctx.h_s  # the stage reads up to h_s
     assert out["refine_limit"] == SHEET_REFINE_ELEMENTS * 1.8e-5
     assert out["thinning"]["thinning"] is False
     # the hold of the lip's refinement is the measurement's (_lip_hold), not the reading's
@@ -601,3 +604,97 @@ def test_the_state_after_a_rupture_holds_no_lip_history_as_the_live_run_goes_on(
     assert written["postcut"] == [] == f.state.lip_samples
     # the record keeps the history the rupture met
     assert written["lip"]["samples"] == history and written["lip"]["due"] is True
+
+
+# --- the review of 2026-10-26 (core-sheet round 1: F1, F2) ----------------------------------------
+
+
+def _ring_edges(points, L, turn):
+    """A guard's reading of the ring (``pc["edges"]["ring"]``): elements at ``points``, each of
+    length ``L`` and turning by ``turn`` degrees."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    return {"edges": {"mid": P, "L": np.full(len(P), L), "turn": np.full(len(P), turn),
+                      "index": np.arange(len(P))}}
+
+
+def test_a_held_lip_stays_in_its_refinement_when_the_guards_elements_recentre_it():
+    """The guard asks for the ring's elements 6e-5 from the lip (within the held region's reach):
+    ``jetcore.far_kink_regions`` recentres the held region on them, four of their chords wide
+    (2e-5), the lip outside it; the measurement widens it about its new centre to hold the ball
+    about the lip that the held disc held, its target the refinement's, and the focus built from it
+    holds the lip."""
+    from faraday_singularity.jetcore import far_kink_regions
+    from faraday_singularity.mesh import FocusRegion
+
+    lip = (1.0e-3, 4.6119)
+    kinks = {"ring_r1_far": _kink(r=lip[0], z=lip[1], radius=8e-5, target=1.25e-6)}
+    f = _held_fake(kinks, samples=((10.99, 5e-6) + lip,))
+    f.s = SimpleNamespace(refine_ratio=1.5, coarsen_hold=1.0)
+    f.state.far_yields = 0
+    f._jetcore = lambda: SimpleNamespace(far_kinks="recentre", sheet_rupture_floors=None,
+                                         far_floor=1e-5, ring_kink_floor=False,
+                                         far_yield_turn=75.0)
+    f._column_size = lambda: math.nan
+    edge = (lip[0] + 6e-5, lip[1])
+    pc = {"edges": {"ring": _ring_edges([edge], 5e-6, 40.0)}}
+    refine = {"ring": np.array([0])}
+    core = {"whole": True, "R_K": math.inf, "mask": []}
+    # the reading alone: recentred on the element, the lip outside its disc
+    held = CollapseDriver._lip_hold(f, dict(kinks))
+    plain = far_kink_regions(held, pc["edges"], refine, t=11.0, hold=lambda L: 1.0, h_far=1e-5,
+                             h_floor=H_FLOOR, yield_turn=75.0, sizes={})["ring_r1_far"]
+    assert plain["radius"] == pytest.approx(2e-5) and (plain["r"], plain["z"]) == edge
+    assert math.hypot(lip[0] - plain["r"], lip[1] - plain["z"]) > plain["radius"]
+    # the measurement: the same centre and target, widened to hold the lip's ball
+    got = CollapseDriver._split_kinks(f, refine, pc, core, 1.0, None)["ring_r1_far"]
+    assert (got["r"], got["z"]) == edge and got["target"] == plain["target"] <= 1.25e-6
+    assert got["released"] is False
+    clearance = 8e-5  # the held disc's about the lip: centred on it
+    assert got["radius"] == pytest.approx(6e-5 + clearance)
+    region = FocusRegion(got["name"], size=got["target"], r=got["r"], z=got["z"],
+                         radius=got["radius"])
+    for dr, dz in ((0.0, 0.0), (clearance, 0.0), (0.0, -clearance),
+                   (-0.7 * clearance, 0.7 * clearance)):
+        assert math.hypot(lip[0] + dr - region.r, lip[1] + dz - region.z) \
+            <= region.radius * (1 + 1e-12)
+    # a lip no longer read: as the reading made it
+    stale = _held_fake(dict(kinks), samples=((10.98, 5e-6) + lip,))
+    stale.s, stale.state.far_yields, stale._jetcore = f.s, 0, f._jetcore
+    stale._column_size = f._column_size
+    assert CollapseDriver._split_kinks(stale, refine, pc, core, 1.0, None)["ring_r1_far"][
+        "radius"] == pytest.approx(2e-5)
+    # a region still holding the lip's ball, or one released: unchanged
+    near = {"ring_r1_far": dict(plain, radius=1.5e-4)}  # holds the ball (6e-5 + 8e-5)
+    assert CollapseDriver._lip_cover(f, held, near) == near
+    gone = {"ring_r1_far": dict(plain, released=True)}
+    assert CollapseDriver._lip_cover(f, held, gone) == gone
+
+
+def test_a_thinning_lip_beyond_the_fold_limit_is_read_up_to_its_rupture_thickness():
+    """A lip thicker than the ring stage's fold limit (max(kappa_g delta, fold_stop_elements
+    h_elem), 5e-5 here) but within ``h_s`` is read by the driver's callback and ruptured once
+    thinning; beyond ``h_s`` it is not read; read and not thinning it is no event (and no kink)."""
+    L, f = _lip(t=7e-5)
+    gap = f["fold"].gap
+    assert gap > 5e-5
+    seen = []
+
+    def lip(h_s, thinning):
+        def read(fold, h):
+            seen.append(fold.pair)
+            return {"h_s": h_s, "refine_limit": 0.0, "thinning": {"thinning": thinning}}
+        read.h_s = h_s
+        return read
+
+    assert _sheet_stops(L, lip(0.9 * gap, True)) is None and seen == []
+    req = _sheet_stops(L, lip(1.1 * gap, True))
+    assert seen == [f["fold"].pair]
+    assert (req["reason"], req["kind"], req["chain"], req["side"]) == (
+        ev.EVENT_REQUEST, ev.SHEET_CONTACT, "ring", "liquid")
+    assert req["sheet_rupture"]["due"] is True and req["fold_gap"] == pytest.approx(gap)
+    assert req["fold_gap"] > req["fold_limit"]
+    assert _sheet_stops(L, lip(1.1 * gap, False)) is None
+    # a callback without h_s (and no callback): the fold limit as before
+    plain = lip(1.1 * gap, True)
+    del plain.h_s
+    assert _sheet_stops(L, plain) is None
