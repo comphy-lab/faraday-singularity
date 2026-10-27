@@ -4978,6 +4978,41 @@ class CollapseDriver:
                        **self._taus(self._t())}
         return self._meet_event(m, self._local_ring_fill_request(P, wedge, reading, kind="step"))
 
+    def _archive_corner_refusal(self, m: dict, found: dict) -> dict:
+        """Retain a recoverable refusal outside the numbered surgery-event namespace."""
+        folder = self.outdir / "events"
+        folder.mkdir(parents=True, exist_ok=True)
+        n = 1
+        while True:
+            stem = f"corner_refusal_{self.state.step:08d}_{n}"
+            path = folder / f"{stem}.json"
+            try:
+                stream = path.open("x")
+                break
+            except FileExistsError:
+                n += 1
+        with stream:
+            original = self.outdir / found["record"]
+            record = json.loads(original.read_text()) if original.is_file() else {
+                "outcome": "refused", "stop": dict(found)}
+            kept = dict(found, original_record=found["record"],
+                        record=f"events/{path.name}")
+            if found.get("precut") is not None:
+                source = Path(found["precut"])
+                target = source.with_name(f"{stem}.dump")
+                source.rename(target)
+                if source.with_suffix(".json").exists():
+                    source.with_suffix(".json").rename(target.with_suffix(".json"))
+                kept.update(original_precut=str(source), precut=str(target))
+                record["dumps"] = {**(record.get("dumps") or {}), "precut": str(target)}
+            record["recovery"] = {"step": self.state.step, "refusal": kept}
+            stream.write(json.dumps(_plain(record), indent=1) + "\n")
+            stream.flush()
+            original.unlink(missing_ok=True)
+        self._event("ring-step-corner-refused", m, refusal=kept,
+                    record=kept["record"], precut=kept.get("precut"))
+        return kept
+
     def _meet_ring_step_contact(self, m: dict, contact: RingStepContact) -> tuple[dict, dict | None]:
         """Restore a simple input, then fill its certified gas wedge with hard budgets.
 
@@ -5490,8 +5525,16 @@ class CollapseDriver:
                                 m, found = self._meet_ring_corner(m, corner)
                                 if found is None:
                                     continue
-                                stop = dict(found, failed_step=failed_step_context)
-                                break
+                                no_fill = (found.get("reason") == "step-failed"
+                                           and found.get("trigger") == "stepped-contact-unhandled")
+                                if not (no_fill or found.get("reason") == GROOVE_FILL_REFUSED):
+                                    stop = dict(found, failed_step=failed_step_context)
+                                    break
+                                # An unfillable native inversion keeps the old ring-refine
+                                # recovery. Folded candidates never reach this failure path.
+                                if found.get("reason") == GROOVE_FILL_REFUSED:
+                                    found = self._archive_corner_refusal(m, found)
+                                stop["corner_refusal"] = failed_step_context["corner_refusal"] = dict(found)
                             retry_state = (copy.deepcopy(st.kinks), st.far_yields,
                                            st.last_remesh_step)
                             retry_tip = (len(self._tip_edge_balances), st.snapshots,

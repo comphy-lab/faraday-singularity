@@ -939,18 +939,34 @@ def test_an_inverted_element_within_a_step_at_a_closing_corner_is_retried_once()
 
 
 @pytest.mark.parametrize("first", ["fold", "inverted"])
-def test_a_retry_that_inverts_again_at_the_corner_fills_the_corner_on_its_input(tmp_path, monkeypatch, first):
+@pytest.mark.parametrize("fillable", [True, False, "refused", "refused-no-refine", "refused-guard"])
+def test_a_retry_that_inverts_again_at_the_corner_fills_or_refines_its_input(
+    tmp_path, monkeypatch, first, fillable
+):
     from test_events_plumbing import _events_driver
     from test_ring_driver import made_ring_cut, RingProblem
     from test_step_failure import NetProblem
     from test_groove_driver import fake_fill
     from faraday_singularity import groovesurgery
     from faraday_singularity.reconnect import ReconnectSettings
+    from faraday_singularity.surgery import CutRefused
+
+    refused = isinstance(fillable, str)
+    refine_available = fillable is False or fillable in ("refused", "refused-guard")
+    made_fill = fillable is True
 
     class InvertedElementRemeshRequest(RuntimeError):  # pyoomph's, matched by its name
         pass
 
     P, U, F = folded_apex()
+    if refine_available:
+        # A separate curved P2 edge above the floor gives the legacy retry an
+        # eligible element; the unfillable closing corner stays at index zero.
+        j = 21
+        chord = P[j+1] - P[j-1]
+        bend = 0.2 * np.array([-chord[1], chord[0]])
+        P[j] += bend
+        F[j] += bend
     apex = f"around the position ({P[0, 0]:.6g}, {P[0, 1]:.6g})"
 
     class FoldProblem(RingProblem, NetProblem):
@@ -988,18 +1004,59 @@ def test_a_retry_that_inverts_again_at_the_corner_fills_the_corner_on_its_input(
     drv._stop = lambda m: None
     drv._remesh_checks = lambda m: (m, None)
     drv._quality_floor_flags = lambda: []
-    drv._failed_step_retry = lambda m, stop: pytest.fail("the ring refine's retry")
+    refinements = []
+    if made_fill:
+        drv._failed_step_retry = lambda m, stop: pytest.fail("the ring refine's retry")
+    else:
+        from dataclasses import replace
+
+        drv.s = replace(drv.s, h_floor=1e-10)  # the restored ring still admits refinement
+        if not refused:
+            monkeypatch.setattr(contact, "step_wedge", lambda *a, **kw: (None, "gas"))
+        def refine(m, reading, *a):
+            assert reading["retry"] is True and len(pb.restored) == 2
+            refinements.append(reading)
+            return m, ({"reason": "interface-unresolved", "trigger": "ring-refine-base"}
+                       if fillable == "refused-guard" else None)
+        drv._ring_refine_once = refine
     calls = []
     inner = fake_fill(calls)
     def fill(*a, base_check=None, **kw):
         assert pb.shape is None and len(pb.restored) == 2
         assert base_check()["ok"]
+        if refused:
+            from faraday_singularity.ringsurgery import _run_surgery
+
+            k = kw["k"]
+            precut = drv.keep_state(tmp_path / f"states/precut_e{k:03d}.dump")
+            record = {"k": k, "kind": "groove-fill", "dumps": {"precut": str(precut)}}
+            def body(progress):
+                progress["stage"] = "geometry"
+                raise CutRefused("injected geometric refusal", precut=str(precut))
+            return _run_surgery(body, pb, tmp_path, record,
+                                tmp_path / f"events/event_{k:03d}.json", None)
         return inner(*a, **kw)
     monkeypatch.setattr(groovesurgery, "groove_fill", fill)
     result = drv.run(1e-9)
     drv.close()
-    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 1
-    assert len(pb.steps) == 3 and len(calls) == 1 and result["events"]["step_contact_fills"] == 1
+    if fillable == "refused-no-refine":
+        assert result["stop"]["reason"] == "step-failed" and result["steps"] == 0
+        assert result["stop"]["error"].startswith("InvertedElementRemeshRequest:")
+        context = result["stop"]["corner_refusal"]
+        assert context["reason"] == "groove-fill-refused"
+        assert Path(context["precut"]).exists() and "injected" in context["error"]
+        assert len(pb.steps) == 2
+    elif fillable == "refused-guard":
+        assert result["stop"]["trigger"] == "ring-refine-base" and result["steps"] == 0
+        context = result["stop"]["failed_step"]["corner_refusal"]
+        assert context["reason"] == "groove-fill-refused" and Path(context["precut"]).exists()
+        assert len(pb.steps) == 2
+    else:
+        assert result["stop"]["reason"] == "max-steps" and result["steps"] == 1
+        assert len(pb.steps) == 3
+    assert len(calls) == int(made_fill)
+    assert len(refinements) == int(refine_available)
+    assert result["events"].get("step_contact_fills", 0) == int(made_fill)
     assert pb.steps[1] == pytest.approx(0.25*pb.steps[0])
     log = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
     retried = [e for e in log if e["event"] == "ring-step-fold-retry"]
@@ -1011,6 +1068,26 @@ def test_a_retry_that_inverts_again_at_the_corner_fills_the_corner_on_its_input(
     assert corner[0]["reading"]["pre_step_phase"] == "gas"
     assert corner[0]["reading"]["fold_retry"]["dt"] == pytest.approx(pb.steps[1])
     assert sum(e["event"] == "step-failed" for e in log) == (2 if first == "inverted" else 1)
+    if refused:
+        import hashlib
+
+        archived = [e for e in log if e["event"] == "ring-step-corner-refused"]
+        assert len(archived) == 1
+        saved = archived[0]["refusal"]
+        path, dump = tmp_path / saved["record"], Path(saved["precut"])
+        digest = hashlib.sha256(dump.read_bytes()).hexdigest()
+        assert json.loads(path.read_text())["dumps"]["precut"] == str(dump)
+        assert dump.with_suffix(".json").exists()
+        sys.path.insert(0, str(ROOT / "postProcess"))
+        import event_table
+
+        assert event_table.leg_records(tmp_path) == []  # not event k of this run
+        later = {"k": 1, "outcome": "made", "kind": "groove-fill"}
+        (tmp_path / "events/event_001.json").write_text(json.dumps(later))
+        (tmp_path / "states/precut_e001.dump").write_bytes(b"later event reuses k")
+        assert event_table.leg_records(tmp_path) == [later]
+        assert json.loads(path.read_text())["outcome"] == "refused"
+        assert hashlib.sha256(dump.read_bytes()).hexdigest() == digest
 
 
 def test_a_right_angled_gas_corner_is_read_as_the_floor_fill_reads_a_corner(monkeypatch):
