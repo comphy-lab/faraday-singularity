@@ -573,6 +573,33 @@ add a second top-level `cases/` tree.
   The native input is restored before a gas fill (`ring-contact-step-rollback`, with discarded
   distortion flags and the rejected diagnostics interval; `step-contact-fill`,
   `step_contact_fills`). Unreadable or liquid pockets keep `stepped-contact-unhandled`.
+  A cluster of crossings at a closing gas corner (chords up to three apart, every proper
+  crossing in one window of at most four chords within two quadratic elements) is one such
+  contact (`crossings`, `crossing_pairs`). A candidate that instead folds there (a new
+  odd-even run of at least six nodes, largest turn 45 degrees or more, within four nodes of
+  a gas corner of the input that turns at least 45 degrees over two chords and whose chord
+  across three nodes on either side the input velocity closes) or whose step rebuilt for an
+  inverted element logged within that step and localised within eight node spacings plus the
+  reported coordinate precision of such a corner, is rolled back and retried once at a
+  quarter of its step (`RingStepFold`, event `ring-step-fold-retry`; a later crossing records
+  it as `fold_retry`). A native `InvertedElementRemeshRequest` uses the same corner retry;
+  once spent, `ring-step-fold-again` (for a folded or net-rebuilt candidate) and
+  `ring-step-corner` record a fill on the restored input, or the resumable `step-failed` stop
+  with trigger `stepped-contact-unhandled` when it has no admissible fill. A failed native
+  inversion with no admissible corner fill, including a `groove-fill-refused` result that left
+  the input unchanged, can still use the earlier one-per-step ring refine; if none is available,
+  its native `step-failed` stop retains `corner_refusal`, including any existing precut dump.
+  A recoverable fill refusal is logged as `ring-step-corner-refused`; its record and precut
+  dump move to `corner_refusal_<step>_<n>` names outside the numbered surgery-event namespace,
+  so a later event cannot overwrite it or count it as event `k`. Stops reached after refinement
+  retain the refusal under `failed_step.corner_refusal` until an accepted step clears the context.
+  Event limits and failed hard closures remain terminal. Folded candidates and converged
+  net-rebuilt candidates cannot use this native-failure fallback. The stepped-contact gas
+  certification admits the corner ratio
+  at any element scale under its existing hard fill closures and upward-base check; it is not
+  restricted to the floor. Both `fold_retry` and `fold_cap` persist in dumps, so a restart
+  keeps the capped next step. No Courant number changes. Tangential node redistribution along the
+  ring (R3) is the principled cure for a corner's nodes bunching; it is deferred.
   Both fills use the existing hard G closures, `G_base`, recorded filled volume and the
   curve/locator-band transfer prediction (`events/event_<k>.json`); refusals and failed
   closures keep the existing resumable stops. A liquid-side kink instead uses the ring

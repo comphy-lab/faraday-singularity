@@ -786,3 +786,474 @@ def test_an_ineligible_crossed_step_is_a_resumable_stop_on_its_input(tmp_path, m
     np.testing.assert_array_equal(saved["P"], P)
     meta = json.loads(Path(result["stop"]["end_state"]).with_suffix(".json").read_text())
     assert meta["step"] == 0 and meta["time"] == pb.restored[0]["t"]
+
+
+def corner_cluster():
+    """The teardrop's gas apex closing as r2's corner closed at step 12661: chords three apart
+    (278 and 1) and their neighbours (279 and 1) crossing, two crossings in one window."""
+    P, _ = crossed_teardrop()
+    h = 5e-7
+    Q = P.copy()
+    Q[-1] = P[0]+h*np.array([1.7, -1.0])
+    Q[0] = P[0]+h*np.array([0.4, 0.1])
+    return P, Q
+
+
+def test_a_corner_crossing_of_nodes_three_apart_is_one_local_contact_on_its_gas_pocket():
+    from faraday_singularity.ring import loop_crossings
+    P, Q = corner_cluster()
+    n = len(P)
+    assert loop_crossings(Q) == [(1, n-2), (1, n-1)]
+    reading = contact.step_contact(Q)
+    assert reading["crossings"] == 2 and reading["crossing_pairs"] == [[n-2, 1], [n-1, 1]]
+    assert reading["local_indices"] == [n-2, n-1, 0, 1, 2] and reading["nodes"] == [n-2, n-1, 1, 2]
+    wedge, phase = contact.step_wedge(P, reading, stop_elements=3)
+    assert phase == "gas" and wedge["apex"] == 0
+    # a crossing outside the window keeps the cluster nonlocal
+    far = Q.copy()
+    far[5] = 2*P[-5]-P[5]
+    assert len(loop_crossings(far)) > 2 and contact.step_contact(far) is None
+
+
+def folded_apex():
+    """The teardrop's input, its apex closing (each wall moving toward the other), and a result
+    whose lower wall folds into an odd-even run beside the apex without crossing."""
+    P, _ = crossed_teardrop()
+    n = len(P)
+    U = np.zeros_like(P)
+    near = np.r_[n-8:n, 0:9]
+    U[near, 1] = -np.sign(P[near, 1]-P[0, 1])
+    F = P.copy()
+    t = (P[2]-P[1])/np.hypot(*(P[2]-P[1]))
+    nrm = np.array([-t[1], t[0]])
+    for k in range(2, 11):
+        F[k] = P[k]+0.3*5e-7*(-1)**k*nrm
+    return P, U, F
+
+
+def test_a_new_odd_even_run_beside_a_closing_gas_corner_is_a_step_fold():
+    from shapely.geometry import LinearRing
+    P, U, F = folded_apex()
+    assert LinearRing(F).is_simple and contact.step_contact(F) is None
+    fold = contact.step_fold(P, U, F)
+    assert fold["trigger"] == "step-fold" and fold["corner"]["index"] == 0
+    assert fold["run_max_turn"] >= contact.FOLD_TURN
+    assert contact.step_fold(P, -U, F) is None  # an opening corner
+    assert contact.step_fold(F, U, F) is None  # a run the input already has
+    assert contact.step_fold(P, U, P) is None
+
+
+def test_a_fold_caught_at_the_large_step_is_retried_at_a_quarter_and_its_crossing_filled(tmp_path, monkeypatch):
+    from test_events_plumbing import _events_driver
+    from test_ring_driver import made_ring_cut, RingProblem
+    from test_step_failure import NetProblem
+    from test_groove_driver import fake_fill
+    from faraday_singularity import groovesurgery
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    P, U, F = folded_apex()
+    _, Q = corner_cluster()
+
+    class FoldProblem(RingProblem, NetProblem):
+        flags = []
+        shape = None
+        steps = []
+        def interface_loops(self, **kw):
+            X = P if self.shape is None else self.shape
+            V = U if self.shape is None else np.zeros_like(X)
+            return [{"r": X[:, 0], "z": X[:, 1], "u_r": V[:, 0], "u_z": V[:, 1],
+                     "vertex": np.arange(len(X)) % 2 == 0,
+                     **({"node_ids": np.arange(len(X))} if kw.get("with_node_ids") else {})}]
+        def run(self, *a, **kw):
+            self.steps.append(kw["timestep"])
+            super().run(*a, **kw)
+            self.shape = {1: F, 2: Q}.get(self.calls)
+        def _restore_state(self, snap):
+            super()._restore_state(snap)
+            self.shape = None
+        def take_distortion_flags(self):
+            result, self.flags = self.flags, []
+            return result
+
+    pb = FoldProblem()
+    block = liquid_driver(P).events.to_dict()
+    block["jetcore"] = {"enabled": True, "far_kinks": "recentre"}
+    drv = _events_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-6),
+                         events=EventSettings.from_dict(block), max_steps=1)
+    made_ring_cut(drv, pb)
+    drv._stop = lambda m: None
+    drv._remesh_checks = lambda m: (m, None)
+    drv._quality_floor_flags = lambda: []
+    calls = []
+    inner = fake_fill(calls)
+    def fill(*a, base_check=None, **kw):
+        assert pb.shape is None and len(pb.restored) == 2  # on the retry's own input
+        assert base_check()["ok"]
+        return inner(*a, **kw)
+    monkeypatch.setattr(groovesurgery, "groove_fill", fill)
+    result = drv.run(1e-9)
+    drv.close()
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 1
+    assert pb.calls == 3 and len(calls) == 1 and result["events"]["step_contact_fills"] == 1
+    assert pb.steps[1] == pytest.approx(0.25*pb.steps[0]) and pb.steps[2] <= pb.steps[1]
+    log = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    retried = [e for e in log if e["event"] == "ring-step-fold-retry"]
+    assert len(retried) == 1 and retried[0]["reading"]["trigger"] == "step-fold"
+    assert retried[0]["dt_retry"] == pytest.approx(0.25*retried[0]["dt_attempted"])
+    rolled = [e for e in log if e["event"] == "ring-contact-step-rollback"]
+    assert len(rolled) == 1 and rolled[0]["reading"]["crossings"] == 2
+    assert rolled[0]["reading"]["fold_retry"]["trigger"] == "step-fold"
+    assert not any(e["event"] == "step-failed" for e in log)
+
+
+def test_an_inverted_element_within_a_step_at_a_closing_corner_is_retried_once():
+    P, U, _ = folded_apex()
+    fake = SimpleNamespace(pb=SimpleNamespace(remesh_count=4), _t=lambda: 2.0,
+                           state=SimpleNamespace(fold_retry=None))
+    fake._fold_retry_due = lambda before: CollapseDriver._fold_retry_due(fake, before)
+    fake._corner_at = CollapseDriver._corner_at
+    logged = [np.array([[float(f"{P[0, 0]:.6g}"), float(f"{P[0, 1]:.6g}")]])]
+    fake._step_inversions = lambda: logged[0]
+    before = {"P": P, "U": U, "node_ids": np.arange(len(P)), "remesh_count": 3, "t": 1.0,
+              "key": contact.input_key(P[:, 0], P[:, 1]), "defer": True}
+    with pytest.raises(contact.RingStepFold) as exc:
+        CollapseDriver._ring_step_check(fake, before)
+    assert exc.value.reading["trigger"] == "step-inverted"
+    assert exc.value.reading["net_rebuilds"] == 1 and exc.value.reading["corner"]["index"] == 0
+    assert exc.value.reading["consumed"] is False
+    fake.state.fold_retry = {"t": 1.0, "input": before["key"]}  # this input's retry made
+    with pytest.raises(contact.RingStepFold) as exc:  # never accepted: the corner's fill
+        CollapseDriver._ring_step_check(fake, before)
+    assert exc.value.reading["consumed"] is True
+    fake.state.fold_retry = {"t": 1.0, "input": "another input at the same time"}
+    with pytest.raises(contact.RingStepFold) as exc:
+        CollapseDriver._ring_step_check(fake, before)
+    assert exc.value.reading["consumed"] is False
+    fake.state.fold_retry = None
+    logged[0] = logged[0] + [[5e-5, 0.0]]  # an inversion away from every corner: the net's
+    assert CollapseDriver._ring_step_check(fake, before) is None
+    logged[0] = None
+    assert CollapseDriver._ring_step_check(fake, before) is None
+    assert CollapseDriver._ring_step_check(fake, dict(before, U=-U)) is None  # opening
+    assert CollapseDriver._ring_step_check(fake, dict(before, defer=False)) is None
+
+
+@pytest.mark.parametrize("first", ["fold", "inverted"])
+def test_a_retry_that_inverts_again_at_the_corner_fills_the_corner_on_its_input(tmp_path, monkeypatch, first):
+    from test_events_plumbing import _events_driver
+    from test_ring_driver import made_ring_cut, RingProblem
+    from test_step_failure import NetProblem
+    from test_groove_driver import fake_fill
+    from faraday_singularity import groovesurgery
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    class InvertedElementRemeshRequest(RuntimeError):  # pyoomph's, matched by its name
+        pass
+
+    P, U, F = folded_apex()
+    apex = f"around the position ({P[0, 0]:.6g}, {P[0, 1]:.6g})"
+
+    class FoldProblem(RingProblem, NetProblem):
+        flags = []
+        shape = None
+        steps = []
+        def interface_loops(self, **kw):
+            X = P if self.shape is None else self.shape
+            V = U if self.shape is None else np.zeros_like(X)
+            return [{"r": X[:, 0], "z": X[:, 1], "u_r": V[:, 0], "u_z": V[:, 1],
+                     "vertex": np.arange(len(X)) % 2 == 0,
+                     **({"node_ids": np.arange(len(X))} if kw.get("with_node_ids") else {})}]
+        def oomph_log_tail(self):
+            return "Inverted element: ... " + apex + ".\n"
+        def run(self, *a, **kw):
+            self.steps.append(kw["timestep"])
+            self._snapshot_state()
+            if len(self.steps) == 2 or (first == "inverted" and len(self.steps) == 1):
+                raise InvertedElementRemeshRequest("The mesh kept folding after 3 remeshes.")
+            super().run(*a, **kw)
+            self.shape = F if len(self.steps) == 1 else None  # the first attempt's fold only
+        def _restore_state(self, snap):
+            super()._restore_state(snap)
+            self.shape = None
+        def take_distortion_flags(self):
+            result, self.flags = self.flags, []
+            return result
+
+    pb = FoldProblem()
+    block = liquid_driver(P).events.to_dict()
+    block["jetcore"] = {"enabled": True, "far_kinks": "recentre"}
+    drv = _events_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-6),
+                         events=EventSettings.from_dict(block), max_steps=1)
+    made_ring_cut(drv, pb)
+    drv._stop = lambda m: None
+    drv._remesh_checks = lambda m: (m, None)
+    drv._quality_floor_flags = lambda: []
+    drv._failed_step_retry = lambda m, stop: pytest.fail("the ring refine's retry")
+    calls = []
+    inner = fake_fill(calls)
+    def fill(*a, base_check=None, **kw):
+        assert pb.shape is None and len(pb.restored) == 2
+        assert base_check()["ok"]
+        return inner(*a, **kw)
+    monkeypatch.setattr(groovesurgery, "groove_fill", fill)
+    result = drv.run(1e-9)
+    drv.close()
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 1
+    assert len(pb.steps) == 3 and len(calls) == 1 and result["events"]["step_contact_fills"] == 1
+    assert pb.steps[1] == pytest.approx(0.25*pb.steps[0])
+    log = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    retried = [e for e in log if e["event"] == "ring-step-fold-retry"]
+    assert len(retried) == 1
+    assert retried[0]["reading"]["trigger"] == ("step-fold" if first == "fold"
+                                                else "step-failed-inverted")
+    corner = [e for e in log if e["event"] == "ring-step-corner"]
+    assert len(corner) == 1 and corner[0]["reading"]["corner"]["index"] == 0
+    assert corner[0]["reading"]["pre_step_phase"] == "gas"
+    assert corner[0]["reading"]["fold_retry"]["dt"] == pytest.approx(pb.steps[1])
+    assert sum(e["event"] == "step-failed" for e in log) == (2 if first == "inverted" else 1)
+
+
+def test_a_right_angled_gas_corner_is_read_as_the_floor_fill_reads_a_corner(monkeypatch):
+    from faraday_singularity import groove
+    from faraday_singularity.ring import FLOOR_CORNER_RATIO, floor_wedge
+    h, k = 4e-7, 20  # a square ring, counter-clockwise (its gas inside), k chords a side
+    side = np.arange(k) * h
+    L = k * h
+    P = np.concatenate([np.column_stack([side, np.zeros(k)]),
+                        np.column_stack([np.full(k, L), side]),
+                        np.column_stack([L - side, np.full(k, L)]),
+                        np.column_stack([np.zeros(k), L - side])]) + [1e-4, 4.6]
+    n, c = len(P), k  # the corner at (L, 0)
+    assert floor_wedge(P, c, stop_elements=3) is None
+    reading = {"node_count": n, "local_indices": [c-2, c-1, c, c+1, c+2]}
+    monkeypatch.setattr(groove, "gas_share", lambda *a: 1.0)
+    wedge, phase = contact.step_wedge(P, reading, stop_elements=3)
+    assert phase == "gas" and wedge["corner"] and wedge["ratio"] == FLOOR_CORNER_RATIO
+    assert wedge["apex"] == c and FLOOR_CORNER_RATIO * wedge["gap"] < wedge["arc"]
+    fake = liquid_driver(P)
+    fake.s = SimpleNamespace(fold_stop_elements=3)
+    fake._taus = lambda t: {}
+    fake._t = lambda: 1.0
+    req = CollapseDriver._local_ring_fill_request(fake, P, wedge, {"trigger": "t"}, kind="step")
+    assert req["step_fill"]["fold"]["ratio"] == FLOOR_CORNER_RATIO
+
+
+def _fold_problem(P, U, script):
+    """A ring problem whose input is ``base`` (``P`` at first, its node velocity ``U``) and whose
+    solve number ``i`` (from 1) leaves ``script[i]`` (a candidate loop) or the input."""
+    from test_ring_driver import RingProblem
+    from test_step_failure import NetProblem
+
+    class FoldProblem(RingProblem, NetProblem):
+        def __init__(self):
+            super().__init__()
+            self.flags, self.shape, self.steps, self.base = [], None, [], P
+        def interface_loops(self, **kw):
+            X = self.base if self.shape is None else self.shape
+            V = U if self.shape is None else np.zeros_like(X)
+            return [{"r": X[:, 0], "z": X[:, 1], "u_r": V[:, 0], "u_z": V[:, 1],
+                     "vertex": np.arange(len(X)) % 2 == 0,
+                     **({"node_ids": np.arange(len(X))} if kw.get("with_node_ids") else {})}]
+        def run(self, *a, **kw):
+            self.steps.append(kw["timestep"])
+            super().run(*a, **kw)
+            self.shape = script.get(len(self.steps))
+        def _restore_state(self, snap):
+            super()._restore_state(snap)
+            self.shape = None
+        def take_distortion_flags(self):
+            result, self.flags = self.flags, []
+            return result
+
+    return FoldProblem()
+
+
+def _fold_driver(tmp_path, pb, P, max_steps=1):
+    from test_events_plumbing import _events_driver
+    from test_ring_driver import made_ring_cut
+    from faraday_singularity.reconnect import ReconnectSettings
+    block = liquid_driver(P).events.to_dict()
+    block["jetcore"] = {"enabled": True, "far_kinks": "recentre"}
+    drv = _events_driver(tmp_path, pb, ReconnectSettings(delta=1e-3, dt0=1e-6),
+                         events=EventSettings.from_dict(block), max_steps=max_steps)
+    made_ring_cut(drv, pb)
+    _quiet(drv)
+    return drv
+
+
+def _quiet(drv):
+    drv._stop = lambda m: None
+    drv._remesh_checks = lambda m: (m, None)
+    drv._quality_floor_flags = lambda: []
+
+
+def test_a_net_rebuilt_step_uses_only_its_own_log_and_retries_through_the_run_loop(tmp_path):
+    P, U, _ = folded_apex()
+    pb = _fold_problem(P, U, {})
+    line = ("Inverted element: the signed determinant of the Eulerian mapping dx/ds is -1 "
+            "(must be > 0) at integration point 0 of a 2-dimensional element on domain "
+            f"'liquid', around the position ({P[0, 0]:.6g}, {P[0, 1]:.6g}).\n").encode()
+    pb.log_bytes = line  # an earlier step's inversion must be outside every new mark
+    marks, windows = [], []
+
+    def log_size():
+        marks.append(len(pb.log_bytes))
+        return len(pb.log_bytes)
+
+    def log_tail(size=1 << 16):
+        windows.append(size)
+        return pb.log_bytes[-size:].decode() if size else ""
+
+    pb.oomph_log_size, pb.oomph_log_tail = log_size, log_tail
+    original_run = pb.run
+
+    def run(*args, **kwargs):
+        original_run(*args, **kwargs)
+        if len(pb.steps) in (1, 3):
+            pb.remesh_count += 1  # the net's accepted rebuild, on two separate steps
+        if len(pb.steps) == 1:
+            pb.log_bytes += line  # only the first step has a current inversion report
+
+    pb.run = run
+    drv = _fold_driver(tmp_path, pb, P, max_steps=2)
+    from faraday_singularity.mesh import Focus
+
+    pb.active_mesh_template().focus = Focus(size=1e-6, radius=1e-3, grading=0.3)
+    result = drv.run(1e-9)
+    drv.close()
+    assert result["stop"]["reason"] == "max-steps" and result["steps"] == 2
+    assert len(pb.steps) == 3 and len(pb.restored) == 1
+    assert pb.steps[1] == pytest.approx(0.25 * pb.steps[0])
+    assert windows == [len(line), 0]  # the second net rebuild cannot reuse the first log line
+    assert marks[0] == len(line) and marks[-1] == 2 * len(line)
+    log = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    retry = [x for x in log if x["event"] == "ring-step-fold-retry"]
+    assert len(retry) == 1 and retry[0]["reading"]["trigger"] == "step-inverted"
+    assert retry[0]["reading"]["net_rebuilds"] == 1
+
+
+def test_native_log_size_and_tail_use_byte_offsets(tmp_path, monkeypatch):
+    from faraday_singularity.problem import FaradayProblem
+    from pyoomph import _pyoomph_core
+
+    path = tmp_path / "native.log"
+    initial = "earlier step: \u03b2\n".encode()
+    current = b"around the position (1.73599e-05, 4.67326)\n"
+    path.write_bytes(initial)
+    flushed = []
+    monkeypatch.setattr(_pyoomph_core, "_write_to_log_file", lambda s: flushed.append(s))
+    pb = SimpleNamespace(logfile_name=path.name, get_output_directory=lambda name: str(path))
+    mark = FaradayProblem.oomph_log_size(pb)
+    with path.open("ab") as stream:
+        stream.write(current)
+    size = FaradayProblem.oomph_log_size(pb)
+    assert mark == len(initial) and size == len(initial) + len(current)
+    assert FaradayProblem.oomph_log_tail(pb, size-mark) == current.decode()
+    assert FaradayProblem.oomph_log_tail(pb, 0) == "" and len(flushed) == 4
+
+
+def test_a_restart_from_the_fill_after_a_fold_retry_takes_the_same_capped_step(tmp_path, monkeypatch):
+    import sys
+    from test_groove_driver import fake_fill
+    from faraday_singularity import groovesurgery
+    P, U, F = folded_apex()
+    _, Q = corner_cluster()
+    pb = _fold_problem(P, U, {1: F, 2: Q})
+    drv = _fold_driver(tmp_path / "run", pb, P)
+    calls = []
+    inner = fake_fill(calls)
+    monkeypatch.setattr(groovesurgery, "groove_fill",
+                        lambda *a, base_check=None, **kw: inner(*a, **kw))
+    result = drv.run(1e-9)
+    drv.close()
+    assert result["steps"] == 1 and len(calls) == 1 and len(pb.steps) == 3
+    post = sorted((tmp_path / "run" / "states").glob("postcut_e*.json"))[-1]
+    meta = json.loads(post.read_text())
+    assert meta["fold_cap"] == {"t": meta["time"], "dt": pytest.approx(pb.steps[1])}
+    assert meta["fold_retry"]["input"] == contact.input_key(P[:, 0], P[:, 1])
+
+    from faraday_singularity import surgery
+    monkeypatch.setattr(surgery, "restore_cut", lambda problem, record: setattr(problem, "cut", record))
+
+    def restarted(meta, name):
+        again = _fold_problem(P, U, {})
+        again.ringed, again.t = True, meta["time"]
+        again.ring, again.events = meta["ring"], list(meta["events"])
+        d = CollapseDriver(again, drv.s, tmp_path / name, reconnect=drv.reconnect,
+                           events=drv.events)
+        d.restore(meta)
+        _quiet(d)
+        d.s = dataclasses.replace(d.s, max_steps=d.state.step + 1)
+        d.run(1e-9)
+        d.close()
+        return again.steps
+
+    import dataclasses
+    assert restarted(meta, "again") == [pytest.approx(pb.steps[2])]
+    older = {k: v for k, v in meta.items() if k not in ("fold_cap", "fold_retry")}
+    assert restarted(older, "older")[0] > 1.5 * pb.steps[2]  # an older dump: no cap, as before
+
+
+def test_a_second_fold_after_a_fill_at_the_same_time_is_retried_again(tmp_path, monkeypatch):
+    from test_groove_driver import fake_fill
+    from faraday_singularity import groovesurgery
+    P, U, F = folded_apex()
+    _, Q = corner_cluster()
+    filled = P.copy()
+    filled[len(P)//2] += [1e-9, 0.0]  # the fill's new input, away from the apex
+    pb = _fold_problem(P, U, {1: F, 2: Q, 3: F})
+    drv = _fold_driver(tmp_path, pb, P)
+    calls = []
+    inner = fake_fill(calls)
+    def fill(*a, base_check=None, **kw):
+        pb.base = filled
+        return inner(*a, **kw)
+    monkeypatch.setattr(groovesurgery, "groove_fill", fill)
+    result = drv.run(1e-9)
+    drv.close()
+    assert result["steps"] == 1 and len(calls) == 1 and len(pb.steps) == 4
+    log = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    retried = [e for e in log if e["event"] == "ring-step-fold-retry"]
+    assert len(retried) == 2 and retried[0]["time"] == retried[1]["time"]
+    assert retried[0]["input"] != retried[1]["input"]
+    assert retried[1]["input"] == contact.input_key(filled[:, 0], filled[:, 1])
+    assert pb.steps[2] == pytest.approx(pb.steps[1])  # the cap stays at the fill's time
+    assert pb.steps[3] == pytest.approx(0.25 * pb.steps[2])
+    assert not any(e["event"] == "ring-step-corner" for e in log)
+
+
+@pytest.mark.parametrize("fillable", [True, False])
+def test_a_retry_that_folds_again_is_never_accepted(tmp_path, monkeypatch, fillable):
+    from test_groove_driver import fake_fill
+    from faraday_singularity import groovesurgery, ringcontact
+    P, U, F = folded_apex()
+    pb = _fold_problem(P, U, {1: F, 2: F})
+    drv = _fold_driver(tmp_path, pb, P)
+    accepted = []
+    rows = drv._write_row
+    drv._write_row = lambda m, dt, *a: (accepted.append(pb.shape is not None), rows(m, dt, *a))
+    calls = []
+    inner = fake_fill(calls)
+    def fill(*a, base_check=None, **kw):
+        assert pb.shape is None and len(pb.restored) == 2  # on the restored input
+        return inner(*a, **kw)
+    monkeypatch.setattr(groovesurgery, "groove_fill", fill)
+    if not fillable:
+        monkeypatch.setattr(ringcontact, "step_wedge", lambda *a, **kw: (None, "liquid"))
+    result = drv.run(1e-9)
+    drv.close()
+    assert not any(accepted)  # no folded candidate became a step
+    assert pb.steps[1] == pytest.approx(0.25 * pb.steps[0])
+    log = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in log if e["event"].startswith("ring-step")] == [
+        "ring-step-fold-retry", "ring-step-fold-again", "ring-step-corner"]
+    again = next(e for e in log if e["event"] == "ring-step-fold-again")
+    assert again["reading"]["consumed"] is True and again["reading"]["trigger"] == "step-fold"
+    if fillable:
+        assert result["stop"]["reason"] == "max-steps" and result["steps"] == 1
+        assert len(calls) == 1 and len(pb.steps) == 3
+    else:
+        assert result["stop"]["reason"] == "step-failed" and result["steps"] == 0
+        assert result["stop"]["trigger"] == "stepped-contact-unhandled" and not calls
+        assert result["stop"]["contact"]["pre_step_phase"] == "liquid"
+        assert len(pb.steps) == 2 and pb.shape is None
