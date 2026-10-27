@@ -1342,3 +1342,32 @@ def test_a_large_fills_interior_midpoints_are_gas_to_g2(monkeypatch):
     assert "G2" in c["hard"] and c["G2"] > 2.0 * limit
     c, _, _ = g2(change=math.nan)
     assert "G2" in c["hard"]
+
+
+def test_a_fold_cascade_that_needs_a_fourth_refine_is_met_in_one_state():
+    """r1 (fix18 at 928dbd6) at step 10612 and r1h (h8 at ef8edca) at 10745: a closing gas fold of the ring refined by halves
+    (3.4e-5, 1.6e-5, 4.5e-6), its third mesh carrying an element of 1.8e-6 still above the floor:
+    with three tries per state the run stopped there; a fourth, as the restart made, met it. Each
+    refine is its own audited rebuild (``_ring_refine_once`` / ``_ring_liquid_refine``)."""
+    import faraday_singularity.driver as dv
+
+    assert dv.RING_REFINE_TRIES >= 4
+    Ls = [3.4e-5, 1.6e-5, 4.5e-6, 1.8e-6, 5e-7]  # the last below refine_ratio h_floor
+    made = []
+    fake = SimpleNamespace(s=SimpleNamespace(refine_ratio=1.5), _h_floor=lambda: 7.8e-7)
+
+    def stop_at(i):
+        return {"reason": "interface-unresolved", "trigger": "fold-kink", "chain": "ring",
+                "L": Ls[i], "i": i}
+
+    fake._ring_refine_due = lambda st: st is not None and st["L"] > 1.5 * 7.8e-7
+    fake._ring_reading = lambda st: st
+
+    def once(m, reading, attempt):
+        made.append((attempt, reading["L"]))
+        return m, stop_at(reading["i"] + 1)
+    fake._ring_liquid_refine = once
+    fake._ring_refine_once = once
+    m, stop = CollapseDriver._ring_refine(fake, {}, stop_at(0))
+    assert [a for a, _ in made] == [1, 2, 3, 4] and stop["L"] == 5e-7
+    assert stop["ring_refines"] == 4
