@@ -265,6 +265,7 @@ def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict | None, scales: 
               "R4": abs(after["KE"] - moved["KE"]),
               "R5": abs(poly["after"]["A"] - poly["before"]["A"] - dA),
               "R6": abs(moved["KE"] - before["KE"] - KE_fill)}
+    grid_r2 = values["R2"]  # the midpoint rule's, kept beside the cell reading
     if moved_change is not None:  # the cell reading never replaces a value that is not finite
         values["R2"] = abs(moved_change) if math.isfinite(values["R2"]) else math.nan
     # the fill's volume signed in R1's balance, its magnitude R1's scale (a removal, such as a
@@ -289,7 +290,8 @@ def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict | None, scales: 
     def named(d):
         return {name(k): v for k, v in d.items()}
 
-    return {**named(values), "limits": named(limits),
+    extra = {name("R2") + "_grid": grid_r2} if moved_change is not None else {}
+    return {**named(values), **extra, "limits": named(limits),
             "relative": named({k: values[k] / scale[k] if scale[k] else math.nan
                                for k in values}),
             "flags": [name(k) for k in flags],
@@ -503,6 +505,7 @@ def _ring_cut(pb, events, s, out: Path, record: dict, progress: dict, request: d
     from .events import predict_unlocated
     from .reconnect import revolved_volume
     from .ring import RingCutRefused, closed, loop_record, ring_cut_geometry
+    from .ringcontact import momentum_change, surface_cells
     from .surgery import (INTERFACE, LOCAL_RADIUS, BudgetUnclosed, CutFailed, CutRefused,
                           _axis_spans_of_mesh, _jsonable, _keep, _named_chains, box_grid,
                           box_integrals,
@@ -585,6 +588,7 @@ def _ring_cut(pb, events, s, out: Path, record: dict, progress: dict, request: d
     box_before.pop("fill")
     box20_before = box_integrals(pb, grid20)
     poly_before = box_polyline_budgets([cavity, bubble], g.z_mid, R_b, s.reservoir_depth)
+    cells_before = surface_cells(pb, grid, [cavity, bubble], s.reservoir_depth)  # R2, by cell
     U_close = abs(float(seg["u_z"][g.i_b]) - float(seg["u_z"][g.i_t]))
     scales = {"V_fill": g.V_fill, "U": U_close, "P_ref": g.V_fill * U_close,
               "KE_ref": 0.5 * g.V_fill * U_close**2}
@@ -678,6 +682,11 @@ def _ring_cut(pb, events, s, out: Path, record: dict, progress: dict, request: d
     filled = box_integrals(pb, grid, {"fill": g.fill})["fill"]
     fill.update(Pz_fill=filled["Pz"], KE_fill=filled["KE"], V_grid=filled["V_grid"])
     record["fill"] = fill
+    # R2 the transfer's change alone: the filled column read as gas after the rebuild
+    cells_after = surface_cells(pb, grid, [open_new, Chain(closed(L_new), ("loop", "loop"))],
+                                s.reservoir_depth, region=g.fill)
+    moved = momentum_change(grid, {"_cells": cells_before}, {"_cells": cells_after},
+                            cutoff=False)
 
     stage("projection")
     record["projection"] = {}
@@ -708,7 +717,9 @@ def _ring_cut(pb, events, s, out: Path, record: dict, progress: dict, request: d
                               {"before": box_before, "after_transfer": box_transfer,
                                "after_projection": box_after}, box, scales,
                               {"A_cl": g.A_cl, "A_rem": g.A_rem},
-                              sigma={"V": ring.sigma_V, "Pz": ring.sigma_Pz, "KE": ring.sigma_KE})
+                              sigma={"V": ring.sigma_V, "Pz": ring.sigma_Pz, "KE": ring.sigma_KE},
+                              moved_change=moved["change"])
+    closures["R2_split"] = moved  # the reading's split; R2_grid the midpoint rule's R2
     closures["global_identity"] = {x: record["projection"].get(x, math.nan)
                                    for x in ("delta_Pz", "Pi_on_bottom")}
     record["closures"] = closures
@@ -771,6 +782,7 @@ def _ring_removal(pb, events, s, out: Path, record: dict, progress: dict, reques
     from .events import predict_unlocated
     from .reconnect import revolved_volume
     from .ring import closed, loop_record, signed_area
+    from .ringcontact import momentum_change, surface_cells
     from .surgery import (LOCAL_RADIUS, BudgetUnclosed, CutFailed, CutRefused,
                           _axis_spans_of_mesh, _jsonable, _keep, _named_chains, box_grid,
                           box_integrals,
@@ -832,6 +844,7 @@ def _ring_removal(pb, events, s, out: Path, record: dict, progress: dict, reques
     box20_before = box_integrals(pb, grid20)
     ring_chain = Chain(Q, ("loop", "loop"))
     poly_before = box_polyline_budgets([cavity, ring_chain], z_c, R_b, s.reservoir_depth)
+    cells_before = surface_cells(pb, grid, [cavity, ring_chain], s.reservoir_depth)  # Q2
     U_ring = float(U.max()) if len(U) else 0.0
     scales = {"V_fill": V_ring, "U": U_ring, "P_ref": V_ring * U_ring,
               "KE_ref": 0.5 * V_ring * U_ring**2}
@@ -895,6 +908,10 @@ def _ring_removal(pb, events, s, out: Path, record: dict, progress: dict, reques
     filled = box_integrals(pb, grid, {"fill": L})["fill"]
     fill.update(Pz_fill=filled["Pz"], KE_fill=filled["KE"], V_grid=filled["V_grid"])
     record["fill"] = fill
+    # Q2 the transfer's change alone: the ring's former gas read as gas after the rebuild
+    cells_after = surface_cells(pb, grid, [open_new], s.reservoir_depth, region=Q)
+    moved = momentum_change(grid, {"_cells": cells_before}, {"_cells": cells_after},
+                            cutoff=False)
 
     stage("projection")
     record["projection"] = {}
@@ -928,7 +945,8 @@ def _ring_removal(pb, events, s, out: Path, record: dict, progress: dict, reques
                                "after_projection": box_after}, box, scales,
                               {"A_cl": 0.0, "A_rem": revolved_area(Q)},
                               sigma={"V": ring.sigma_V, "Pz": ring.sigma_Pz, "KE": ring.sigma_KE},
-                              prefix="Q")
+                              prefix="Q", moved_change=moved["change"])
+    closures["Q2_split"] = moved  # the reading's split; Q2_grid the midpoint rule's Q2
     closures["global_identity"] = {x: record["projection"].get(x, math.nan)
                                    for x in ("delta_Pz", "Pi_on_bottom")}
     record["closures"] = closures

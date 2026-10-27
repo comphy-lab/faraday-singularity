@@ -284,6 +284,7 @@ def _sheet_rupture(pb, events, s, out: Path, record: dict, progress: dict, reque
 
     from .events import predict_unlocated
     from .ring import closed
+    from .ringcontact import momentum_change, surface_cells
     from .ringsurgery import (CORNER_TOL, _axis_ends, _base_record, _corners, _focus_regions,
                               _node_sets, _rebuild, _ring_closures, _transfer_check)
     from .surgery import (INTERFACE, BudgetUnclosed, CutFailed, CutRefused, _axis_spans_of_mesh,
@@ -357,6 +358,9 @@ def _sheet_rupture(pb, events, s, out: Path, record: dict, progress: dict, reque
     rings_before = [Chain(closed(L), ("loop", "loop")) for L in loops]
     poly_before = box_polyline_budgets([c for _, c in named] + rings_before, g["z_c"], R_b,
                                        s.reservoir_depth, r_centre=g["r_c"])
+    # S2 the transfer's change alone: the rim it removes read as gas before the rebuild
+    cells_before = surface_cells(pb, grid, [c for _, c in named] + rings_before,
+                                 s.reservoir_depth, region=g["removed"])
     U = float(g["U_max"]) if math.isfinite(g["U_max"]) else 0.0
     scales = {"V_fill": g["V_rim"], "U": U, "P_ref": g["V_rim"] * U,
               "KE_ref": 0.5 * g["V_rim"] * U**2}
@@ -433,6 +437,8 @@ def _sheet_rupture(pb, events, s, out: Path, record: dict, progress: dict, reque
     rings_after = [Chain(closed(L), ("loop", "loop")) for L in new_loops]
     poly_after = box_polyline_budgets([c for _, c in new_named] + rings_after, g["z_c"], R_b,
                                       s.reservoir_depth, r_centre=g["r_c"])
+    moved = momentum_change(grid, {"_cells": cells_before}, {"_cells": surface_cells(
+        pb, grid, [c for _, c in new_named] + rings_after, s.reservoir_depth)})
 
     stage("projection")
     record["projection"] = {}
@@ -470,7 +476,8 @@ def _sheet_rupture(pb, events, s, out: Path, record: dict, progress: dict, reque
                                "after_projection": box_after}, box, scales,
                               {"A_cl": g["A_cap"], "A_rem": g["A_rim"]},
                               sigma={"V": ring.sigma_V, "Pz": ring.sigma_Pz, "KE": ring.sigma_KE},
-                              prefix="S")
+                              prefix="S", moved_change=moved["change"])
+    closures["S2_split"] = moved  # the reading's split; S2_grid the midpoint rule's S2
     closures["global_volume"] = {"delta_V": global_after["volume"] - global_before["volume"],
                                  "V_rim": removed["V"]}
     closures["global_identity"] = {x: record["projection"].get(x, math.nan)

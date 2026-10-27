@@ -366,29 +366,54 @@ def axial_sampler(problem, gas=None):
     return sampler
 
 
+def surface_cells(problem, grid: dict, chains, reservoir_depth: float, region=None) -> dict:
+    """The readings of :func:`cell_readings` of ``grid`` on the problem's present field, the gas
+    that the polylines of ``chains`` bound (:func:`gas_of`); with ``region`` (a surgery's own
+    half-section, a polygon: the region it fills, read after its rebuild, or removes, read
+    before it) that region read as gas too, by the midpoint samples and the liquid parts alike
+    (:func:`axial_sampler`), so that :func:`momentum_change` is the transfer's change alone."""
+    from shapely.geometry import Polygon
+
+    gas = gas_of(chains, reservoir_depth)
+    if region is None:
+        return cell_readings(grid, gas, axial_sampler(problem))
+    own = (region if hasattr(region, "geom_type")
+           else Polygon(np.asarray(region, dtype=float))).buffer(0)
+    return cell_readings(grid, gas.union(own), axial_sampler(problem, gas=own))
+
+
 def plain_sample(sampled: dict) -> dict:
     """A sample of :func:`sample` as the record keeps it: without its cells' readings."""
     return {k: v for k, v in sampled.items() if not k.startswith("_")}
 
 
+def grid_steps(grid: dict) -> tuple[float, float, float]:
+    """The centre's radius ``r_c``, the radial and the angular step of a polar grid: a disc about
+    ``(r_c, z)`` (``surgery.site_grid``, ``2 pi / n``) or the half-disc on the axis
+    (``surgery.box_grid``, without ``r_c``, ``pi / n``)."""
+    if "r_c" in grid:
+        return float(grid["r_c"]), grid["R"] / grid["n"], 2.0 * math.pi / grid["n"]
+    return 0.0, grid["R"] / grid["n"], math.pi / grid["n"]
+
+
 def _cells(grid: dict, index, points: int = 3):
-    """The polar cells ``index`` of ``grid`` (``surgery.site_grid``) as polygons: each within half
-    a radial step of its sample's distance from the centre and half an angular step of its
-    angle (``points`` along each arc), at ``r >= 0`` (a cell whose midpoint lies off the axis can
-    reach across it; the domain ends there)."""
+    """The polar cells ``index`` of ``grid`` (``surgery.site_grid`` or ``surgery.box_grid``,
+    :func:`grid_steps`) as polygons: each within half a radial step of its sample's distance from
+    the centre and half an angular step of its angle (``points`` along each arc), at ``r >= 0``
+    (a cell whose midpoint lies off the axis can reach across it; the domain ends there)."""
     import shapely
 
-    h_rho, h_th = grid["R"] / grid["n"], 2.0 * math.pi / grid["n"]
-    half = shapely.box(0.0, grid["z"] - 2.0 * grid["R"], grid["r_c"] + 2.0 * grid["R"],
+    r_c, h_rho, h_th = grid_steps(grid)
+    half = shapely.box(0.0, grid["z"] - 2.0 * grid["R"], r_c + 2.0 * grid["R"],
                        grid["z"] + 2.0 * grid["R"])
     out = []
     for k in np.asarray(index, dtype=int):
         rho = float(grid["rho"][k])
-        th = math.atan2(float(grid["zz"][k]) - grid["z"], float(grid["r"][k]) - grid["r_c"])
+        th = math.atan2(float(grid["zz"][k]) - grid["z"], float(grid["r"][k]) - r_c)
         t = np.linspace(th - 0.5 * h_th, th + 0.5 * h_th, points)
         ring = np.column_stack([np.cos(t), np.sin(t)])
         P = np.vstack([ring * (rho + 0.5 * h_rho), (ring * max(rho - 0.5 * h_rho, 0.0))[::-1]])
-        out.append(shapely.Polygon(P + np.array([grid["r_c"], grid["z"]])).intersection(half))
+        out.append(shapely.Polygon(P + np.array([r_c, grid["z"]])).intersection(half))
     return np.asarray(out, dtype=object)
 
 
@@ -408,9 +433,9 @@ def cell_readings(grid: dict, gas, sampler) -> dict:
     from .axisrepair import polygon_quadrature_points
 
     uz, found = sampler(grid["r"], grid["zz"])
-    h_rho, h_th = grid["R"] / grid["n"], 2.0 * math.pi / grid["n"]
-    disc = shapely.Point(grid["r_c"], grid["z"]).buffer(grid["R"] * (1.0 + 2.0 / grid["n"]),
-                                                         quad_segs=256)
+    r_c, h_rho, h_th = grid_steps(grid)
+    disc = shapely.Point(r_c, grid["z"]).buffer(grid["R"] * (1.0 + 2.0 / grid["n"]),
+                                                quad_segs=256)
     local = gas.intersection(disc)
     diag = np.hypot(h_rho, np.asarray(grid["rho"]) * h_th)
     if local.is_empty or not len(diag):
@@ -450,7 +475,7 @@ def cell_readings(grid: dict, gas, sampler) -> dict:
             "P_liquid": P_liq, "read_liquid": read}
 
 
-def momentum_change(grid: dict, before: dict, after: dict) -> dict:
+def momentum_change(grid: dict, before: dict, after: dict, *, cutoff: bool = True) -> dict:
     """The axial momentum the rebuild moved within the box (``surgery.box_integrals``' midpoint
     rule, weighted by the box's cutoff ``phi``), its cells read consistently across the rebuild
     (:func:`cell_readings`): a cell whose midpoint lies in the liquid both times counts the change
@@ -472,9 +497,13 @@ def momentum_change(grid: dict, before: dict, after: dict) -> dict:
     A groove fill reads its G2 so with the filled region counted as gas after the rebuild, in
     its midpoint samples (:func:`axial_sampler`) and in its liquid parts alike
     (``groovesurgery``): the change is then the transfer's alone, none of the fill's liquid in
-    any reading on either side."""
+    any reading on either side; the other surgeries of the ring so with their own regions
+    (:func:`surface_cells`). ``cutoff`` false: the cells weighted by their volume alone, as
+    ``surgery.box_integrals`` weighs them without its cutoff (the ring's cut and removal)."""
     cb, ca = before["_cells"], after["_cells"]
-    w = np.asarray(grid["dV"], dtype=float) * np.asarray(grid["phi"], dtype=float)
+    w = np.asarray(grid["dV"], dtype=float)
+    if cutoff:
+        w = w * np.asarray(grid["phi"], dtype=float)
     both = cb["found"] & ca["found"]
     crossed = np.flatnonzero(cb["found"] != ca["found"])
     matched = float(np.sum(w[both] * (ca["uz"][both] - cb["uz"][both])))

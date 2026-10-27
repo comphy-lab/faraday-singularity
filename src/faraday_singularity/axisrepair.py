@@ -169,6 +169,7 @@ def axis_repair(pb, events, reconnect, outdir, chain: str, fold: dict, *, veloci
     rebuild as ``surgery.CutFailed``. ``velocity`` the chain's nodes' velocities (``(n, 2)``)."""
     from .events import predict_unlocated, revolved_area
     from .reconnect import Chain, liquid_axis_spans
+    from .ringcontact import momentum_change, surface_cells
     from .ringsurgery import (CORNER_TOL, RING_BUDGET_LIMITS, _axis_ends, _corners, _inside, _node_sets, _rebuild,
                               _ring_closures, _transfer_check)
     from .surgery import (BudgetUnclosed, CutFailed, _axis_spans_of_mesh, _named_chains,
@@ -214,6 +215,9 @@ def axis_repair(pb, events, reconnect, outdir, chain: str, fold: dict, *, veloci
     old_clean = Chain(np.asarray(fold["old_points"], dtype=float), tuple(chains[chain].end_types))
     poly_before = box_polyline_budgets([old_clean if x == chain else c for x, c in named], z_c,
                                        R_b, depth, r_centre=0.0)
+    # A2 read cell by cell across the rebuild, the gas bounded as the polyline budgets bound it
+    cells_before = surface_cells(pb, grid, [old_clean if x == chain else c for x, c in named],
+                                 depth)
     # the rebuild
     new = Chain(np.asarray(fold["points"], dtype=float).copy(), tuple(chains[chain].end_types))
     geometry = {"chains": [new if x == chain else c for x, c in named], "loops": []}
@@ -266,6 +270,9 @@ def axis_repair(pb, events, reconnect, outdir, chain: str, fold: dict, *, veloci
         raise error
     after = box_integrals(pb, grid, {"sliver": sliver}, cutoff=True)
     filled = after.pop("sliver")
+    # A2 the transfer's change alone: the sliver read as gas after the rebuild
+    moved = momentum_change(grid, {"_cells": cells_before}, {"_cells": surface_cells(
+        pb, grid, [c for _, c in new_named], depth, region=sliver)})
     poly_after = box_polyline_budgets([c for _, c in new_named], z_c, R_b, depth, r_centre=0.0)
     A_rem = float(revolved_area(fold["sliver"][1:]))  # the folded tail, the kept node to the axis
     A_cl = float(revolved_area(fold["sliver"][:2]))  # the new tail, the kept node to the new end
@@ -276,7 +283,8 @@ def axis_repair(pb, events, reconnect, outdir, chain: str, fold: dict, *, veloci
                                "after_projection": after}, None, scales,
                               {"A_cl": A_cl, "A_rem": A_rem},
                               sigma={"V": gs.sigma_V, "Pz": gs.sigma_Pz, "KE": gs.sigma_KE},
-                              prefix="A")
+                              prefix="A", moved_change=moved["change"])
+    closures["A2_split"] = moved  # the reading's split; A2_grid the midpoint rule's A2
     closures["A_V"] = V_sl
     resolved = sliver_quadrature(pb, sliver)
     closures["A_P"] = abs(float(resolved["Pz"]))
