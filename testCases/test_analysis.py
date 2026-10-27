@@ -661,3 +661,18 @@ def test_fit_samples_need_flux_into_the_jet(tmp_path):
     assert jet["fit_points"] == inside.size - 5
     assert jet["excluded"] == {"flux_not_found": 2, "flux_not_positive": 3}
     assert jet["time_free"]["alpha_free"] == pytest.approx(1 / (2 - nu), abs=1e-9)
+
+
+def test_inception_without_a_cone_fit_is_not_ok(tmp_path, monkeypatch):
+    # cone_fit gives NaN with fewer than four nodes in the window or no rising slope: the status
+    # says so instead of "ok" with an empty angle
+    import collapse_analysis
+
+    run = tmp_path / "run"
+    _write_run(run, beta_deg=38.4, nu=nu_of_beta(math.radians(38.4)))
+    monkeypatch.setattr(collapse_analysis, "cone_fit", lambda *a: (math.nan, math.nan, 3))
+    jet = analyse(run)["jets"][0]
+    inc = jet["inception"]
+    assert inc["status"].startswith("no cone fit")
+    assert inc["cone_points"] == 3 and "beta" not in inc
+    assert jet["alpha_cone"] is None and jet["beta_below_taylor"] is None

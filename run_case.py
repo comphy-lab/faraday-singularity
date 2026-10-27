@@ -64,7 +64,8 @@ from faraday_singularity.driver import CollapseDriver, CollapseSettings  # noqa:
 from faraday_singularity.cases import validate_case  # noqa: E402
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
-from faraday_singularity.provenance import create_run_manifest, pyoomph_revision  # noqa: E402
+from faraday_singularity.provenance import (component_commit, create_run_manifest,  # noqa: E402
+                                            pyoomph_revision)
 
 MESH_KEYS = ("h_interface", "h_axis", "h_max", "grading", "interface_points")
 CASE_FIELDS_USED = ("schema", "case_id", "geometry.kind", "time_stepping.scheme",
@@ -171,20 +172,15 @@ def write_json(path: Path, data: dict) -> None:
 
 
 def provenance(case_path: Path) -> dict:
-    def git(*args: str) -> str | None:
-        try:
-            out = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True,
-                                 check=False, timeout=60)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        return out.stdout.strip() if out.returncode == 0 else None
-
-    commit = git("rev-parse", "HEAD")
-    status = git("status", "--porcelain") if commit else None
+    # one reading of the source for the run record and the manifest: provenance.component_commit
+    # (a COMMIT file of an archived tree, else git HEAD of ROOT's own work tree, dirty when
+    # tracked files differ)
+    source = component_commit(ROOT)
+    known = source != "unknown"
     info = {"case_sha256": hashlib.sha256(case_path.read_bytes()).hexdigest(),
-            "component_commit": commit,
-            # None when the state cannot be determined; untracked files count as dirty
-            "component_dirty": None if status is None else bool(status)}
+            "component_commit": source.removesuffix("-dirty") if known else None,
+            # None when the state cannot be determined
+            "component_dirty": source.endswith("-dirty") if known else None}
     try:
         from importlib.metadata import distribution
 
@@ -193,6 +189,13 @@ def provenance(case_path: Path) -> dict:
     except Exception as exc:  # provenance must not stop a run; record why it is missing
         info["pyoomph"] = f"unavailable: {type(exc).__name__}"
     return info
+
+
+def manifest_commit(info: dict) -> str:
+    """The manifest's commit, from the one source reading in ``provenance``'s record."""
+    if info["component_commit"] is None:
+        return "unknown"
+    return info["component_commit"] + ("-dirty" if info["component_dirty"] else "")
 
 
 def main() -> int:
@@ -275,9 +278,7 @@ def main() -> int:
     runner_path = Path(sys.argv[0]).resolve()
     if not runner_path.is_file():
         runner_path = Path(__file__).resolve()
-    commit = recorded_provenance["component_commit"] or "unknown"
-    if recorded_provenance["component_dirty"] is not False:
-        commit += "-dirty"
+    commit = manifest_commit(recorded_provenance)
     manifest = {"schema": "pyoomph-runner-manifest-v1", "case_id": case["case_id"],
                 "case_file": str(args.case.resolve()),
                 "case_sha256": recorded_provenance["case_sha256"],
@@ -288,8 +289,11 @@ def main() -> int:
                                      and not (args.periods is not None and field in {"completion.value", "completion.t_max"})],
                 "component_commit": commit, "pyoomph": pyoomph_revision(),
                 "argv": list(sys.argv),
+                # the entry point (for example the simulationCases wrapper) and run_case.py itself
                 "runner": {"path": str(runner_path),
-                           "sha256": hashlib.sha256(runner_path.read_bytes()).hexdigest()},
+                           "sha256": hashlib.sha256(runner_path.read_bytes()).hexdigest(),
+                           "run_case_sha256": hashlib.sha256(
+                               Path(__file__).resolve().read_bytes()).hexdigest()},
                 "units": "dimensionless; length 1/k; time in capillary units",
                 "case_time_units": "completion and snapshot_dt_periods in forcing periods; other collapse time controls in capillary units",
                 "effective_time_stepping": {"dt_max": dt, "t_end": t_end, "dt_out": dt_out}}

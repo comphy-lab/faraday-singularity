@@ -78,3 +78,6 @@ def test_sigterm_during_a_collapse_run_is_recorded(tmp_path):
     assert manifest["case_id"] == CASE["case_id"]
     assert "completion.t_max" in manifest["case_fields_used"]
     assert "completion.value" not in manifest["case_fields_used"]
+    # the entry point and run_case.py itself are both identified
+    assert manifest["runner"]["run_case_sha256"] == hashlib.sha256(
+        (ROOT / "run_case.py").read_bytes()).hexdigest()

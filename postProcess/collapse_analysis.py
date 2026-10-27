@@ -314,6 +314,10 @@ def inception(run: Path, tab: dict, t_ref: float, settings: dict, inner_factor: 
         out["status"] = "no intermediate window: tangent angle not constant over a factor 2"
         return out
     beta, z0, points = cone_fit(p, jb.index, r_lo, r_hi)
+    if not math.isfinite(beta):
+        out.update(status="no cone fit: fewer than four nodes in the window or no rising slope",
+                   r_hi=r_hi, cone_points=points)
+        return out
     radii = np.geomspace(r_lo, r_hi, 5)
     angles = np.degrees(cone_angles(p, jb.index, radii))
     spread = ang[:k_hi + 1]

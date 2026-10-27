@@ -124,3 +124,20 @@ def test_legacy_import_preserves_explicit_lineage_and_refuses_changed_physics(tm
     record.write_text(json.dumps(saved))
     with pytest.raises(SystemExit, match="no clean recorded source"):
         run_case.restart_record(state, CASE, case, legacy=True)
+
+
+@pytest.mark.parametrize("source, commit, dirty", [
+    ("a" * 40, "a" * 40, False), ("b" * 40 + "-dirty", "b" * 40, True), ("unknown", None, None)])
+def test_provenance_reads_the_source_as_the_manifest_does(tmp_path, monkeypatch, source, commit,
+                                                          dirty):
+    import run_case
+
+    case = tmp_path / "case.json"
+    case.write_text("{}")
+    # the source is read once; the manifest's commit comes from that same reading, so a change
+    # of the tree between the two records cannot make them disagree
+    readings = iter([source, "c" * 40])
+    monkeypatch.setattr(run_case, "component_commit", lambda root: next(readings))
+    info = run_case.provenance(case)
+    assert info["component_commit"] == commit and info["component_dirty"] is dirty
+    assert run_case.manifest_commit(info) == source
