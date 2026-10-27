@@ -154,26 +154,28 @@ def _gmsh_files(run: Path) -> dict[str, str]:
 # The momentum closures of the ring's surgeries read cell by cell across their rebuilds (the
 # groove fill's G2 at its commit, the others' after it): by design these differ from a reference
 # run of an earlier commit, the midpoint rule's value kept beside them as ``<P>2_grid``. Only these
-# keys are mapped (CELL_READ_CLOSURES), and only where the two runs' outputs differ.
+# keys are mapped (CELL_READ_CLOSURES), and only against a matching pre-cell-read record.
 CELL_READ_CLOSURES = ("R", "Q", "S", "A")  # the ring cut, its removal, the rupture, the repair
 CELL_READ_COLUMN = "F2"  # events.txt: the relative value of each surgery's closure 2
 
 
-def _as_midpoint(x):
+def _as_midpoint(x, other):
     """A JSON value with each closures record of CELL_READ_CLOSURES read as its reference's: its
     ``<P>2`` the midpoint rule's ``<P>2_grid`` (the cell reading present and finite, asserted),
     ``relative[<P>2]`` recomputed from it against ``scales["P_ref"]`` as ``ringsurgery.
-    _ring_closures`` computes it, ``<P>2_grid`` and ``<P>2_split`` dropped; nothing else."""
+    _ring_closures`` computes it, ``<P>2_grid`` and ``<P>2_split`` dropped; nothing else.
+    Map only where the matching record in ``other`` has ``<P>2`` without ``<P>2_grid``.
+    When both records use the cell reading, every key stays strict."""
     import math
 
-    if isinstance(x, list):
-        return [_as_midpoint(v) for v in x]
-    if not isinstance(x, dict):
+    if isinstance(x, list) and isinstance(other, list) and len(x) == len(other):
+        return [_as_midpoint(v, w) for v, w in zip(x, other)]
+    if not isinstance(x, dict) or not isinstance(other, dict):
         return x
-    out = {k: _as_midpoint(v) for k, v in x.items()}
+    out = {k: _as_midpoint(v, other.get(k)) for k, v in x.items()}
     for P in CELL_READ_CLOSURES:
         key = f"{P}2"
-        if f"{key}_grid" not in out:
+        if f"{key}_grid" not in out or key not in other or f"{key}_grid" in other:
             continue
         cell = out[key]
         assert isinstance(cell, (int, float)) and math.isfinite(cell), (key, cell)
@@ -196,13 +198,14 @@ def _midpoint_relative(closures: dict, P: str) -> float | None:
     return rel if math.isfinite(rel) else None
 
 
-def _events_rows_as_midpoint(text: str, run: Path) -> str:
+def _events_rows_as_midpoint(text: str, run: Path, other: Path) -> str:
     """events.txt with the CELL_READ_COLUMN of each row of a cell-read surgery read as the
     midpoint rule's, formatted as the row writes it: a row whose record (``events/event_<k>.json``)
     holds ``<P>2_grid`` for the prefix its kind takes (as ``CollapseDriver._write_ring_event_row``
     takes it). The exported cell of such a row must first equal its record's cell-read value
     (``relative[<P>2]``, as the row writes it): a wrong, missing or unparsable cell fails. Every
-    other row and column as it is."""
+    other row and column as it is. Map only against a matching record in ``other`` that
+    has the pre-cell-read closure; two cell-read tables are compared strictly."""
     from faraday_singularity.driver import _table_cell
 
     head, *rows = text.splitlines()
@@ -223,7 +226,10 @@ def _events_rows_as_midpoint(text: str, run: Path) -> str:
             assert col < len(cells) and cells[col] == exported, (
                 f"events.txt row {cells[k_col]}: {CELL_READ_COLUMN} "
                 f"{cells[col] if col < len(cells) else None!r} is not its record's {exported!r}")
-            cells[col] = _table_cell(_midpoint_relative(closures, prefix))
+            other_path = other / path.relative_to(run)
+            other_closures = (json.loads(other_path.read_text()).get("closures") or {})
+            if f"{prefix}2" in other_closures and f"{prefix}2_grid" not in other_closures:
+                cells[col] = _table_cell(_midpoint_relative(closures, prefix))
         out.append("\t".join(cells))
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
@@ -232,10 +238,10 @@ def _same_outputs(a: Path, b: Path, *, strip=None, head_only=()) -> list[str]:
     """Every file of two run directories (but pyoomph's own, under ``_*``) the same: to the byte,
     but the wall-time column of ``collapse.txt`` and the wall times of the JSON records; and the
     files gmsh wrote for them (``_gmsh``) the same, by name and hash, none deleted in one only.
-    Where two runs differ, the cell-read closures alone are read as the midpoint rule's
+    Against matching pre-cell-read records, the cell-read closures alone use the midpoint rule
     (CELL_READ_CLOSURES: ``<P>2`` from ``<P>2_grid``; in events.txt the CELL_READ_COLUMN of
     those surgeries' rows only, from their records, each table's such rows checked against its own
-    records always).
+    records always). Two cell-read records and their table cells remain strict.
 
     For a run of ``b`` with a part of the block that ``a``'s lacks (``test_jetcore_identity``,
     ``test_groove_identity``): ``strip`` removes from every JSON record, and from every line of
@@ -264,14 +270,15 @@ def _same_outputs(a: Path, b: Path, *, strip=None, head_only=()) -> list[str]:
                 assert cu[:wall] + cu[wall + 1:] == cv[:wall] + cv[wall + 1:], name
         elif name.endswith(".json"):
             jx, jy = (strip(_without_wall(json.loads(f.read_text()))) for f in (x, y))
-            assert jx == jy or _as_midpoint(jx) == _as_midpoint(jy), name
+            assert jx == jy or _as_midpoint(jx, jy) == _as_midpoint(jy, jx), name
         elif name == "events.jsonl" and filtered:
             lx, ly = ([strip(json.loads(u)) for u in f.read_text().splitlines()] for f in (x, y))
             assert lx == ly, name
         elif name == "events.txt":
             # each table's cell-read rows checked against their own records, always (a table
             # that keeps a reference's F2 against its own record fails even when byte-identical)
-            mx, my = (_events_rows_as_midpoint(f.read_text(), run) for f, run in ((x, a), (y, b)))
+            mx, my = (_events_rows_as_midpoint(f.read_text(), run, other)
+                      for f, run, other in ((x, a, b), (y, b, a)))
             if x.read_bytes() != y.read_bytes():
                 assert mx == my, name
         else:

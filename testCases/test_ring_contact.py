@@ -1659,6 +1659,7 @@ def test_the_identity_comparator_maps_only_the_cell_read_closures(tmp_path):
                     2: {"kind": "liquid-cut", "closures": {"F2": 0.02}}}
     head = run("head", rows(cell / 2e-10, 0.02), head_records)
     fem_pins._same_outputs(ref, head)
+    fem_pins._same_outputs(head, ref)
     # an unrelated row's F2 changed: a failure
     bad = run("bad", rows(cell / 2e-10, 999.0), head_records)
     with pytest.raises(AssertionError, match="events.txt"):
@@ -1711,3 +1712,45 @@ def test_the_identity_comparator_maps_only_the_cell_read_closures(tmp_path):
     assert json.loads((ref0 / "events" / "event_001.json").read_text())["closures"][
         "relative"]["R2"] is None
     fem_pins._same_outputs(ref0, head0)
+
+
+@pytest.mark.parametrize("prefix,kind", [("R", "piercing"), ("Q", "ring-collapse"),
+                                        ("S", "sheet-rupture"), ("A", "axis-repair")])
+@pytest.mark.parametrize("changed", ["cell", "split", "relative", "grid"])
+def test_two_cell_read_runs_keep_strict_closure_identity(tmp_path, prefix, kind, changed):
+    """Two cell-read records must retain their cell, split, grid and exported relative value."""
+    import copy
+
+    import test_events_fem as fem_pins
+    from faraday_singularity.driver import EVENT_COLUMNS, _table_cell
+
+    key = prefix + "2"
+    before = {key: 1e-11, key + "_grid": 3e-10, key + "_split": {"change": 1e-11},
+              "scales": {"P_ref": 2e-10}, "relative": {key: 0.05}}
+    after = copy.deepcopy(before)
+    if changed == "cell":
+        after[key] *= 2
+        after["relative"][key] *= 2
+    elif changed == "split":
+        after[key + "_split"]["change"] *= 2
+    elif changed == "relative":
+        after["relative"][key] *= 2
+    else:
+        after[key + "_grid"] *= 2
+
+    def run(name, closures):
+        path = tmp_path / name
+        (path / "events").mkdir(parents=True)
+        (path / "events" / "event_001.json").write_text(
+            json.dumps({"kind": kind, "closures": closures}))
+        row = {"k": 1, "kind": kind, "F2": closures["relative"][key]}
+        (path / "events.txt").write_text(
+            "# " + "\t".join(EVENT_COLUMNS) + "\n"
+            + "\t".join(_table_cell(row.get(col)) for col in EVENT_COLUMNS) + "\n")
+        return path
+
+    a, same, b = run("a", before), run("same", before), run("b", after)
+    fem_pins._same_outputs(a, same)
+    for left, right in [(a, b), (b, a)]:
+        with pytest.raises(AssertionError):
+            fem_pins._same_outputs(left, right)
