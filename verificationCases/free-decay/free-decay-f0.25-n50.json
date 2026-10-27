@@ -1,0 +1,62 @@
+{
+  "schema": "pyoomph-case-v1",
+  "case_id": "free-decay-f0.25-n50",
+  "geometry": {
+    "kind": "axisymmetric",
+    "coordinates": [
+      "r",
+      "z"
+    ],
+    "frame": "co-moving",
+    "domain": "cylinder of radius j_{1,1}, free-slip bottom and side wall, free surface on top"
+  },
+  "nondimensionalization": {
+    "length": "1/k",
+    "time": "sqrt(rho/(sigma k^3))",
+    "velocity": "sqrt(sigma k/rho)",
+    "pressure": "sigma k"
+  },
+  "physics": {
+    "fluid": {
+      "Oh": 0.04,
+      "Bo": 0.0
+    },
+    "container": {
+      "mode": 1,
+      "depth": 6.283185307179586
+    },
+    "forcing": {
+      "Gamma": 0.0,
+      "detuning": 1.0
+    },
+    "initial": {
+      "amplitude": -0.01
+    }
+  },
+  "tolerances": {
+    "newton": 1e-10
+  },
+  "mesh": {
+    "characteristic_size": 0.0125,
+    "h_interface": 0.0125,
+    "h_axis": 0.0125,
+    "h_max": 0.1,
+    "grading": 0.075,
+    "interface_points": 401,
+    "remeshing": true
+  },
+  "time_stepping": {
+    "scheme": "BDF2",
+    "steps_per_forcing_period": 50
+  },
+  "output": {
+    "cadence": 1.0,
+    "cadence_unit": "forcing periods",
+    "write_states": false
+  },
+  "completion": {
+    "kind": "time",
+    "value": 24,
+    "unit": "forcing periods"
+  }
+}

@@ -1,0 +1,114 @@
+"""Fits of a mode-amplitude history ``a(t)`` for the linear verification cases.
+
+``fit_damped_cosine`` returns the complex rate ``s`` of ``a ~ Re[C exp(s t)]`` for a freely decaying
+mode. ``floquet_exponent`` returns the real Floquet exponent ``mu`` of a subharmonic response, for
+which ``a(t + T) = -exp(mu T) a(t)`` once one Floquet mode dominates (``T`` the forcing period).
+Both expect a single dominant mode in the fitting window; their residuals report how well that holds.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from scipy.optimize import least_squares
+
+
+def _window(t: np.ndarray, a: np.ndarray, t_start: float, t_end: float | None):
+    t = np.asarray(t, dtype=float)
+    a = np.asarray(a, dtype=float)
+    # an output on a window end, up to round-off in the time grid, lies in the window
+    tol = 1e-12 * max(1.0, float(np.max(np.abs(t))))
+    sel = t >= t_start - tol
+    if t_end is not None:
+        sel &= t <= t_end + tol
+    if sel.sum() < 8:
+        raise ValueError(f"too few samples in the fitting window [{t_start}, {t_end}]")
+    return t[sel], a[sel]
+
+
+def fit_damped_cosine(t, a, *, t_start: float, t_end: float | None = None,
+                      omega_guess: float, rate_guess: float = 0.0) -> dict:
+    """Least-squares fit of ``a = A exp(sr t) cos(si t + phi) + c`` on ``[t_start, t_end]``.
+
+    ``c`` absorbs any slow mean offset of the projected amplitude. Returns ``s_real``, ``s_imag``,
+    the relative RMS residual and the window actually used.
+    """
+    tw, aw = _window(t, a, t_start, t_end)
+    t0 = tw[0]
+    x = tw - t0
+    scale = np.max(np.abs(aw))
+
+    def model(p):
+        amp, sr, si, phi, c = p
+        return amp * np.exp(sr * x) * np.cos(si * x + phi) + c
+
+    def resid(p):
+        return (model(p) - aw) / scale
+
+    i0 = int(np.argmax(np.abs(aw[: max(8, len(aw) // 10)])))
+    phi0 = 0.0 if aw[i0] > 0 else np.pi
+    p0 = [scale, rate_guess, omega_guess, phi0 - omega_guess * x[i0], 0.0]
+    sol = least_squares(resid, p0, x_scale="jac", method="lm", xtol=1e-14, ftol=1e-14)
+    _, sr, si, _, c = sol.x
+    rms = float(np.sqrt(np.mean(sol.fun**2)))
+    return {"s_real": float(sr), "s_imag": float(abs(si)), "offset": float(c),
+            "relative_rms_residual": rms, "t_start": float(tw[0]), "t_end": float(tw[-1]),
+            "samples": int(tw.size)}
+
+
+def floquet_exponent(t, a, *, period: float, t_start: float, t_end: float | None = None,
+                     samples_per_period: int = 64) -> dict:
+    """Real Floquet exponent of a subharmonic response from ``a(t + T) = -exp(mu T) a(t)``.
+
+    ``a`` is interpolated onto a uniform grid of ``samples_per_period`` points per forcing period
+    over the window, and the multiplier is the least-squares ratio
+    ``-sum a(t) a(t+T) / sum a(t)**2``. A positive multiplier confirms the subharmonic response; a
+    negative one (a harmonic response) is reported rather than hidden.
+    """
+    tw, aw = _window(t, a, t_start, t_end)
+    # whole periods, up to round-off in the time grid
+    n_periods = int(np.floor((tw[-1] - tw[0]) / period + 1e-9))
+    if n_periods < 2:
+        raise ValueError("need at least two forcing periods in the fitting window")
+    grid = tw[0] + np.arange(n_periods * samples_per_period + 1) * (period / samples_per_period)
+    ag = np.interp(grid, tw, aw)
+    lead, lag = ag[:-samples_per_period], ag[samples_per_period:]
+    multiplier = -float(np.dot(lead, lag) / np.dot(lead, lead))
+    resid = lag + multiplier * lead
+    rel = float(np.sqrt(np.mean(resid**2) / np.mean(lag**2)))
+    out = {"multiplier": multiplier, "relative_rms_residual": rel, "periods": n_periods,
+           "t_start": float(grid[0]), "t_end": float(grid[-1])}
+    out["mu"] = float(np.log(multiplier) / period) if multiplier > 0 else float("nan")
+    return out
+
+
+def floquet_multipliers(t, a, *, period: float, t_start: float, t_end: float | None = None,
+                        modes: int = 3, samples_per_period: int = 64) -> dict:
+    """Floquet multipliers of the ``modes`` slowest components of ``a(t)`` (Prony in the period).
+
+    A sum of ``modes`` Floquet components obeys ``a(t + K T) = sum_j c_j a(t + j T)``,
+    ``j = 0..K-1``, at every phase ``t``; the multipliers are the roots of
+    ``rho^K - sum_j c_j rho^j``. Fitting ``c`` over all phases in the window separates the
+    leading subharmonic exponent from a decaying companion (and from a harmonic component, such
+    as a bulk vortical mode or a weakly nonlinear second harmonic), which bias the single-mode
+    estimate of :func:`floquet_exponent` while they persist. ``mu`` is the largest exponent among
+    real negative multipliers, i.e. the leading subharmonic one.
+    """
+    tw, aw = _window(t, a, t_start, t_end)
+    # whole periods, up to round-off in the time grid
+    n_periods = int(np.floor((tw[-1] - tw[0]) / period + 1e-9))
+    if n_periods < modes + 2:
+        raise ValueError(f"need at least {modes + 2} forcing periods in the fitting window")
+    grid = tw[0] + np.arange(n_periods * samples_per_period + 1) * (period / samples_per_period)
+    ag = np.interp(grid, tw, aw)
+    m = len(ag) - modes * samples_per_period
+    lhs = np.column_stack([ag[j * samples_per_period:j * samples_per_period + m]
+                           for j in range(modes)])
+    rhs = ag[modes * samples_per_period:modes * samples_per_period + m]
+    c, *_ = np.linalg.lstsq(lhs, rhs, rcond=None)
+    rel = float(np.sqrt(np.mean((lhs @ c - rhs) ** 2) / np.mean(rhs**2)))
+    roots = np.roots(np.concatenate([[1.0], -c[::-1]]))
+    sub = [r.real for r in roots if r.real < 0 and abs(r.imag) <= 1e-8 * abs(r)]
+    mu = float(np.log(-max(sub, key=abs)) / period) if sub else float("nan")
+    return {"mu": mu, "multipliers": [[float(r.real), float(r.imag)] for r in roots],
+            "relative_rms_residual": rel, "modes": modes, "periods": n_periods,
+            "t_start": float(grid[0]), "t_end": float(grid[-1])}
