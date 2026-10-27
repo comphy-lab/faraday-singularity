@@ -429,8 +429,12 @@ from .reconnect import (AXIS, BUBBLE_TIP_SIGNS, CONTINUATION_KEYS, CUT_SIZING_MA
                         groove_gap, interface_guard, jet_base_apex, kink_regions, post_cut_record,
                         post_cut_stops, region_spacing, tau_end_reached, tip_jet)
 from .selfcontact import InterfaceSelfIntersection, fold_gap
-from .ringcontact import RingStepContact
+from .ringcontact import RingStepContact, RingStepFold, input_key
 from .singular import singular_time
+
+FOLD_RETRY_FRACTION = 0.25  # the retry of a step folded at a closing corner (batch B)
+FOLD_RETRY_REACH = 8  # steps after its retry within which a crossing records it
+CORNER_LOCATE = 8.0  # node spacings of a corner within which one of the step's inverted elements lies
 
 
 @dataclass(frozen=True)
@@ -861,6 +865,12 @@ class _State:
     # in the ring stage with jetcore's recentred far kinks: the ring's liquid lip, its thinnest
     # section's thickness over the last accepted states ([t, thickness], sheetsurgery.LIP_SAMPLES)
     lip_samples: list = field(default_factory=list)
+    # in the ring stage: the last retry of a step folded at a closing corner (batch B; its input's
+    # key, ``ringcontact.input_key``, consumes the one retry of that input), and the cap of the
+    # steps from its time (``t``, ``dt``), kept apart: a fill leaves the time and the cap but
+    # changes the input, whose own fold is retried again
+    fold_retry: dict | None = None
+    fold_cap: dict | None = None
 
 
 def _in_ulps(dt: float, t: float) -> float | None:
@@ -2972,6 +2982,10 @@ class CollapseDriver:
                     meta["neck_history"] = json.loads(json.dumps(st.neck_history))
                 if st.lip_samples:  # the ring's lip read: other dumps keep their keys
                     meta["lip_samples"] = [[float(x) for x in v] for v in st.lip_samples]
+                if st.fold_retry is not None:  # a fold retried (batch B): other dumps keep keys
+                    meta["fold_retry"] = dict(st.fold_retry)
+                if st.fold_cap is not None:
+                    meta["fold_cap"] = dict(st.fold_cap)
         meta.update(extra)
         path.with_suffix(".json").write_text(json.dumps(meta, indent=1) + "\n")
 
@@ -3136,6 +3150,8 @@ class CollapseDriver:
             st.far_yields = int(meta.get("far_yields", 0))
             st.neck_history = json.loads(json.dumps(meta.get("neck_history") or {}))
             st.lip_samples = [[float(x) for x in v] for v in meta.get("lip_samples") or []]
+            st.fold_retry = dict(meta["fold_retry"]) if meta.get("fold_retry") else None
+            st.fold_cap = dict(meta["fold_cap"]) if meta.get("fold_cap") else None
             if self.events is not None:
                 self.pb.events = [dict(x) for x in meta.get("events") or []]
                 st.legs = [dict(x) for x in meta.get("legs") or []]
@@ -4398,7 +4414,9 @@ class CollapseDriver:
 
         a, b = wedge["pair"]
         mid = 0.5 * (P[a] + P[b])
-        fold = {"ratio": FLOOR_FOLD_RATIO, "stop": 0.0, "stop_elements": self.s.fold_stop_elements}
+        # the wedge's own fold ratio: FLOOR_CORNER_RATIO for a corner (step_wedge)
+        fold = {"ratio": float(wedge.get("ratio", FLOOR_FOLD_RATIO)), "stop": 0.0,
+                "stop_elements": self.s.fold_stop_elements}
         req = _request("ring-fold", "RF", chain="ring", contact=kind, side="gas",
                        fold_gap=wedge["gap"], fold_r=float(mid[0]), fold_z=float(mid[1]),
                        fold_arc=wedge["arc"], fold_h_elem=wedge["h_elem"],
@@ -4414,15 +4432,49 @@ class CollapseDriver:
         if len(loops) != 1:
             return None
         return {"P": np.column_stack([loops[0]["r"], loops[0]["z"]]),
+                "U": np.column_stack([loops[0]["u_r"], loops[0]["u_z"]]),
                 "node_ids": loops[0]["node_ids"].copy(),
-                "remesh_count": self.pb.remesh_count}
+                "remesh_count": self.pb.remesh_count, "t": self._t(),
+                "key": input_key(loops[0]["r"], loops[0]["z"]),
+                "defer": self._defers_distortion()}
+
+    def _fold_retry_due(self, before: dict) -> bool:
+        """Whether a step from this input (its ``key``, :func:`ringcontact.input_key`) may still
+        be retried at a quarter: once per input, which a rollback restores bitwise and a fill or
+        a refine at the same time changes."""
+        retry = self.state.fold_retry
+        return retry is None or retry.get("input") != before.get("key")
+
+    def _ring_input_key(self) -> str | None:
+        """The key of the ring's present input (the state a rollback restored), or None."""
+        loops = self.pb.interface_loops(with_node_ids=True)
+        return input_key(loops[0]["r"], loops[0]["z"]) if len(loops) == 1 else None
 
     def _ring_step_check(self, before: dict):
-        """Reject a candidate local crossing before step counters or gas work are committed."""
-        from .ringcontact import loop_node_map, step_contact
+        """Reject a candidate local crossing before step counters or gas work are committed.
+
+        A candidate that instead folds (a new alternating run) or turns an element inside out
+        (pyoomph's net rebuilt within the step, an inverted element it logged within reach of
+        the corner) at a closing gas corner of its input is never accepted
+        (:class:`RingStepFold`): rolled back and retried once at a quarter of its step, so that
+        the smaller step meets the crossing on a readable input (the stepped contact's fill);
+        with that input's retry spent (``consumed``), the corner is filled on the input or the
+        run stops resumably there (batch B; tangential node redistribution is the principled
+        cure)."""
+        from .ringcontact import loop_node_map, step_contact, step_fold
 
         if self.pb.remesh_count != before["remesh_count"]:
-            return  # no index mapping is inferred across a rebuild
+            # no index mapping is inferred across a rebuild; with the driver's deferred
+            # distortion a rebuild within the step is pyoomph's net for an inverted element
+            at = self._step_inversions() if before.get("defer") else None
+            corner = None if at is None else self._corner_at(before["P"], before["U"], at)
+            if corner is not None:
+                raise RingStepFold({"trigger": "step-inverted", "chain": "ring",
+                                    "net_rebuilds": int(self.pb.remesh_count
+                                                        - before["remesh_count"]),
+                                    "corner": corner, "attempted_time": self._t(),
+                                    "consumed": not self._fold_retry_due(before)})
+            return
         try:
             loops = self.pb.interface_loops(validate=False, with_node_ids=True)
         except RuntimeError as exc:
@@ -4445,10 +4497,20 @@ class CollapseDriver:
                                        "crossing_pairs": loop_crossings(P),
                                        "attempted_time": self._t(),
                                        "attempted_step": self.state.step+1})
+        if reading is None:  # every candidate: a folded one is never accepted
+            mapping = loop_node_map(loops[0]["node_ids"], before["node_ids"])
+            if mapping is not None:
+                fold = step_fold(before["P"][mapping], before["U"][mapping], P)
+                if fold is not None:
+                    raise RingStepFold(dict(fold, attempted_time=self._t(),
+                                            consumed=not self._fold_retry_due(before)))
         if reading is not None:
             mapping = loop_node_map(loops[0]["node_ids"], before["node_ids"])
             reading.update(attempted_time=self._t(), attempted_step=self.state.step+1,
                            before_time=self.state.t_prev)
+            retry = getattr(self.state, "fold_retry", None)
+            if retry is not None and retry["step"] >= self.state.step+1-FOLD_RETRY_REACH:
+                reading["fold_retry"] = dict(retry)  # the retry that led to this crossing
             if mapping is None:
                 reading["unreadable"] = "the loop node identities changed"
             else:
@@ -4457,6 +4519,145 @@ class CollapseDriver:
                                local_node_ids=loops[0]["node_ids"][indices].tolist(),
                                before_local=before["P"][mapping[indices]].tolist())
             raise RingStepContact(reading)
+
+    def _meet_ring_step_fold(self, m: dict, fold: RingStepFold, t: float, dt: float, *,
+                             restored: bool = False) -> dict:
+        """Roll a folded or inverted candidate back to its input and arm one retry of that step
+        at ``FOLD_RETRY_FRACTION`` of it (event ``ring-step-fold-retry``); no global Courant
+        number changes, and the step after the retry grows as every step does. ``restored``: a
+        failed step that :meth:`_failed_step_stop` rolled back already."""
+        discarded = self._distortion_flags()
+        if not restored:
+            self._restore_step_snapshot()
+            self._stop_cache = None
+            m = self.measure()
+        st = self.state
+        cap = FOLD_RETRY_FRACTION * dt
+        st.fold_retry = {"t": t, "input": self._ring_input_key(), "dt": cap, "dt_attempted": dt,
+                         "step": st.step+1, "trigger": fold.reading.get("trigger")}
+        if st.fold_cap is None or st.fold_cap["t"] != t or cap < st.fold_cap["dt"]:
+            st.fold_cap = {"t": t, "dt": cap}
+        self._event("ring-step-fold-retry", m, reading=dict(fold.reading),
+                    dt_attempted=dt, dt_retry=cap, input=st.fold_retry["input"],
+                    discarded_distortion=discarded)
+        return m
+
+    def _step_inversions(self) -> np.ndarray | None:
+        """The positions of the inverted elements pyoomph's log reports for the present step
+        (from ``_log_mark``), or None without any or without the stepped contact's
+        preconditions (the ring stage, recentred far kinks, groove fill enabled)."""
+        events, jet = getattr(self, "events", None), self._jetcore()
+        if events is None or not events.groove.enabled or jet is None \
+                or jet.far_kinks != "recentre" or self._refined_chain() != "ring":
+            return None
+        mark = getattr(self, "_log_mark", None)
+        size = getattr(self.pb, "oomph_log_size", lambda: None)()
+        tail = (self.pb.oomph_log_tail(max(size - mark, 0)) if mark is not None and size is not None
+                else getattr(self.pb, "oomph_log_tail", lambda: "")())
+        found = re.findall(r"around the position \(([-+0-9.eE]+), ([-+0-9.eE]+)\)", tail)
+        return np.array([[float(x) for x in pair] for pair in found]) if found else None
+
+    @staticmethod
+    def _corner_at(P, U, at: np.ndarray) -> dict | None:
+        """The sharpest closing gas corner of the input ``P`` (velocity ``U``) within reach of
+        a reported inverted element ``at``: its printed precision (six significant digits, half
+        a unit in the last) plus ``CORNER_LOCATE`` node spacings of the corner; else None."""
+        from .ring import loop_spacing
+        from .ringcontact import closing_corners
+
+        res = np.vectorize(lambda v: 0.5 * 10.0 ** (math.floor(math.log10(abs(v))) - 5)
+                           if v else 0.0)(at)
+        spacing = loop_spacing(P)
+        best = None
+        for c in closing_corners(P, U):
+            reach = res + CORNER_LOCATE * spacing[c["index"]]
+            near = np.all(np.abs(P[c["index"]] - at) <= reach, axis=1)
+            if near.any() and (best is None or c["turn"] > best["turn"]):
+                best = dict(c, inverted_at=at[near].tolist(), inverted_reported=len(at),
+                            inverted_reach=float(CORNER_LOCATE * spacing[c["index"]]))
+        return best
+
+    def _inverted_corner(self, exc: BaseException) -> dict | None:
+        """After a failed step rolled back: the closing gas corner of its input at which
+        pyoomph's net for an inverted element gave up (``InvertedElementRemeshRequest``), located
+        by an inverted element the log reports within that step (:meth:`_step_inversions`,
+        :meth:`_corner_at`); else None."""
+        if type(exc).__name__ != "InvertedElementRemeshRequest":
+            return None
+        at = self._step_inversions()
+        if at is None:
+            return None
+        loops = self.pb.interface_loops(with_node_ids=True)
+        if len(loops) != 1:
+            return None
+        P = np.column_stack([loops[0]["r"], loops[0]["z"]])
+        U = np.column_stack([loops[0]["u_r"], loops[0]["u_z"]])
+        best = self._corner_at(P, U, at)
+        if best is not None:
+            best.update(node_count=len(P), node_ids=loops[0]["node_ids"].tolist())
+        return best
+
+    def _input_corner(self, corner: dict) -> dict | None:
+        """A corner read on a step's input (its ``r``, ``z``) on the restored input: its index
+        there (the node at exactly that place) and the restored loop's identities; else None."""
+        loops = self.pb.interface_loops(with_node_ids=True)
+        if len(loops) != 1:
+            return None
+        P = np.column_stack([loops[0]["r"], loops[0]["z"]])
+        at = np.flatnonzero((P[:, 0] == corner["r"]) & (P[:, 1] == corner["z"]))
+        if len(at) != 1:
+            return None
+        return dict(corner, index=int(at[0]), node_count=len(P),
+                    node_ids=loops[0]["node_ids"].tolist())
+
+    def _meet_ring_fold_again(self, m: dict, fold: RingStepFold) -> tuple[dict, dict | None]:
+        """A candidate that folds or inverts at a closing corner of an input whose one retry is
+        spent: never accepted. Rolled back to the input (event ``ring-step-fold-again``), then
+        the corner is filled there as an inverted retry's is (:meth:`_meet_ring_corner`), or the
+        run stops resumably on that input (``step-failed``) with the record."""
+        discarded = self._distortion_flags()
+        self._restore_step_snapshot()
+        self._stop_cache = None
+        m = self.measure()
+        self._event("ring-step-fold-again", m, reading=dict(fold.reading),
+                    discarded_distortion=discarded)
+        corner = self._input_corner(fold.reading["corner"])
+        if corner is None:
+            return m, {"reason": "step-failed", "trigger": "stepped-contact-unhandled",
+                       "chain": "ring", "error": "a retried step folded again at a corner the "
+                       "restored input does not hold", "contact": dict(fold.reading),
+                       **self._taus(self._t())}
+        return self._meet_ring_corner(m, corner, trigger=fold.reading.get("trigger"))
+
+    def _meet_ring_corner(self, m: dict, corner: dict, *,
+                          trigger: str = "step-failed-inverted") -> tuple[dict, dict | None]:
+        """Fill the closing gas corner of a rolled-back input whose step, retried at a quarter,
+        folded or turned an element inside out there again (``trigger``): the crossing the retry
+        located, filled on that input by the stepped contact's fill (its gas pocket certified by
+        :func:`step_wedge`, the hard closures and the upward base's check of the groove fill);
+        without an admissible fill a resumable stop (``step-failed``) on that input."""
+        from .ringcontact import step_wedge
+
+        loops = self.pb.interface_loops(with_node_ids=True)
+        P = np.column_stack([loops[0]["r"], loops[0]["z"]])
+        n, c = len(P), int(corner["index"])
+        reading = {"trigger": "stepped-inverted", "chain": "ring", "contact": "inverted",
+                   "node_count": n, "local_indices": [(c + k) % n for k in range(-2, 3)],
+                   "nodes": [(c - 2) % n, (c - 1) % n, (c + 1) % n, (c + 2) % n],
+                   "corner": {k: v for k, v in corner.items() if k != "node_ids"},
+                   "crossings": 0, "fold_retry": dict(self.state.fold_retry or {}),
+                   "again": trigger}
+        wedge, phase = (None, "unreadable")
+        if loops[0]["node_ids"].tolist() == corner["node_ids"]:
+            wedge, phase = step_wedge(P, reading, stop_elements=self.s.fold_stop_elements)
+        reading["pre_step_phase"] = phase
+        self._event("ring-step-corner", m, reading=reading)
+        if wedge is None:
+            return m, {"reason": "step-failed", "trigger": "stepped-contact-unhandled",
+                       "chain": "ring", "error": "a retried step folded or inverted again at a "
+                       "closing corner without an admissible fill", "contact": reading,
+                       **self._taus(self._t())}
+        return self._meet_event(m, self._local_ring_fill_request(P, wedge, reading, kind="step"))
 
     def _meet_ring_step_contact(self, m: dict, contact: RingStepContact) -> tuple[dict, dict | None]:
         """Restore a simple input, then fill its certified gas wedge with hard budgets.
@@ -4901,6 +5102,8 @@ class CollapseDriver:
                     dt = min(dt, s.scale_rate * m["ell"] / rate)
             if st.dt_prev is not None:
                 dt = min(dt, s.growth * st.dt_prev)
+            if st.fold_cap is not None and st.fold_cap["t"] == t:  # a folded step's retry
+                dt = min(dt, st.fold_cap["dt"])
             if self._jetcore_rows is not None and r is not None:  # what set the step, read only
                 self._dt_limiter = self._dt_limiter_of(dt, m, t, focus_courant)
             if dt < self._dt_min():
@@ -4915,10 +5118,21 @@ class CollapseDriver:
             self._step_newton_tolerance = newton_tolerance  # each sub-step's: _post_cut_solve
             defer = self._defers_distortion()
             rebuilds = pb.remesh_count
+            self._log_mark = getattr(pb, "oomph_log_size", lambda: None)()  # this step's log
             try:
                 with self._post_cut_solve():
                     pb.run(t + dt, timestep=dt, maxstep=dt, outstep=False, temporal_error=1.0,
                            newton_solver_tolerance=tol)
+            except RingStepFold as fold:
+                if not fold.reading.get("consumed"):
+                    m = self._meet_ring_step_fold(m, fold, t, dt)
+                    continue
+                m, found = self._meet_ring_fold_again(m, fold)  # never accepted
+                if found is None:
+                    continue
+                stop = (dict(found, failed_step=failed_step_context)
+                        if failed_step_context is not None else found)
+                break
             except RingStepContact as contact:
                 m, found = self._meet_ring_step_contact(m, contact)
                 if found is None:
@@ -4945,6 +5159,19 @@ class CollapseDriver:
                         if failed is not None:  # rolled back: a resumable stop on that state
                             m, stop = failed
                             failed_step_context = dict(stop)
+                            corner = self._inverted_corner(exc)
+                            if corner is not None and self._fold_retry_due(
+                                    {"key": self._ring_input_key()}):
+                                # pyoomph's net gave up at a closing gas corner: the one retry
+                                fold = RingStepFold(dict(corner, trigger="step-failed-inverted"))
+                                m = self._meet_ring_step_fold(m, fold, t, dt, restored=True)
+                                continue
+                            if corner is not None:  # the retry failed there too: fill the corner
+                                m, found = self._meet_ring_corner(m, corner)
+                                if found is None:
+                                    continue
+                                stop = dict(found, failed_step=failed_step_context)
+                                break
                             retry_state = (copy.deepcopy(st.kinks), st.far_yields,
                                            st.last_remesh_step)
                             retry_focus = pb.active_mesh_template().focus
