@@ -126,6 +126,16 @@ For reproducibility checks, set `MKL_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and
 `OPENBLAS_NUM_THREADS=1`. Record these settings with the comparison; threaded linear algebra
 can change the order of floating-point operations.
 
+Runs of one case in fresh processes differ by about 1e-14 relative unless MKL, whose threaded
+solve is the source, runs on one thread (`MKL_NUM_THREADS=1`; `OMP_NUM_THREADS` alone does not do
+it); with it they have agreed to the byte, a restart after a cut included. Compare runs to
+round-off, or set it when a comparison must be exact. Bitwise identity of a restart with the run
+that wrote its state is thus a single-thread property: under multi-threaded Pardiso a restart
+agrees with it to the growth of that round-off along the run, about 3e-7 relative in the axial
+momentum within two steps of the post-cut continuation the tests check. The test suite sets MKL,
+OpenMP and OpenBLAS to one thread, whatever the caller set (`testCases/conftest.py`), in its own
+process and in those it starts.
+
 ## Running
 
 ```bash

@@ -1334,3 +1334,380 @@ def test_a_retry_that_folds_again_is_never_accepted(tmp_path, monkeypatch, filla
         assert result["stop"]["trigger"] == "stepped-contact-unhandled" and not calls
         assert result["stop"]["contact"]["pre_step_phase"] == "liquid"
         assert len(pb.steps) == 2 and pb.shape is None
+
+
+def test_a_fills_g2_reads_its_cells_by_their_liquid_parts_the_fill_read_as_gas():
+    """The groove fill's G2 (r1f at f5, step 13695, event 23 at the floor, r 3.0e-3): the
+    rebuild moved one cell's midpoint across a free surface 3.5e-3 from the fill (its liquid
+    fraction 0.34603 to 0.34603, u_z 713): its whole cell, 2.51e-9 of the grid's 2.70e-9 against
+    1.62e-9, the cells in the liquid both times 1.9e-10. G2 reads every cell by its liquid part
+    with the filled region counted as gas after the rebuild (review F1: a crossed cell whose
+    footprint holds part of the fill, its midpoint outside it, would otherwise carry the fill's
+    momentum into the transfer's and hide a loss). A constant field closes; a transfer loss of
+    three limits is a miss; a value that is not finite is a miss."""
+    import shapely
+    from shapely.geometry import box as rect
+
+    from faraday_singularity.ringsurgery import _ring_closures
+    from faraday_singularity.surgery import site_grid
+
+    grid = site_grid(3.0e-3, 4.611, 4e-3)
+    w = grid["dV"] * grid["phi"]
+    k = int(np.argmax(w))
+    zc = float(grid["zz"][k])
+    sigma = {"V": 1.13e-13, "Pz": 3.24e-10, "KE": 1e-9}
+    limit = 5.0 * sigma["Pz"]
+    cell = contact._cells(grid, [k])[0]
+    # the fill: a pocket of gas in the liquid below the far surface, inside cell k's footprint,
+    # away from its midpoint (no midpoint of any cell in it)
+    x0, y0, x1, y1 = cell.bounds
+    fill = rect(x0 + 0.05 * (x1 - x0), y0 + 0.05 * (y1 - y0), x0 + 0.45 * (x1 - x0),
+                zc - 0.1 * (y1 - y0))
+    assert not shapely.contains_xy(fill, grid["r"], grid["zz"]).any()
+    assert fill.within(cell) and fill.area > 0.1 * cell.area
+
+    def side(eps, filled, du=0.0, u=lambda r, z: 713.0 + 0.0 * r):
+        gas = rect(0.0, zc + eps, 1.0, 10.0)
+        fem_gas = gas if filled else gas.union(fill)
+
+        def sampler(r, z):
+            r, z = np.asarray(r), np.asarray(z)
+            found = ~shapely.contains_xy(fem_gas, r, z) & (z < zc + eps)
+            return np.where(found, u(r, z) + du, 0.0), found
+        # the reading's gas: before the rebuild its own; after it the fill read as gas
+        return contact.cell_readings(grid, gas.union(fill), sampler), sampler
+
+    def g2(before, after, Pz_fill, change=None):
+        moved = contact.momentum_change(grid, {"_cells": before}, {"_cells": after})
+        Pb = float(np.sum(w * before["uz"]))
+        Pa = float(np.sum(w * after["uz"]))
+        box = {x: {"Pz": P, "KE": 0.0} for x, P in (("before", Pb), ("after_transfer", Pa),
+                                                     ("after_projection", Pa))}
+        poly = {"before": {"V_liquid": 1e-6, "A": 1.0}, "after": {"V_liquid": 1e-6, "A": 1.0}}
+        c = _ring_closures({"V": 0.0, "Pz": Pz_fill, "KE": 0.0}, poly, box, None,
+                           {"P_ref": 1e-12, "KE_ref": 1e-12}, {"A_cl": 0.0, "A_rem": 0.0},
+                           sigma=sigma, prefix="G",
+                           moved_change=moved["change"] if change is None else change)
+        return c, moved, abs(Pa - Pb - Pz_fill)
+
+    before, _ = side(-1e-9, filled=False)  # cell k's midpoint gas before, liquid after
+    after, sampler = side(1e-9, filled=True)
+    assert not before["found"][k] and after["found"][k]
+    Pz_fill = 0.0  # the fill holds no midpoint: the midpoint rule reads none of its momentum
+    # the fill's own momentum, in cell k's liquid part, exceeds the limit: it could hide a loss
+    from faraday_singularity.axisrepair import polygon_quadrature_points
+    X, dV, _ = polygon_quadrature_points(fill)
+    fill_P = float(grid["phi"][k] * np.sum(dV * 713.0))
+    assert fill_P > limit
+    c, moved, grid_g2 = g2(before, after, Pz_fill)
+    assert grid_g2 > limit  # the midpoint rule's whole cell
+    assert c["G2"] < 1e-2 * limit and "G2" not in c["hard"]  # a constant field closes
+    assert moved["largest_crossed"]["resolved"]
+    # a transfer loss, about the fill's own momentum in size: a miss
+    du = -fill_P / float(np.sum(w[after["found"]]))
+    lost, _ = side(1e-9, filled=True, du=3.0 * limit / fill_P * du)
+    c, _, _ = g2(before, lost, Pz_fill)
+    assert "G2" in c["hard"] and c["G2"] > 2.0 * limit
+    # not finite: a miss, never read as closed
+    c, _, _ = g2(before, after, Pz_fill, change=math.nan)
+    assert "G2" in c["hard"] and math.isnan(c["G2"])
+    bad = dict(after, uz=np.where(after["found"], math.nan, 0.0))
+    c, _, _ = g2(before, bad, Pz_fill)
+    assert "G2" in c["hard"]
+
+
+def test_a_large_fills_interior_midpoints_are_gas_to_g2(monkeypatch):
+    """Review F1 (round 2): a fill far wider than a cell has midpoints beyond a diagonal of its
+    boundary, with no liquid-part reading; the finite element finds them in the liquid after the
+    rebuild. G2 reads the filled region as gas after the rebuild in its midpoint samples too
+    (``ringcontact.axial_sampler(..., gas=)``), so its interior adds nothing: a constant field
+    closes, an imposed transfer loss of the old liquid misses even with the fill's own momentum
+    beside it, and a value that is not finite misses."""
+    import shapely
+    from shapely.geometry import box as rect
+
+    import faraday_singularity.surgery as smod
+    from faraday_singularity.ringsurgery import _ring_closures
+    from faraday_singularity.surgery import site_grid
+
+    grid = site_grid(3.0e-3, 4.611, 4e-3)
+    w = grid["dV"] * grid["phi"]
+    z_top = 4.611 + 1.2e-3  # the free surface above the fill
+    groove = rect(2.7e-3, 4.6106, 3.3e-3, 4.6114)  # an open gas groove, many cells wide
+    inside = np.asarray(shapely.contains_xy(groove, grid["r"], grid["zz"]), dtype=bool)
+    from scipy.spatial import cKDTree
+    B = shapely.get_coordinates(shapely.segmentize(groove.boundary, 1e-6))
+    d, _ = cKDTree(B).query(np.column_stack([grid["r"], grid["zz"]])[inside])
+    diag = np.hypot(grid["R"] / grid["n"], grid["rho"][inside] * 2 * math.pi / grid["n"])
+    assert int(np.count_nonzero(d > 2 * diag)) > 500  # interior midpoints beyond the band
+    plane = rect(0.0, z_top, 1.0, 10.0)
+    sigma = {"V": 1.13e-13, "Pz": 3.24e-10, "KE": 1e-9}
+    limit = 5.0 * sigma["Pz"]
+
+    def field(fem_gas, du=0.0):
+        def sample_fields(problem, r, z, names):
+            r, z = np.asarray(r, dtype=float), np.asarray(z, dtype=float)
+            found = ~np.asarray(shapely.contains_xy(fem_gas, r, z), dtype=bool)
+            u = 713.0 + 40.0 * (r - 3.0e-3) / 1e-3
+            return {"velocity_y": np.where(found, u + du * (~np.asarray(
+                shapely.contains_xy(groove, r, z), dtype=bool)), np.nan)}, found
+        monkeypatch.setattr(smod, "sample_fields", sample_fields)
+
+    def readings(fem_gas, gas, du=0.0, fill_gas=None):
+        field(fem_gas, du)
+        return contact.cell_readings(grid, gas, contact.axial_sampler(None, gas=fill_gas))
+
+    def g2(du=0.0, change=None):
+        before = readings(plane.union(groove), plane.union(groove))
+        after = readings(plane, plane.union(groove), du=du, fill_gas=groove)
+        moved = contact.momentum_change(grid, {"_cells": before}, {"_cells": after})
+        field(plane, du)
+        f, found = smod.sample_fields(None, grid["r"], grid["zz"], ("velocity_y",))
+        Pa = float(np.sum(np.where(found, w * f["velocity_y"], 0.0)))
+        Pb = float(np.sum(w * before["uz"]))
+        P_fill = float(np.sum(np.where(inside & found, w * f["velocity_y"], 0.0)))
+        box = {x: {"Pz": P, "KE": 0.0} for x, P in (("before", Pb), ("after_transfer", Pa),
+                                                     ("after_projection", Pa))}
+        poly = {"before": {"V_liquid": 1e-6, "A": 1.0}, "after": {"V_liquid": 1e-6, "A": 1.0}}
+        c = _ring_closures({"V": 0.0, "Pz": P_fill, "KE": 0.0}, poly, box, None,
+                           {"P_ref": 1e-12, "KE_ref": 1e-12}, {"A_cl": 0.0, "A_rem": 0.0},
+                           sigma=sigma, prefix="G",
+                           moved_change=moved["change"] if change is None else change)
+        return c, moved, P_fill
+
+    c, moved, P_fill = g2()
+    assert P_fill > 100 * limit  # the fill's own momentum, which no reading may hold
+    assert c["G2"] < 1e-2 * limit and "G2" not in c["hard"]  # a constant field closes
+    assert moved["cells_crossed"] == 0  # the interior midpoints are gas on both sides
+    du = -3.0 * limit / float(np.sum(np.where(~inside, w, 0.0)))  # a loss in the old liquid
+    c, _, _ = g2(du=du)
+    assert "G2" in c["hard"] and c["G2"] > 2.0 * limit
+    c, _, _ = g2(change=math.nan)
+    assert "G2" in c["hard"]
+
+
+def test_a_fold_cascade_that_needs_a_fourth_refine_is_met_in_one_state():
+    """r1 (fix18 at 928dbd6) at step 10612 and r1h (h8 at ef8edca) at 10745: a closing gas fold of the ring refined by halves
+    (3.4e-5, 1.6e-5, 4.5e-6), its third mesh carrying an element of 1.8e-6 still above the floor:
+    with three tries per state the run stopped there; a fourth, as the restart made, met it. Each
+    refine is its own audited rebuild (``_ring_refine_once`` / ``_ring_liquid_refine``)."""
+    import faraday_singularity.driver as dv
+
+    assert dv.RING_REFINE_TRIES >= 4
+    Ls = [3.4e-5, 1.6e-5, 4.5e-6, 1.8e-6, 5e-7]  # the last below refine_ratio h_floor
+    made = []
+    fake = SimpleNamespace(s=SimpleNamespace(refine_ratio=1.5), _h_floor=lambda: 7.8e-7)
+
+    def stop_at(i):
+        return {"reason": "interface-unresolved", "trigger": "fold-kink", "chain": "ring",
+                "L": Ls[i], "i": i}
+
+    fake._ring_refine_due = lambda st: st is not None and st["L"] > 1.5 * 7.8e-7
+    fake._ring_reading = lambda st: st
+
+    def once(m, reading, attempt):
+        made.append((attempt, reading["L"]))
+        return m, stop_at(reading["i"] + 1)
+    fake._ring_liquid_refine = once
+    fake._ring_refine_once = once
+    m, stop = CollapseDriver._ring_refine(fake, {}, stop_at(0))
+    assert [a for a, _ in made] == [1, 2, 3, 4] and stop["L"] == 5e-7
+    assert stop["ring_refines"] == 4
+
+
+@pytest.mark.parametrize("surgery", ["ring-cut", "ring-removal", "sheet-rupture", "axis-repair"])
+def test_each_surgerys_r2_is_the_transfers_change_alone(monkeypatch, surgery):
+    """R2 of the ring's cut (R) and removal (Q) on the half-disc on the axis (``box_grid``,
+    unweighted by the cutoff), of the lip's rupture (S, a removal) and of the axis repair (A) on
+    a disc at their sites (``site_grid``, weighted), read as the groove fill's G2: cell by cell,
+    the surgery's own region read as gas on the side it is not liquid (after a fill, before a
+    removal) by the midpoint samples and the liquid parts alike (``ringcontact.surface_cells``):
+    a far cell whose midpoint the rebuild moves across a free surface, its fraction unchanged, and
+    the region's many interior midpoints add nothing (a constant field closes); a transfer loss of
+    the old liquid misses; not finite misses. The cells tile the box."""
+    import shapely
+    from shapely.geometry import box as rect
+
+    import faraday_singularity.surgery as smod
+    from faraday_singularity.axisrepair import polygon_quadrature_points
+    from faraday_singularity.reconnect import Chain
+    from faraday_singularity.ring import closed
+    from faraday_singularity.ringsurgery import _ring_closures
+    from faraday_singularity.surgery import box_grid, site_grid
+
+    axis = surgery in ("ring-cut", "ring-removal")
+    r_c = 0.0 if surgery == "axis-repair" or axis else 3.0e-3
+    z0 = 4.611
+    grid = box_grid(z0, 4e-3) if axis else site_grid(r_c, z0, 4e-3)
+    cutoff = not axis
+    w = grid["dV"] * (grid["phi"] if cutoff else 1.0)
+    r_c, h_rho, h_th = contact.grid_steps(grid)
+    cells = contact._cells(grid, np.arange(len(grid["r"])))
+    V_cells = sum(float(np.sum(polygon_quadrature_points(c)[1])) for c in cells if c.area > 0)
+    assert V_cells == pytest.approx(float(np.sum(grid["dV"])), rel=2e-3)
+    k = int(np.argmax(w * (grid["rho"] > 0.6 * grid["R"]) * (grid["zz"] > z0)))
+    zc = float(grid["zz"][k])  # a far surface through cell k's midpoint
+    region = rect(r_c, z0 - 4e-4, r_c + 6e-4, z0 + 4e-4)  # the surgery's own region, wide
+    inside = np.asarray(shapely.contains_xy(region, grid["r"], grid["zz"]), dtype=bool)
+    assert int(inside.sum()) > 200
+    removal = surgery == "sheet-rupture"
+    sigma = {"V": 1.13e-13, "Pz": 3.24e-10, "KE": 1e-9}
+    limit = 5.0 * sigma["Pz"]
+    prefix = {"ring-cut": "R", "ring-removal": "Q", "sheet-rupture": "S", "axis-repair": "A"}[
+        surgery]
+
+    def plane(eps):
+        return Chain(closed(np.array([[0.0, zc + eps], [1.0, zc + eps], [1.0, 10.0],
+                                      [0.0, 10.0]])), ("loop", "loop"))
+
+    def field(fem_gas, du=0.0):
+        def sample_fields(problem, r, z, names):
+            r, z = np.asarray(r, dtype=float), np.asarray(z, dtype=float)
+            found = ~np.asarray(shapely.contains_xy(fem_gas, r, z), dtype=bool)
+            own = np.asarray(shapely.contains_xy(region, r, z), dtype=bool)
+            u = 713.0 + 40.0 * (r - r_c) / 1e-3 + du * ~own
+            return {"velocity_y": np.where(found, u, np.nan)}, found
+        monkeypatch.setattr(smod, "sample_fields", sample_fields)
+
+    def sides(du=0.0):
+        # the region gas before and liquid after (a fill), or the reverse (a removal); the far
+        # surface just above cell k's midpoint before, just below it after
+        gas_b, gas_a = shapely.box(0.0, zc - 1e-9, 1.0, 10.0), shapely.box(0.0, zc + 1e-9, 1.0, 10.0)
+        if removal:
+            field(gas_b)
+            before = contact.surface_cells(None, grid, [plane(-1e-9)], 0.0, region=region)
+            field(gas_a.union(region), du)
+            after = contact.surface_cells(None, grid, [plane(1e-9),
+                                                       Chain(closed(np.asarray(region.exterior.coords)[:-1]),
+                                                             ("loop", "loop"))], 0.0)
+        else:
+            field(gas_b.union(region))
+            before = contact.surface_cells(None, grid, [plane(-1e-9),
+                                                        Chain(closed(np.asarray(region.exterior.coords)[:-1]),
+                                                              ("loop", "loop"))], 0.0)
+            field(gas_a, du)
+            after = contact.surface_cells(None, grid, [plane(1e-9)], 0.0, region=region)
+        return before, after
+
+    def r2(du=0.0, change=None):
+        before, after = sides(du)
+        moved = contact.momentum_change(grid, {"_cells": before}, {"_cells": after},
+                                        cutoff=cutoff)
+        box = {x: {"Pz": 0.0, "KE": 0.0} for x in ("before", "after_transfer",
+                                                    "after_projection")}
+        poly = {"before": {"V_liquid": 1e-6, "A": 1.0}, "after": {"V_liquid": 1e-6, "A": 1.0}}
+        c = _ring_closures({"V": 0.0, "Pz": 0.0, "KE": 0.0}, poly, box, None,
+                           {"P_ref": 1e-12, "KE_ref": 1e-12}, {"A_cl": 0.0, "A_rem": 0.0},
+                           sigma=sigma, prefix=prefix,
+                           moved_change=moved["change"] if change is None else change)
+        return c, moved, before, after
+
+    c, moved, before, after = r2()
+    assert before["found"][k] != after["found"][k]  # the far cell's midpoint crossed
+    region_P = float(np.sum(np.where(inside, w * 713.0, 0.0)))
+    assert region_P > 100 * limit  # the region's own momentum, which no reading may hold
+    assert c[prefix + "2"] < 1e-2 * limit and prefix + "2" not in c["hard"]
+    assert prefix + "2_grid" in c and moved["cells_unresolved"] == 0
+    du = -3.0 * limit / float(np.sum(np.where(~inside & after["found"], w, 0.0)))
+    c, _, _, _ = r2(du=du)
+    assert prefix + "2" in c["hard"] and c[prefix + "2"] > 2.0 * limit
+    c, _, _, _ = r2(change=math.nan)
+    assert prefix + "2" in c["hard"]
+
+
+def test_the_identity_comparator_maps_only_the_cell_read_closures(tmp_path):
+    """``test_events_fem._same_outputs`` against an earlier commit (review F1, F2 of batch D):
+    only a cell-read surgery's ``<P>2`` (from its ``<P>2_grid``, its relative value rebuilt as
+    the serialiser writes it, null at a zero scale) and that row's F2 in events.txt are mapped;
+    a change of any other row's F2 (a liquid cut's), or of the midpoint value itself, fails."""
+    import math
+
+    import test_events_fem as fem_pins
+    from faraday_singularity.driver import EVENT_COLUMNS, _table_cell
+    from faraday_singularity.surgery import _jsonable
+
+    def closures(P, value, grid=None, P_ref=2e-10):
+        c = {f"{P}1": 1e-15, f"{P}2": value, "limits": {f"{P}2": 1.62e-9}, "hard": [],
+             "scales": {"P_ref": P_ref},
+             "relative": {f"{P}2": (grid if grid is not None else value) / P_ref
+                          if P_ref else math.nan}}
+        if grid is not None:
+            c.update({f"{P}2_grid": grid, f"{P}2_split": {"change": value}})
+            c["relative"][f"{P}2"] = value / P_ref if P_ref else math.nan
+        return _jsonable(c)
+
+    def run(name, rows, records):
+        d = tmp_path / name
+        (d / "events").mkdir(parents=True)
+        lines = ["# " + "\t".join(EVENT_COLUMNS)]
+        for row in rows:
+            lines.append("\t".join(_table_cell(row.get(c)) for c in EVENT_COLUMNS))
+        (d / "events.txt").write_text("\n".join(lines) + "\n")
+        for k, rec in records.items():
+            (d / "events" / f"event_{k:03d}.json").write_text(json.dumps(rec))
+        return d
+
+    def rows(f2_cut, f2_liquid):
+        return [{"k": 1, "kind": "piercing", "F2": f2_cut},
+                {"k": 2, "kind": "liquid-cut", "F2": f2_liquid}]
+
+    grid, cell = 3.0e-10, 1.0e-11
+    ref = run("ref", rows(grid / 2e-10, 0.02),
+              {1: {"kind": "piercing", "closures": closures("R", grid)},
+               2: {"kind": "liquid-cut", "closures": {"F2": 0.02}}})
+    head_records = {1: {"kind": "piercing", "closures": closures("R", cell, grid=grid)},
+                    2: {"kind": "liquid-cut", "closures": {"F2": 0.02}}}
+    head = run("head", rows(cell / 2e-10, 0.02), head_records)
+    fem_pins._same_outputs(ref, head)
+    # an unrelated row's F2 changed: a failure
+    bad = run("bad", rows(cell / 2e-10, 999.0), head_records)
+    with pytest.raises(AssertionError, match="events.txt"):
+        fem_pins._same_outputs(ref, bad)
+    # the midpoint value itself changed: a failure
+    moved = run("moved", rows(cell / 2e-10, 0.02),
+                {1: {"kind": "piercing", "closures": closures("R", cell, grid=2 * grid)},
+                 2: {"kind": "liquid-cut", "closures": {"F2": 0.02}}})
+    with pytest.raises(AssertionError):
+        fem_pins._same_outputs(ref, moved)
+    # an eligible row's exported F2 checked against its own record before it is mapped (F3)
+    for label, f2 in (("wrong", 999.0), ("nan", None)):
+        bad_cut = run(f"bad-{label}", rows(f2, 0.02), head_records)
+        with pytest.raises(AssertionError, match="events.txt row 1"):
+            fem_pins._same_outputs(ref, bad_cut)
+    missing = run("missing", rows(cell / 2e-10, 0.02), head_records)
+    text = (missing / "events.txt").read_text().splitlines()
+    col = EVENT_COLUMNS.index("F2")
+    text[1] = "\t".join(text[1].split("\t")[:col])  # the row cut short before its F2
+    (missing / "events.txt").write_text("\n".join(text) + "\n")
+    with pytest.raises(AssertionError, match="events.txt row 1"):
+        fem_pins._same_outputs(ref, missing)
+    # a head table that keeps the reference's F2 (byte-identical tables) against its own record
+    stale = run("stale", rows(grid / 2e-10, 0.02), head_records)
+    assert (stale / "events.txt").read_bytes() == (ref / "events.txt").read_bytes()
+    with pytest.raises(AssertionError, match="events.txt row 1"):
+        fem_pins._same_outputs(ref, stale)
+    # a filtered caller (test_jetcore_identity, test_groove_identity): the same rules, its part's
+    # keys removed from the records, its own files in the head only
+    def strip(x):
+        if isinstance(x, dict):
+            return {k: strip(v) for k, v in x.items() if k != "jetcore"}
+        return [strip(v) for v in x] if isinstance(x, list) else x
+    part = {k: dict(v, jetcore={"enabled": True}) for k, v in head_records.items()}
+    for name, f2 in (("part", 0.02), ("part-bad", 999.0)):
+        d = run(name, rows(cell / 2e-10, f2), part)
+        (d / "jetcore.txt").write_text("# the part's own table\n")
+        if f2 == 0.02:
+            fem_pins._same_outputs(ref, d, strip=strip, head_only=["jetcore.txt"])
+        else:  # an unrelated row's F2 change is rejected through the filtered call too
+            with pytest.raises(AssertionError, match="events.txt"):
+                fem_pins._same_outputs(ref, d, strip=strip, head_only=["jetcore.txt"])
+    with pytest.raises(AssertionError):  # the part's keys are not removed without the filter
+        fem_pins._same_outputs(ref, tmp_path / "part", head_only=["jetcore.txt"])
+    # a zero scale: the reference's relative value null, the head's rebuilt null too
+    ref0 = run("ref0", [{"k": 1, "kind": "piercing", "F2": None}],
+               {1: {"kind": "piercing", "closures": closures("R", 0.0, P_ref=0.0)}})
+    head0 = run("head0", [{"k": 1, "kind": "piercing", "F2": None}],
+                {1: {"kind": "piercing", "closures": closures("R", 0.0, grid=0.0, P_ref=0.0)}})
+    assert json.loads((ref0 / "events" / "event_001.json").read_text())["closures"][
+        "relative"]["R2"] is None
+    fem_pins._same_outputs(ref0, head0)
