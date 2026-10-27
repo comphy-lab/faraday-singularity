@@ -475,8 +475,10 @@ add a second top-level `cases/` tree.
   half-disc on the axis, unweighted, the lip's rupture S2 and the axis repair A2 alike, each
   surgery's own region read as gas on the side it is not liquid, `ringcontact.surface_cells(...,
   region=)`, `_ring_closures(moved_change=)` recording `<P>2_grid`; the identity tests against
-  earlier commits map only `<P>2_grid` to the reference's `<P>2` for R, Q, S, A and drop only
-  events.txt's F2 column where the outputs differ, `test_events_fem.CELL_READ_CLOSURES`); G3 and
+  earlier commits map `<P>2_grid` to the reference's `<P>2` for R, Q, S, A only where its
+  matching record has `<P>2` without `<P>2_grid`. Each table's F2 is checked against its own
+  record before the cell-read row is mapped to that record's midpoint value; two cell-read
+  records and their table cells stay strict (`test_events_fem.CELL_READ_CLOSURES`)); G3 and
   `G3_box` compare two samples on one mesh over the points found both times, so no cell crosses
   there; G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
   but `G3_box` beyond its limit only a flag where the cutoff identity G3 holds and resolves it (its
