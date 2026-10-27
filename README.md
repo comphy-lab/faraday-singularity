@@ -4,8 +4,9 @@ Direct numerical simulation, with sharp-interface finite elements in
 [pyoomph](https://github.com/pyoomph/pyoomph), of the singular collapse of a Faraday-wave
 interface and the Worthington jet it launches.
 
-**Status:** axisymmetric solver at zero Bond number and its linear verification cases. The
-cavity-collapse cases and the jet observables are not implemented yet.
+**Status:** axisymmetric solver at zero Bond number with its linear verification cases, and a
+collapse driver that records the collapse and jet observables during the run and stops before any
+pinch-off. No collapse case files or results are in the repository yet.
 
 ## Motivation
 
@@ -18,17 +19,25 @@ jet speed against Faraday-wave height and bubble size, and rationalised the coll
 scaling laws in which both inertia and capillarity enter.
 
 Gordillo, Rodríguez-Rodríguez and Sanjay [3] argue that the birth of a Worthington jet from a
-collapsing cone is purely inertial. The local collapse follows self-similar Euler solutions
-set by the cone semi-angle $\beta$. The jet-base radius therefore scales as
-$r_j \propto \tau^{\alpha(\beta)}$, where $\tau$ is the time from the singular instant, and
-the jet-base Weber number $We_j = r_j v_j^2$ diverges as $r_j \to 0$. For bursting bubbles,
-$\alpha \simeq 0.63$, distinct from the inertio-capillary exponent $2/3$.
+collapsing cone is purely inertial. Where the velocity potential vanishes on a cone of
+semi-angle $\beta$ in an intermediate region $r_j \ll r \ll 1$ at jet inception, the local
+collapse follows self-similar Euler solutions set by $\beta$. The jet-base radius then scales as
+$r_j \propto \tau^{\alpha(\beta)}$, with $\alpha = 1/(2 - \nu(\beta))$ and $\tau$ the time
+from inception, and the jet-base Weber number as $We_j = r_j v_j^2 \propto r_j^{2\nu(\beta) - 1}$.
+$We_j$ therefore diverges as $r_j \to 0$ only for cones sharper than Taylor's,
+$\beta < 49.3^\circ$, where $\nu < 1/2$ and $\alpha < 2/3$. For bursting bubbles that entrap a
+tiny bubble, $\beta \simeq 38^\circ$ and $\alpha \simeq 0.63$, distinct from the
+inertio-capillary exponent $2/3$. Jets from truncated cones, driven by a constant far-field
+flux per unit length, follow instead $r_j \propto \tau^{1/2}$ with $We_j \propto r_j^{-1}$
+[3, 5].
 
-Because the exponents differ, the two descriptions predict different divergence of the jet
-speed as the Faraday-wave height approaches its singular value. Near the singularity the jet
-is thinnest and fastest, so the collapse geometry and the jet base are hardest to measure
+Which law applies is set by the flow far from the jet base, not by the cone angle alone [3].
+Nor does [3] predict the jet speed as a function of the Faraday-wave height: relating $V_j$ to
+$h - h_c$ needs a link between the wave height and the collapse that [3] does not provide,
+and establishing that dependence is the second aim below. Near the singularity the
+jet is thinnest and fastest, so the collapse geometry and the jet base are hardest to measure
 exactly where the descriptions differ most. A clean simulation can resolve the geometry, the
-jet base and the cone angle together, with known parameters.
+jet base, the cone angle and the flow along the cavity wall together, with known parameters.
 
 ## Aim
 
@@ -52,6 +61,10 @@ and test:
   lies on the axis.
 - A sharp-interface mesh cannot change topology. The simulations cover the collapse and the
   birth of the jet, and stop before any pinch-off or bubble entrainment.
+- The step size and the mesh near the axis follow the local scale of the collapse: the apex radius
+  of curvature, the jet-base radius or the narrowest neck, whichever is smallest. The scale may
+  grow by at most a fixed factor per step, and each rebuild of the mesh coarsens it near the axis
+  by at most a fixed factor.
 
 ## Model
 
@@ -81,7 +94,7 @@ criteria are stated in `verificationCases/README.md`.
 | `testCases/` | small software-contract tests |
 | `verificationCases/` | comparisons with exact or independently computed solutions |
 | `validationCases/` | comparisons with independent experimental or numerical data |
-| `modelComparisonCases/` | comparisons with the inertial and inertio-capillary similarity models |
+| `modelComparisonCases/` | the inertial-cone, line-sink and inertio-capillary similarity laws |
 | `postProcess/` | analysis and visualisation |
 | `docs/` | approved authored documents |
 
@@ -106,6 +119,65 @@ and provenance), `run_status.json`, `diagnostics.txt` (axis height and velocity,
 volume, area, kinetic energy, dissipation and remesh count after every step) and free-surface
 snapshots.
 
+A case with a `collapse` block runs the collapse driver, which can resume from one of its state
+dumps:
+
+```bash
+python run_case.py <collapse-case>.json --outdir <run-directory>
+python run_case.py <collapse-case>.json --outdir <new-run-directory> \
+    --restart <run-directory>/states/state_<step>.dump
+python postProcess/collapse_table.py <run-directory> [...] --per-episode --out <table>.csv
+python postProcess/collapse_analysis.py <run-directory> --out <analysis-directory> \
+    [--rj-window <lo> <hi>]
+```
+
+Its run directory also receives:
+
+- `collapse.txt`, one row per step: collapse cycle and crest/trough episode, apex height, velocity
+  and curvature, jet-base radius `r_j` and height, flux, mean jet speed `V_j` and `We_j`, the
+  narrowest neck, conservative fold-gap diagnostics (`fold_gap`, `fold_r`, `fold_z`), cone angles,
+  resolution, global budgets, and a running estimate `t0_est`, with
+  exponent `alpha_est`, of the origin of a power law in time fitted to the latest samples of a
+  length (`t0_source`: 0 none; 1 the apex radius of curvature, an estimate of the singular time;
+  2 the jet-base radius after birth: while the base closes in on the axis, the time at which it
+  would reach it, after the samples; while the jet grows, the origin of that growth, a virtual one
+  before birth when the jet is born at a finite radius);
+- `events.jsonl`: cavities, jet birth, the first neck, crest and trough episodes (a trough carries
+  the preceding crest height `h_crest` and `crest_jet`, whether a jet stood on the axis during that
+  crest), remeshes, restarts and the stop;
+- `profiles/` (free-surface profiles with velocities) and `states/` (the latest state dumps).
+
+A run ends at its end time, at the step-size floor or step limit, or right before a pinch-off or
+the singular collapse. The `stop` record in `run_status.json` and `events.jsonl` names the reason:
+`pinch-off-approach` when a neck becomes narrower than the stop radius (`trigger` `neck-radius`).
+`self-contact-approach` (`trigger` `fold-gap`) is a conservative geometry cutoff in the focus
+region: nonadjacent nodes are closer than `1/fold_ratio` of their intervening arc, and their gap
+is below `max(fold_stop, fold_stop_elements * h_elem)`, using the local element length. The pair
+closest to its own limit is recorded. This criterion can also stop at a static sharp corner;
+it does not establish physical entrapment or a singularity. An already self-intersecting control
+polygon, or a detected contact of its sampled spline, raises `InterfaceSelfIntersection` and
+marks the run failed. The spline check is sampled and can miss loops below its sampling scale.
+A run also stops when oomph-lib gives up on a step because the Newton solve fails at every step size
+down to its smallest step (the message `less than the minimum dt` in the log): as a
+`pinch-off-approach` if a neck is narrower than `neck_guard`, otherwise as a `singularity-approach`
+if the measured local scale, before its growth per step is limited, is below `ell_guard` (both
+with `trigger` `newton-failure` and the oomph-lib message as `error`, recorded from the last state
+the driver measured, which can precede sub-steps that pyoomph accepted within the failing step
+after halving it). Such runs are `completed`; any
+other failure, including other oomph-lib errors and failed mesh generation or remeshing, marks the
+run `failed` whatever the state. `collapse_table.py --per-episode` gives one row per trough episode,
+and per collapse cycle within it, with the wave height `h_crest`, the crest height on the axis
+above the mean level before that trough. Rows with `crest_jet` 1 had a jet standing on the axis
+during that crest, so their `h_crest` is the height of the jet tip, not of a wave.
+
+`collapse_analysis.py` sets out, for each collapse cycle that launches a jet, the evidence for
+the three similarity laws of jet birth without choosing between them: the free slopes of
+`Q_j`, `We_j` and `q_j = V_j r_j` against `r_j`, with the level of `We_j`; the cone angle and the
+direction and decay of the surface velocity along the cavity wall at inception, over a fixed
+intermediate window; and, as a secondary check, fits of `r_j(t)` with the origin fixed at the
+apex-based singular time or fitted with the exponent. Every window and threshold is written to
+its summary.
+
 ## References
 
 1. B. W. Zeff, B. Kleber, J. Fineberg and D. P. Lathrop, Singularity dynamics in curvature
@@ -119,3 +191,7 @@ snapshots.
 4. K. Kumar and L. S. Tuckerman, Parametric instability of the interface between two fluids,
    *J. Fluid Mech.* **279**, 49–68 (1994).
    [doi:10.1017/S0022112094003812](https://doi.org/10.1017/S0022112094003812)
+5. J. M. Gordillo and F. J. Blanco-Rodríguez, Theory of the jets ejected after the inertial
+   collapse of cavities with applications to bubble bursting jets, *Phys. Rev. Fluids* **8**,
+   073606 (2023).
+   [doi:10.1103/PhysRevFluids.8.073606](https://doi.org/10.1103/PhysRevFluids.8.073606)

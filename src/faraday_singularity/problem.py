@@ -5,7 +5,7 @@ to an axisymmetric container whose free surface can deform arbitrarily:
 
 * coordinates ``(r, z) = (x, y)`` with pyoomph's axisymmetric measure ``2 pi r``;
 * incompressible Navier-Stokes in the container frame with body force
-  ``-(Bo + Gamma cos(Omega t)) e_z`` (``parameters.py`` defines the scales);
+  ``-(Bo + Gamma cos(Omega t + phase)) e_z`` (``parameters.py`` defines the scales);
 * free surface with unit surface tension and the kinematic condition coupled to the mesh;
 * axis ``r = 0`` (``AxisymmetryBC``), free-slip bottom ``z = 0``, free-slip side wall ``r = R_c``
   along which the contact line slides with the natural 90 degree angle;
@@ -23,6 +23,7 @@ evaluated on the interface with ``n_z ds = dr`` and pyoomph's ``2 pi r`` measure
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from pyoomph import Problem
 from pyoomph.equations.ALE import HyperelasticSmoothedMesh
@@ -51,6 +52,7 @@ class FaradayProblem(Problem):
         self.mesh_output = mesh_output
         self.remesh_count = 0
         self._diag = None  # open per-step diagnostics file, set by start_diagnostics()
+        self.mesh_template: FaradayCylinderMesh | None = None
 
     def initial_elevation(self, r):
         return self.nd.a0 * j0(r)
@@ -58,12 +60,13 @@ class FaradayProblem(Problem):
     def define_problem(self):
         nd = self.nd
         self.set_coordinate_system("axisymmetric")
-        self.add_mesh(FaradayCylinderMesh(nd.radius, nd.depth, self.initial_elevation,
-                                          self.mesh_settings))
+        self.mesh_template = FaradayCylinderMesh(nd.radius, nd.depth, self.initial_elevation,
+                                                 self.mesh_settings)
+        self.add_mesh(self.mesh_template)
 
         t = var("time")
         u = var("velocity")
-        gravity = vector(0, -(nd.Bo + nd.Gamma * cos(nd.Omega * t)))
+        gravity = vector(0, -(nd.Bo + nd.Gamma * cos(nd.Omega * t + nd.phase)))
         eqs = NavierStokesEquations(mass_density=1, dynamic_viscosity=nd.Oh, gravity=gravity)
         eqs += HyperelasticSmoothedMesh()
         if self.remesh:
@@ -136,6 +139,57 @@ class FaradayProblem(Problem):
         if self._diag is not None:
             self._diag.close()
             self._diag = None
+
+    def active_mesh_template(self) -> FaradayCylinderMesh:
+        """The template the liquid mesh is remeshed from.
+
+        After ``load_state`` pyoomph rebuilds the stored mesh from a sibling of the original template
+        (``GmshTemplate._template_for_stored_mesh_file``), and later remeshing goes through that
+        sibling, so run-time settings such as the focus must be set on it, not on the original.
+        """
+        sibling = getattr(self.get_mesh("liquid"), "_templatemesh", None)
+        return sibling if isinstance(sibling, FaradayCylinderMesh) else self.mesh_template
+
+    def interface_arrays(self):
+        """Free-surface nodes ordered from the axis to the wall: ``r, z, u_r, u_z``."""
+        cache = self.get_cached_mesh_data("liquid/interface", nondimensional=True,
+                                          tesselate_tri=False)
+        xy = cache.get_coordinates()
+        segs, _ = cache.get_interface_line_segments()
+        if len(segs) != 1:
+            raise RuntimeError(f"free surface split into {len(segs)} segments")
+        seg = list(segs[0])
+        if xy[0, seg[0]] > xy[0, seg[-1]]:
+            seg = seg[::-1]
+        ur, uz = cache.get_data("velocity_x"), cache.get_data("velocity_y")
+        return xy[0, seg], xy[1, seg], ur[seg], uz[seg]
+
+    def axial_velocity_at(self, points) -> tuple[list[float], bool]:
+        """``u_z`` at ``(r, z)`` points inside the liquid; the flag is False if any is not found."""
+        bulk = self.get_mesh("liquid")
+        col = 1 + bulk.get_nodal_field_indices()["velocity_y"]
+        rows = bulk.evaluate_at_points([[float(r), float(z)] for r, z in points], lagrangian=False)
+        found = all(row[0] == 1.0 for row in rows)
+        return [float(row[col]) if row[0] == 1.0 else float("nan") for row in rows], found
+
+    def oomph_log_tail(self, size: int = 1 << 16) -> str:
+        """The last ``size`` bytes of the problem's log file, or ``""`` without one.
+
+        pyoomph raises an ``OomphLibError`` in Python only as ``RuntimeError("OomphException")``;
+        its message goes to the console and to this log, whose stream is flushed first.
+        """
+        from pyoomph import _pyoomph_core
+
+        _pyoomph_core._write_to_log_file("")  # writes nothing and flushes the log-file stream
+        if self.logfile_name is None:
+            return ""
+        path = Path(self.get_output_directory(self.logfile_name))
+        try:
+            with path.open("rb") as fh:
+                fh.seek(max(0, path.stat().st_size - size))
+                return fh.read().decode(errors="replace")
+        except OSError:
+            return ""
 
     def actions_after_remeshing(self):
         super().actions_after_remeshing()
