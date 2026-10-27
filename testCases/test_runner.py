@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 CASE = {
@@ -34,9 +36,18 @@ CASE = {
 }
 
 CHILD = """
-import os, signal, sys, time, types
+import os, signal, sys, time, types, json, runpy
+from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import run_case
+case_path, outdir, entry = sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4])
+source_reads = []
+
+def component_commit(root):
+    source_reads.append(str(root))
+    return ("a" if len(source_reads) == 1 else "b") * 40
+
+run_case.component_commit = component_commit
 
 class Problem:
     remesh_count = 0
@@ -57,16 +68,24 @@ class Driver:
 
 sys.modules["faraday_singularity.problem"] = types.SimpleNamespace(FaradayProblem=Problem)
 run_case.CollapseDriver = Driver
-sys.argv = ["run_case.py", sys.argv[2], "--outdir", sys.argv[3]]
-run_case.main()
+sys.argv = [str(entry), case_path, "--outdir", str(outdir)]
+try:
+    if entry.name == "run_faraday.py":
+        runpy.run_path(str(entry), run_name="__main__")
+    else:
+        run_case.main()
+finally:
+    (outdir / "source_reads.json").write_text(json.dumps(len(source_reads)))
 """
 
 
-def test_sigterm_during_a_collapse_run_is_recorded(tmp_path):
+@pytest.mark.parametrize("wrapper", [False, True])
+def test_sigterm_during_a_collapse_run_is_recorded(tmp_path, wrapper):
     case = tmp_path / "case.json"
     case.write_text(json.dumps(CASE))
     out = tmp_path / "out"
-    proc = subprocess.run([sys.executable, "-c", CHILD, str(ROOT), str(case), str(out)],
+    entry = ROOT / ("simulationCases/run_faraday.py" if wrapper else "run_case.py")
+    proc = subprocess.run([sys.executable, "-c", CHILD, str(ROOT), str(case), str(out), str(entry)],
                           capture_output=True, text=True, timeout=120, check=False)
     assert proc.returncode != -signal.SIGTERM, "killed by SIGTERM without recording it"
     assert "Terminated" in proc.stderr
@@ -78,3 +97,15 @@ def test_sigterm_during_a_collapse_run_is_recorded(tmp_path):
     assert manifest["case_id"] == CASE["case_id"]
     assert "completion.t_max" in manifest["case_fields_used"]
     assert "completion.value" not in manifest["case_fields_used"]
+    # the entry point and run_case.py itself are both identified
+    assert manifest["runner"]["run_case_sha256"] == hashlib.sha256(
+        (ROOT / "run_case.py").read_bytes()).hexdigest()
+    assert manifest["runner"]["path"] == str(entry.resolve())
+    assert manifest["runner"]["sha256"] == hashlib.sha256(entry.read_bytes()).hexdigest()
+    if wrapper:
+        assert manifest["runner"]["sha256"] != manifest["runner"]["run_case_sha256"]
+    assert json.loads((out / "source_reads.json").read_text()) == 1
+    info = json.loads((out / "parameters.json").read_text())["provenance"]
+    import run_case
+
+    assert manifest["component_commit"] == run_case.manifest_commit(info) == "a" * 40

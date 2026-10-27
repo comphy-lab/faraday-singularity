@@ -16,25 +16,22 @@ def _git(root: Path, *args: str) -> str:
     environment = {key: value for key, value in os.environ.items()
                    if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"}}
     return subprocess.check_output(["git", "-C", str(root), *args], text=True,
-                                   stderr=subprocess.DEVNULL, env=environment).strip()
+                                   stderr=subprocess.DEVNULL, env=environment, timeout=60).strip()
 
 
 def component_commit(root: Path) -> str:
-    """Commit of the component source at ``root``.
+    """Commit verified through ``root``'s own Git work tree.
 
-    A source tree materialised from an archive carries its commit in a ``COMMIT`` file;
-    otherwise git HEAD, marked ``-dirty`` when tracked files differ from it, and ``unknown``
-    when neither is available or ``root`` is not the top of its own work tree.
+    Tracked changes and non-ignored untracked files mark it ``-dirty``. A bare ``COMMIT``
+    file cannot verify the contents of an exported tree; without its own Git work tree the
+    result is ``unknown``. In a checkout, Git remains authoritative even if ``COMMIT`` exists.
     """
-    commit_file = root / "COMMIT"
-    if commit_file.is_file():
-        return commit_file.read_text(encoding="utf-8").strip() or "unknown"
     try:
         if Path(_git(root, "rev-parse", "--show-toplevel")).resolve() != root.resolve():
             return "unknown"
         commit = _git(root, "rev-parse", "HEAD")
-        dirty = _git(root, "status", "--porcelain", "--untracked-files=no")
-    except (OSError, subprocess.CalledProcessError):
+        dirty = _git(root, "status", "--porcelain", "--untracked-files=all")
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeError):
         return "unknown"
     return commit + ("-dirty" if dirty else "")
 

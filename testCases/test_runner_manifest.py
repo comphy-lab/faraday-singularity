@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -653,3 +654,104 @@ def test_the_prototype_documents_every_key_its_case_may_change(tmp_path):
     assert report["state"]["parent_record"]["derived_keys"] == [
         "case_id", "collapse.reconnect", "collapse.state_dt", "collapse.state_keep"]
     assert not out.exists()
+
+
+@pytest.mark.parametrize("source, commit, dirty", [
+    ("a" * 40, "a" * 40, False), ("b" * 40 + "-dirty", "b" * 40, True), ("unknown", None, None)])
+def test_provenance_reads_the_source_as_the_manifest_does(tmp_path, monkeypatch, source, commit,
+                                                          dirty):
+    import run_case
+
+    case = tmp_path / "case.json"
+    case.write_text("{}")
+    # the source is read once; the manifest's commit comes from that same reading, so a change
+    # of the tree between the two records cannot make them disagree
+    readings = iter([source, "c" * 40])
+    monkeypatch.setattr(run_case, "component_commit", lambda root: next(readings))
+    info = run_case.provenance(case)
+    assert info["component_commit"] == commit and info["component_dirty"] is dirty
+    assert run_case.manifest_commit(info) == source
+    assert next(readings) == "c" * 40  # no second source reading in the helper path
+
+
+def _source_checkout(tmp_path):
+    root = tmp_path / "source"
+    environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(root), "-c", "user.name=Vatsal Sanjay",
+             "-c", "user.email=vatsal.sanjay@comphy-lab.org",
+             "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", *args],
+            env=environment, text=True, stderr=subprocess.DEVNULL, timeout=60).strip()
+
+    root.mkdir()
+    git("init", "--quiet")
+    (root / ".gitignore").write_text("__pycache__/\n*.py[cod]\n")
+    (root / "module.py").write_text("VALUE = 1\n")
+    git("add", ".gitignore", "module.py")
+    git("commit", "--quiet", "-m", "Record source fixture")
+    return root, git("rev-parse", "HEAD"), git
+
+
+@pytest.mark.parametrize("extra", ["extra.py", "events/__init__.py"])
+def test_nonignored_untracked_python_source_is_dirty(tmp_path, monkeypatch, extra):
+    root, commit, _ = _source_checkout(tmp_path)
+    path = root / extra
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("VALUE = 2\n")
+    monkeypatch.setattr(run_case, "ROOT", root)
+    case = tmp_path / "case.json"
+    case.write_text("{}")
+    info = run_case.provenance(case)
+    assert info["component_commit"] == commit and info["component_dirty"] is True
+    assert run_case.manifest_commit(info) == commit + "-dirty"
+
+
+def test_ignored_python_cache_does_not_dirty_the_source(tmp_path):
+    root, commit, _ = _source_checkout(tmp_path)
+    cache = root / "__pycache__"
+    cache.mkdir()
+    (cache / "module.cpython-313.pyc").write_bytes(b"ignored cache")
+    assert run_case.component_commit(root) == commit
+
+
+@pytest.mark.parametrize("claimed", [b"a" * 40, b"\xff"])
+def test_a_bare_commit_file_cannot_establish_clean_source(tmp_path, monkeypatch, claimed):
+    root = tmp_path / "export"
+    root.mkdir()
+    (root / "COMMIT").write_bytes(claimed)
+    monkeypatch.setattr(run_case, "ROOT", root)
+    case = tmp_path / "case.json"
+    case.write_text("{}")
+    info = run_case.provenance(case)
+    assert info["component_commit"] is None and info["component_dirty"] is None
+    assert run_case.manifest_commit(info) == "unknown"
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_a_commit_file_never_overrides_the_actual_checkout(tmp_path, tracked):
+    root, commit, git = _source_checkout(tmp_path)
+    (root / "COMMIT").write_text("b" * 40)
+    if tracked:
+        git("add", "COMMIT")
+        git("commit", "--quiet", "-m", "Record claimed archive identity")
+        commit = git("rev-parse", "HEAD")
+    (root / "module.py").write_text("VALUE = 3\n")
+    assert run_case.component_commit(root) == commit + "-dirty"
+
+
+def test_unknown_dirtiness_is_not_encoded_as_a_clean_manifest_commit():
+    assert run_case.manifest_commit({"component_commit": "a" * 40,
+                                     "component_dirty": None}) == "a" * 40 + "-dirty"
+
+
+def test_a_timed_out_source_read_is_unknown(tmp_path, monkeypatch):
+    from faraday_singularity import provenance
+
+    def timeout(*args, **kwargs):
+        assert kwargs["timeout"] == 60
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(provenance.subprocess, "check_output", timeout)
+    assert provenance.component_commit(tmp_path) == "unknown"

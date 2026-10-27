@@ -460,3 +460,16 @@ def test_thresholds_skip_non_finite_endpoints():
         assert e[name] is None
     assert "single_like_for_like_rel_error" not in e
     assert "modes_rel_error_vs_exact" not in e
+
+
+def test_run_labels_never_reuse_another_case_name(tmp_path):
+    sys.path.insert(0, str(ROOT / "verificationCases"))
+    import compare_linear as cl
+
+    # two directories of case "case" are numbered; a third case whose own id is "00-case" keeps
+    # it, so the numbered names skip it; a directory passed twice reuses its label
+    runs = [tmp_path / name for name in ("a", "b", "c", "a")]
+    labels = cl.run_labels(runs, ["case", "case", "00-case", "case"])
+    assert labels == ["01-case", "02-case", None, "01-case"]
+    names = [label or case_id for label, case_id in zip(labels[:3], ["case", "case", "00-case"])]
+    assert len(set(names)) == 3
