@@ -151,10 +151,90 @@ def _gmsh_files(run: Path) -> dict[str, str]:
             if f.is_file()}
 
 
+# The momentum closures of the ring's surgeries read cell by cell across their rebuilds (the
+# groove fill's G2 at its commit, the others' after it): by design these differ from a reference
+# run of an earlier commit, the midpoint rule's value kept beside them as ``<P>2_grid``. Only these
+# keys are mapped (CELL_READ_CLOSURES), and only where the two runs' outputs differ.
+CELL_READ_CLOSURES = ("R", "Q", "S", "A")  # the ring cut, its removal, the rupture, the repair
+CELL_READ_COLUMN = "F2"  # events.txt: the relative value of each surgery's closure 2
+
+
+def _as_midpoint(x):
+    """A JSON value with each closures record of CELL_READ_CLOSURES read as its reference's: its
+    ``<P>2`` the midpoint rule's ``<P>2_grid`` (the cell reading present and finite, asserted),
+    ``relative[<P>2]`` recomputed from it against ``scales["P_ref"]`` as ``ringsurgery.
+    _ring_closures`` computes it, ``<P>2_grid`` and ``<P>2_split`` dropped; nothing else."""
+    import math
+
+    if isinstance(x, list):
+        return [_as_midpoint(v) for v in x]
+    if not isinstance(x, dict):
+        return x
+    out = {k: _as_midpoint(v) for k, v in x.items()}
+    for P in CELL_READ_CLOSURES:
+        key = f"{P}2"
+        if f"{key}_grid" not in out:
+            continue
+        cell = out[key]
+        assert isinstance(cell, (int, float)) and math.isfinite(cell), (key, cell)
+        out[key] = out.pop(f"{key}_grid")
+        out.pop(f"{key}_split", None)
+        if key in (out.get("relative") or {}):
+            out["relative"] = dict(out["relative"], **{key: _midpoint_relative(out, P)})
+    return out
+
+
+def _midpoint_relative(closures: dict, P: str) -> float | None:
+    """The closure ``<P>2`` of a cell-read record as the midpoint rule's (``<P>2_grid``, or
+    ``<P>2`` once mapped), relative to its scale ``P_ref`` as ``ringsurgery._ring_closures``
+    computes it and ``surgery._jsonable`` writes it (NaN at a zero scale, written null)."""
+    import math
+
+    value = closures.get(f"{P}2_grid", closures.get(f"{P}2"))
+    scale = float((closures.get("scales") or {}).get("P_ref", 0.0))
+    rel = float(value) / scale if scale and value is not None else math.nan
+    return rel if math.isfinite(rel) else None
+
+
+def _events_rows_as_midpoint(text: str, run: Path) -> str:
+    """events.txt with the CELL_READ_COLUMN of each row of a cell-read surgery read as the
+    midpoint rule's, formatted as the row writes it: a row whose record (``events/event_<k>.json``)
+    holds ``<P>2_grid`` for the prefix its kind takes (as ``CollapseDriver._write_ring_event_row``
+    takes it). The exported cell of such a row must first equal its record's cell-read value
+    (``relative[<P>2]``, as the row writes it): a wrong, missing or unparsable cell fails. Every
+    other row and column as it is."""
+    from faraday_singularity.driver import _table_cell
+
+    head, *rows = text.splitlines()
+    cols = head[2:].split("\t")
+    if CELL_READ_COLUMN not in cols:
+        return text
+    col, kind_col, k_col = cols.index(CELL_READ_COLUMN), cols.index("kind"), cols.index("k")
+    out = [head]
+    for row in rows:
+        cells = row.split("\t")
+        kind = cells[kind_col]
+        prefix = {"ring-collapse": "Q", "sheet-rupture": "S"}.get(kind, "R")
+        path = run / "events" / f"event_{int(float(cells[k_col])):03d}.json"
+        closures = (json.loads(path.read_text()).get("closures") or {}) if path.is_file() else {}
+        if prefix in CELL_READ_CLOSURES and f"{prefix}2_grid" in closures:
+            # the exported cell must be the row's own record's cell-read value before it is mapped
+            exported = _table_cell((closures.get("relative") or {}).get(f"{prefix}2"))
+            assert col < len(cells) and cells[col] == exported, (
+                f"events.txt row {cells[k_col]}: {CELL_READ_COLUMN} "
+                f"{cells[col] if col < len(cells) else None!r} is not its record's {exported!r}")
+            cells[col] = _table_cell(_midpoint_relative(closures, prefix))
+        out.append("\t".join(cells))
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
 def _same_outputs(a: Path, b: Path) -> list[str]:
     """Every file of two run directories (but pyoomph's own, under ``_*``) the same: to the byte,
     but the wall-time column of ``collapse.txt`` and the wall times of the JSON records; and the
-    files gmsh wrote for them (``_gmsh``) the same, by name and hash, none deleted in one only."""
+    files gmsh wrote for them (``_gmsh``) the same, by name and hash, none deleted in one only.
+    Where two runs differ, the cell-read closures alone are read as the midpoint rule's
+    (CELL_READ_CLOSURES: ``<P>2`` from ``<P>2_grid``; in events.txt the CELL_READ_COLUMN of
+    those surgeries' rows only, from their records)."""
     assert _gmsh_files(a) == _gmsh_files(b)
     names = sorted(f.relative_to(a).as_posix() for f in a.rglob("*") if f.is_file()
                    and not f.relative_to(a).parts[0].startswith("_"))
@@ -171,8 +251,14 @@ def _same_outputs(a: Path, b: Path) -> list[str]:
                 cu, cv = u.split("\t"), v.split("\t")
                 assert cu[:wall] + cu[wall + 1:] == cv[:wall] + cv[wall + 1:], name
         elif name.endswith(".json"):
-            assert _without_wall(json.loads(x.read_text())) == _without_wall(
-                json.loads(y.read_text())), name
+            jx, jy = (_without_wall(json.loads(f.read_text())) for f in (x, y))
+            assert jx == jy or _as_midpoint(jx) == _as_midpoint(jy), name
+        elif name == "events.txt":
+            # each table's cell-read rows checked against their own records, always (a table
+            # that keeps a reference's F2 against its own record fails even when byte-identical)
+            mx, my = (_events_rows_as_midpoint(f.read_text(), run) for f, run in ((x, a), (y, b)))
+            if x.read_bytes() != y.read_bytes():
+                assert mx == my, name
         else:
             assert x.read_bytes() == y.read_bytes(), name
     return names

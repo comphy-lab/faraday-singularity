@@ -477,8 +477,14 @@ add a second top-level `cases/` tree.
   (`axial_sampler(..., gas=)`), so the reading is the transfer's change alone and
   G2 is its magnitude; the midpoint value, the box's change less `Pz_fill`, kept as `G2_grid`, the
   split as `G2_split`; r1f's event 23 at step 13695, one cell 3.5e-3 from the
-  fill, fraction 0.34603 both times, 2.5e-9 of 2.7e-9); G3 and `G3_box` compare two samples on
-  one mesh over the points found both times, so no cell crosses there; G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
+  fill, fraction 0.34603 both times, 2.5e-9 of 2.7e-9; the ring's cut R2 and removal Q2 on the
+  half-disc on the axis, unweighted, the lip's rupture S2 and the axis repair A2 alike, each
+  surgery's own region read as gas on the side it is not liquid, `ringcontact.surface_cells(...,
+  region=)`, `_ring_closures(moved_change=)` recording `<P>2_grid`; the identity tests against
+  earlier commits map only `<P>2_grid` to the reference's `<P>2` for R, Q, S, A and drop only
+  events.txt's F2 column where the outputs differ, `test_events_fem.CELL_READ_CLOSURES`); G3 and
+  `G3_box` compare two samples on one mesh over the points found both times, so no cell crosses
+  there; G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
   but `G3_box` beyond its limit only a flag where the cutoff identity G3 holds and resolves it (its
   larger side at least `MERGE_RESOLVED` 0.5 of the unweighted disc momentum change,
   recorded as `G3_unweighted`, and at the momentum floor or above;

@@ -296,7 +296,7 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
     from .events import CAP_RETRY_HEIGHT, predict_unlocated
     from .groove import GrooveFillRefused, groove_fill_geometry
     from .ring import closed, loop_kept
-    from .ringcontact import axial_sampler, cell_readings, gas_of, momentum_change
+    from .ringcontact import momentum_change, surface_cells
     from .ringsurgery import (CORNER_TOL, RING_NOISE_FLOORS, _axis_ends, _base_record, _corners,
                               _focus_regions, _inside, _node_sets, _rebuild, _ring_closures,
                               _transfer_check, _zero_inside)
@@ -405,8 +405,8 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
     box_before.pop("fill")
     rings_before = [Chain(closed(L), ("loop", "loop")) for L in loops]
     # the cells near a free surface read by their liquid parts, for G2 (ringcontact)
-    cells_before = cell_readings(grid, gas_of([c for _, c in named] + rings_before,
-                                              s.reservoir_depth), axial_sampler(pb))
+    cells_before = surface_cells(pb, grid, [c for _, c in named] + rings_before,
+                                 s.reservoir_depth)
     poly_before = box_polyline_budgets([c for _, c in named] + rings_before, g.z_c, R_b,
                                        s.reservoir_depth, r_centre=g.r_c)
     U = float(g.U_max) if math.isfinite(g.U_max) else 0.0
@@ -519,10 +519,8 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
     filled = box_integrals(pb, grid, {"fill": g.fill}, cutoff=True)["fill"]
     # after the rebuild the filled region read as gas, by the midpoints and the liquid parts
     # alike: G2 the transfer's change alone
-    filled_gas = shapely.Polygon(g.fill).buffer(0)
-    gas_after = gas_of([c for _, c in new_named] + rings_after, s.reservoir_depth)
-    cells_after = cell_readings(grid, gas_after.union(filled_gas),
-                                axial_sampler(pb, gas=filled_gas))
+    cells_after = surface_cells(pb, grid, [c for _, c in new_named] + rings_after,
+                                s.reservoir_depth, region=g.fill)
     moved = momentum_change(grid, {"_cells": cells_before}, {"_cells": cells_after})
     fill.update(Pz_fill=filled["Pz"], KE_fill=filled["KE"], V_grid=filled["V_grid"],
                 unweighted=filled["unweighted"])
@@ -559,9 +557,7 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
                               {"A_cl": g.A_cl, "A_rem": g.A_rem},
                               sigma={"V": gs.sigma_V, "Pz": gs.sigma_Pz, "KE": gs.sigma_KE},
                               prefix="G", moved_change=moved["change"])
-    # the midpoint rule's G2, which the cell reading replaces, and the reading's split
-    closures["G2_grid"] = abs(box_transfer["Pz"] - box_before["Pz"] - fill["Pz_fill"])
-    closures["G2_split"] = moved
+    closures["G2_split"] = moved  # the reading's split; G2_grid the midpoint rule's G2
     unweighted_delta = box_after["unweighted"]["Pz"] - box_transfer["unweighted"]["Pz"]
     closures["G3_unweighted"] = {"delta_Pz": unweighted_delta, "value": abs(unweighted_delta),
                                   "limit": closures["limits"]["G3_box"]}
