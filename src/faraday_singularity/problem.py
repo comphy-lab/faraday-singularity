@@ -475,6 +475,19 @@ class FaradayProblem(Problem):
                         all(row[0] == 1.0 for row in part)))
         return out
 
+    def oomph_log_size(self) -> int | None:
+        """The size of the problem's log file in bytes (flushed first), or None without one: a
+        mark from which :meth:`oomph_log_tail` reads what a step wrote."""
+        from pyoomph import _pyoomph_core
+
+        _pyoomph_core._write_to_log_file("")
+        if self.logfile_name is None:
+            return None
+        try:
+            return Path(self.get_output_directory(self.logfile_name)).stat().st_size
+        except OSError:
+            return None
+
     def oomph_log_tail(self, size: int = 1 << 16) -> str:
         """The last ``size`` bytes of the problem's log file, or ``""`` without one.
 

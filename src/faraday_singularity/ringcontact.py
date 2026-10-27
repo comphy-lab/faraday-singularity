@@ -39,7 +39,13 @@ def loop_node_map(source, target) -> np.ndarray | None:
 
 
 def step_contact(points) -> dict | None:
-    """One crossing within two neighbouring quadratic elements, otherwise None."""
+    """The crossings of a candidate step within two neighbouring quadratic elements, else None.
+
+    One crossing, or a cluster of them at a closing corner (chords up to three apart crossing
+    each other and their neighbours, r2 at step 12661): every crossing lies in one window of at
+    most four chords, which starts its first element at most one node in, and each of them
+    crosses inside both chords (a node touching another chord is no crossing). A crossing
+    elsewhere on the loop leaves the cluster nonlocal (None)."""
     from .ring import loop_crossings
     from shapely.geometry import LineString
 
@@ -48,28 +54,167 @@ def step_contact(points) -> dict | None:
     if n < 6 or n % 2:
         return None
     hits = loop_crossings(P)
-    if len(hits) != 1:
+    if not hits:
         return None
-    a, b = hits[0]
-    if (b-a) % n > (a-b) % n:
-        a, b = b, a
-    span = (b-a) % n+1
+    windows = []
+    for a, b in hits:
+        if (b-a) % n > (a-b) % n:
+            a, b = b, a
+        windows.append((a, b, (b-a) % n+1))
+    first = windows[0][0]
+    offset = [((a-first+n//2) % n)-n//2 for a, _, _ in windows]
+    lo = min(offset)
+    hi = max(o+span-1 for o, (_, _, span) in zip(offset, windows))
+    a = (first+lo) % n
+    span = hi-lo+1
+    b = (a+span-1) % n
     if span > 4 or (a % 2+span-1)//2 > 1:
         return None
-    hit = LineString(P[[a, (a+1) % n]]).intersection(LineString(P[[b, (b+1) % n]]))
-    if hit.geom_type != "Point":
-        return None
+    points_hit = []
+    for i, j, _ in windows:
+        hit = LineString(P[[i, (i+1) % n]]).intersection(LineString(P[[j, (j+1) % n]]))
+        if hit.geom_type != "Point":
+            return None
+        if len(hits) > 1:  # a cluster crosses properly: a node on another chord is a touch
+            ends = P[[i, (i+1) % n, j, (j+1) % n]]
+            scale = 1e-9*max(np.hypot(*(P[(i+1) % n]-P[i])), np.hypot(*(P[(j+1) % n]-P[j])))
+            if np.min(np.hypot(*(ends-[hit.x, hit.y]).T)) <= scale:
+                return None
+        points_hit.append((hit.x, hit.y))
+    contact = np.mean(points_hit, axis=0)
     indices = ((a+np.arange(span+1)) % n).tolist()
     return {"trigger": "stepped-polygon", "chain": "ring", "contact": "polygon",
             "node_count": n, "nodes": [a, (a+1) % n, b, (b+1) % n],
             "local_indices": indices, "after_local": P[indices].tolist(),
-            "contact_r": float(hit.x), "contact_z": float(hit.y), "crossings": 1}
+            "contact_r": float(contact[0]), "contact_z": float(contact[1]),
+            "crossings": len(hits),
+            **({"crossing_pairs": [[int(i), int(j)] for i, j, _ in windows]}
+               if len(hits) > 1 else {})}
+
+
+# The fold of a step's result at a closing gas corner (r2 at step 12661, batch B): a run of at
+# least FOLD_RUN_NODES nodes whose turn alternates in sign above FOLD_RUN_TURN (degrees), its
+# largest turn at least FOLD_TURN, that the step's input does not have, within CORNER_REACH nodes
+# of a gas corner of the input (a left turn of at least CORNER_TURN over two chords on either
+# side) whose chord across CORNER_CHORDS nodes on either side the input's velocity closes.
+FOLD_RUN_TURN = 10.0
+FOLD_RUN_NODES = 6
+FOLD_TURN = 45.0
+CORNER_TURN = 45.0
+CORNER_REACH = 4
+CORNER_CHORDS = 3
+
+
+class RingStepFold(RuntimeError):
+    """A candidate step that folds or inverts at a closing gas corner of its input: rolled back
+    and retried once at a quarter of the step, which meets the crossing itself."""
+    def __init__(self, reading: dict):
+        super().__init__("a step folded at a closing corner of the ring")
+        self.reading = reading
+
+
+def input_key(r, z) -> str:
+    """The key of a step's input loop: the SHA-256 of its node coordinates in walk order (a
+    rollback or a restart restores them bitwise; a fill or a refine changes them)."""
+    P = np.ascontiguousarray(np.column_stack([np.asarray(r, dtype=np.float64),
+                                              np.asarray(z, dtype=np.float64)]))
+    import hashlib
+    return hashlib.sha256(P.tobytes()).hexdigest()
+
+
+def node_turns(P, chords: int = 1) -> np.ndarray:
+    """The turn of the loop at each node over ``chords`` chords on either side (degrees, left
+    positive: the gas lies inside the counter-clockwise loop)."""
+    P = np.asarray(P, dtype=float)
+    d1 = P - np.roll(P, chords, axis=0)
+    d2 = np.roll(P, -chords, axis=0) - P
+    return np.degrees(np.arctan2(d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0],
+                                 (d1 * d2).sum(axis=1)))
+
+
+def alternating_runs(P) -> list[tuple[int, int, float]]:
+    """The runs ``(first, length, largest turn)`` of nodes whose turn alternates in sign above
+    FOLD_RUN_TURN, at least FOLD_RUN_NODES long (periodic: a run may straddle the seam)."""
+    turn = node_turns(P)
+    n = len(turn)
+    alt = (np.abs(turn) > FOLD_RUN_TURN) & (np.sign(turn) != np.sign(np.roll(turn, 1)))
+    if alt.all():
+        return [(0, n, float(np.abs(turn).max()))]
+    start = int(np.argmin(alt))  # a node outside every run: no run straddles it
+    out, k = [], 0
+    while k < n:
+        i = (start+k) % n
+        if not alt[i]:
+            k += 1
+            continue
+        length = 0
+        while k+length < n and alt[(start+k+length) % n]:
+            length += 1
+        if length >= FOLD_RUN_NODES:
+            idx = (i+np.arange(length)) % n
+            out.append((i, length, float(np.abs(turn[idx]).max())))
+        k += length
+    return out
+
+
+def closing_corners(P, U) -> list[dict]:
+    """The input's gas corners (two-chord left turns of at least CORNER_TURN) whose chord across
+    CORNER_CHORDS nodes on either side the velocity ``U`` of the nodes closes."""
+    P, U = np.asarray(P, dtype=float), np.asarray(U, dtype=float)
+    n = len(P)
+    turn = node_turns(P, 2)
+    out = []
+    for c in np.flatnonzero(turn >= CORNER_TURN):
+        lo, hi = (c-CORNER_CHORDS) % n, (c+CORNER_CHORDS) % n
+        chord = P[hi]-P[lo]
+        rate = float(chord @ (U[hi]-U[lo]) / max(np.hypot(*chord), 1e-300))
+        if rate < 0.0:
+            out.append({"index": int(c), "turn": float(turn[c]), "r": float(P[c, 0]),
+                        "z": float(P[c, 1]), "chord": float(np.hypot(*chord)),
+                        "closing_rate": rate})
+    return out
+
+
+def step_fold(before, velocity, after) -> dict | None:
+    """The fold of a candidate step at a closing gas corner of its input, else None.
+
+    ``before`` and ``after`` hold the same nodes in the same order (the driver maps them by
+    node identity); ``velocity`` is the input's node velocity. The result's new alternating run
+    (one the input has no node of) must lie within CORNER_REACH nodes of such a corner."""
+    B, A = np.asarray(before, dtype=float), np.asarray(after, dtype=float)
+    n = len(A)
+    if len(B) != n or n < 2*FOLD_RUN_NODES:
+        return None
+    old = set()
+    for i, length, _ in alternating_runs(B):
+        old.update(((i+np.arange(length)) % n).tolist())
+    corners = closing_corners(B, velocity)
+    if not corners:
+        return None
+    for i, length, turn in alternating_runs(A):
+        nodes = ((i+np.arange(length)) % n).tolist()
+        if turn < FOLD_TURN or old.intersection(nodes):
+            continue
+        near = [c for c in corners
+                if min(min((c["index"]-k) % n, (k-c["index"]) % n) for k in nodes)
+                <= CORNER_REACH]
+        if near:
+            corner = max(near, key=lambda c: c["turn"])
+            return {"trigger": "step-fold", "chain": "ring", "run_first": int(i),
+                    "run_nodes": int(length), "run_max_turn": turn,
+                    "run_r": float(A[nodes, 0].mean()), "run_z": float(A[nodes, 1].mean()),
+                    "corner": corner}
+    return None
 
 
 def step_wedge(points, reading: dict, *, stop_elements: float) -> tuple[dict | None, str]:
-    """Certify the pre-step pocket as gas; never operate on the crossed polygon."""
+    """Certify the pre-step pocket as gas; never operate on the crossed polygon.
+
+    The pocket is the floor fill's wedge at its apex, or where none is its corner of gas open
+    up to about a right angle (``FLOOR_CORNER_RATIO``, ``corner`` set), as the floor fill reads
+    a corner: a closing corner crosses within a step before it is a narrow wedge (r2, 12661)."""
     from .groove import gas_share, side_of
-    from .ring import floor_wedge, loop_spline_contact
+    from .ring import FLOOR_CORNER_RATIO, floor_wedge, loop_spline_contact
 
     P = np.asarray(points, dtype=float)
     n = len(P)
@@ -80,7 +225,12 @@ def step_wedge(points, reading: dict, *, stop_elements: float) -> tuple[dict | N
     if phase != "gas":
         return None, phase
     apex = indices[(len(indices)-1)//2]
-    return floor_wedge(P, apex, stop_elements=stop_elements), phase
+    wedge = floor_wedge(P, apex, stop_elements=stop_elements)
+    if wedge is None:
+        wedge = floor_wedge(P, apex, stop_elements=stop_elements, ratio=FLOOR_CORNER_RATIO)
+        if wedge is not None:
+            wedge["corner"] = True
+    return wedge, phase
 
 
 def spline_wedge(points, stop: dict, *, stop_elements: float) -> dict | None:

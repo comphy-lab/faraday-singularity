@@ -538,6 +538,16 @@ add a second top-level `cases/` tree.
   The native input is restored before a gas fill (`ring-contact-step-rollback`, with discarded
   distortion flags and the rejected diagnostics interval; `step-contact-fill`,
   `step_contact_fills`). Unreadable or liquid pockets keep `stepped-contact-unhandled`.
+  A cluster of crossings at a closing gas corner (chords up to three apart, every proper
+  crossing in one window of at most four chords within two quadratic elements) is one such
+  contact (`crossings`, `crossing_pairs`). A candidate that instead folds there (a new
+  odd-even run of at least six nodes, largest turn 45 degrees or more, within four nodes of
+  a gas corner of the input that turns at least 45 degrees over two chords and whose chord
+  across three nodes on either side the input velocity closes) or whose step rebuilt for an
+  inverted element while the input has such a corner, is rolled back and retried once at a
+  quarter of its step (`RingStepFold`, event `ring-step-fold-retry`; a later crossing records
+  it as `fold_retry`). No Courant number changes. Tangential node redistribution along the
+  ring (R3) is the principled cure for a corner's nodes bunching; it is deferred.
   Both fills use the existing hard G closures, `G_base`, recorded filled volume and the
   curve/locator-band transfer prediction (`events/event_<k>.json`); refusals and failed
   closures keep the existing resumable stops. A liquid-side kink instead uses the ring
