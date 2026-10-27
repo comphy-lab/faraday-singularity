@@ -763,7 +763,8 @@ when its signed volume and momentum changes, their local closures and the upward
 check satisfy hard bounds. Repeated operations are limited by a recurrence window and a
 cumulative volume bound. An independent integral of the affected finite element checks
 its signed volume change and its momentum after the planned velocity reset; the full local
-momentum and energy changes are accounted. The sliver is also integrated on its own positive quadrature; missing
+momentum and energy changes are accounted. The affected triangle must also meet the rebuild
+Jacobian threshold (`jacobian_min`) on fresh and stepped meshes. The sliver is also integrated on its own positive quadrature; missing
 points or a remaining guard stop restore the input. Its signed correction is retained in
 checkpoints and budget totals. This operation applies only near the bubble's tip, before
 piercing. After a native inversion failure has rolled the step back, a terminal dip may use the
