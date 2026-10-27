@@ -4265,7 +4265,7 @@ class CollapseDriver:
                 or not hasattr(self.pb, "straighten_interface_edges"):
             return m, stop
         from .axisrepair import AXIS_REPAIR_BOUND, AXIS_REPAIR_RECUR_STEPS
-        from .tipcontact import (closures, edge_patch, patch_budget, sliver_momentum,
+        from .tipcontact import (closures, edge_patch, patch_budget, patch_jacobian_bound, sliver_momentum,
                                  swept_edge, terminal_dimple)
         from .surgery import box_integrals, site_grid
 
@@ -4348,6 +4348,7 @@ class CollapseDriver:
                                0.5 * (velocity[0] + velocity[2]))
             mesh_before = patch_budget(patch, initial=True)
             mesh_planned = patch_budget(patch, planned=True)
+            jacobian_before = patch_jacobian_bound(patch, initial=True)
             applied = pb.straighten_interface_edges(*centre, radius)
             if applied["edges"] != read["edges"]:
                 raise RuntimeError("the straightening selection changed after admission")
@@ -4358,13 +4359,20 @@ class CollapseDriver:
             if dV >= 0:
                 quad = sliver_momentum(pb, sweep)
             mesh_after = patch_budget(patch)
+            jacobian_after = patch_jacobian_bound(patch)
             dP = mesh_after["Pz"] - mesh_before["Pz"]
             mesh = {"before": mesh_before, "after": mesh_after, "planned": mesh_planned}
             checks = closures(before, after, dV, dP, sigma, bound, speed, quad, mesh=mesh)
             base = base_guard_checked(m, after_m)
             if not base["ok"]:
                 checks["hard"].append("T_base")
-            rec.update(after=after, quadrature=quad, mesh=mesh, closures=checks, base=base)
+            jacobian = {"before": jacobian_before, "after": jacobian_after,
+                        "limit": self.reconnect.jacobian_min}
+            if not (math.isfinite(jacobian_before) and math.isfinite(jacobian_after)) \
+                    or jacobian_after < self.reconnect.jacobian_min:
+                checks["hard"].append("T_guard")
+            rec.update(after=after, quadrature=quad, mesh=mesh, closures=checks, base=base,
+                       jacobian=jacobian)
             if checks["hard"]:
                 raise RuntimeError("the tip edge's hard checks did not close")
             guard = self._tip_edge_guard()
@@ -4418,11 +4426,12 @@ class CollapseDriver:
         return self.measure(), found
 
     def _tip_edge_guard(self) -> dict | None:
-        """Read the fresh mesh's invalid-state predicates without invoking another repair.
+        """Read geometric guards without invoking another repair.
 
         The node polygons must be simple and mutually disjoint; their rebuild splines use
-        the configured vertex stride. Then read interface_guard and the native Jacobian
-        bound directly. A result or a topology read error becomes the transaction's T_guard;
+        the configured vertex stride. Then read interface_guard and, only on a fresh mesh,
+        the raw whole-mesh Jacobian bound. This transactional read offers no further repair;
+        a result or a topology read error becomes the transaction's T_guard;
         event requests and window ends belong to the caller's later dispatch.
         """
         from .reconnect import Chain, chains_disjoint, spline_contact_stop
@@ -4453,9 +4462,10 @@ class CollapseDriver:
         )["stop"]
         if guard is not None:
             return guard
-        bound = self.pb.curved_jacobian_bound(self.reconnect.jacobian_min)
-        if bound is not None and bound["min"] < self.reconnect.jacobian_min:
-            return {"reason": "interface-unresolved", "trigger": "curved-jacobian", **bound}
+        if self._fresh_mesh():
+            bound = self.pb.curved_jacobian_bound(self.reconnect.jacobian_min)
+            if bound is not None and bound["min"] < self.reconnect.jacobian_min:
+                return {"reason": "interface-unresolved", "trigger": "curved-jacobian", **bound}
         return None
 
     def _axis_fold_of(self, stop: dict | None) -> tuple[str, dict] | None:

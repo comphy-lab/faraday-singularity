@@ -1,4 +1,4 @@
-"""Runs without a fresh tip edge retain 6ef3c4d's stops and solutions."""
+"""Legacy pins against 6ef3c4d, plus the pre-merge stop battery at 4c98e0b."""
 
 from test_events_fem import _reference_src, _same_outputs
 from test_events_gasneck import BATTERY, _run
@@ -12,6 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_stops_without_a_tip_edge_are_6ef3c4ds(tmp_path):
     ref = _reference_src(tmp_path, "6ef3c4d")
+    a = json.loads(_run(BATTERY, ref, tmp_path / "a").read_text())
+    b = json.loads(_run(BATTERY, ROOT / "src", tmp_path / "b").read_text())
+    assert a == b and len(a) > 40
+
+
+def test_stops_without_a_tip_edge_match_4c98e0b_before_merge_152d39d(tmp_path):
+    ref = _reference_src(tmp_path, "4c98e0b")
     a = json.loads(_run(BATTERY, ref, tmp_path / "a").read_text())
     b = json.loads(_run(BATTERY, ROOT / "src", tmp_path / "b").read_text())
     assert a == b and len(a) > 40

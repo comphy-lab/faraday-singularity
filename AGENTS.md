@@ -545,7 +545,10 @@ add a second top-level `cases/` tree.
   volume bound is also a redundant preflight guard. The existing axis-repair bound and
   five-noise box limits are used. A failed check or operation restores the native
   input, including history values and freshness (`tip-edge-unclosed`). The audit reads only
-  geometric guards; later events and window ends are dispatched after acceptance. Axis folds
+  geometric guards, including the changed triangle's native Bezier bound at `jacobian_min`
+  on both fresh and stepped meshes (`T_guard`); the raw whole-mesh bound is read only on a
+  fresh mesh, without invoking another repair inside the audit. Later events and window ends
+  are dispatched after acceptance. Axis folds
   and their recurrence stops are excluded. The existing axis-repair recurrence window also
   bounds repeated tip operations, and their cumulative absolute volume cannot exceed that
   repair's volume bound; both checks persist across restarts. A made operation
@@ -556,8 +559,9 @@ add a second top-level `cases/` tree.
   `tip_edge_unavailable` (uncalibrated volume or momentum noise) and `tip_edge_volume`
   (cumulative absolute volume over the bound, or inadmissible sliver geometry).
   This does not rupture a film or change a ring's topology or removal rule.
-  Tests are `test_tip_edge.py`, `test_tip_edge_fem.py`, and pins against 6ef3c4d in
-  `test_tip_edge_identity.py`.
+  Tests are `test_tip_edge.py`, `test_tip_edge_fem.py`, and the retained pins against 6ef3c4d in
+  `test_tip_edge_identity.py`, with an additional stop battery against 4c98e0b, the integration
+  line before the tip-edge merge 152d39d.
 - Local ring contacts (`ringcontact.py`, recentred far kinks and enabled groove fill): a
   single rebuild-spline crossing within two adjacent quadratic elements, on a simple node
   polygon, is filled only after its local pocket is independently read as gas (`spline-fill`,

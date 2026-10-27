@@ -289,6 +289,20 @@ def test_curved_p2_triangle_integrals_match_exact_polynomial_moments():
         assert abs(got[key] - value) <= 6**2 * math.ulp(value)
 
 
+def test_patch_jacobian_maps_native_node_order_for_initial_and_planned_geometry():
+    from faraday_singularity.reconnect import p2_jacobian_bounds
+
+    P, _, inverse = triangle_fixture()
+    planned = P.copy()
+    planned[3, 1] += 0.2
+    permutation = np.array([4, 2, 0, 5, 3, 1])
+    patch = {"positions": P[permutation], "planned_positions": planned[permutation],
+             "inverse": np.linalg.inv(np.linalg.inv(inverse)[permutation])}
+    for positions, flags in ((P, {"initial": True}), (planned, {"planned": True})):
+        expected = p2_jacobian_bounds(positions, np.arange(6)[None, :])[0]
+        assert t.patch_jacobian_bound(patch, **flags) == pytest.approx(expected, abs=1e-12)
+
+
 @pytest.mark.parametrize("bad", ["negative-radius", "inverted", "zero-area"])
 def test_triangle_budget_refuses_invalid_geometry(bad):
     P, U, inverse = triangle_fixture()
@@ -319,7 +333,8 @@ def test_edge_patch_refuses_unsupported_native_readings(bad):
 
 
 @pytest.mark.parametrize("bad", ["touching", "polygon", "spline", "jacobian"])
-def test_the_pure_guard_reads_topology_and_jacobian_failures(monkeypatch, bad):
+@pytest.mark.parametrize("fresh", [False, True])
+def test_the_pure_guard_reads_topology_and_jacobian_failures(monkeypatch, bad, fresh):
     from faraday_singularity import reconnect, surgery, driver
     from faraday_singularity.driver import CollapseDriver
 
@@ -347,11 +362,14 @@ def test_the_pure_guard_reads_topology_and_jacobian_failures(monkeypatch, bad):
             curved_jacobian_bound=lambda limit: {"min": 0.1 if bad == "jacobian" else 1.0}
         ),
         reconnect=SimpleNamespace(rebuild_spline="nodes", jacobian_min=0.2),
-        _fresh_mesh=lambda: True,
+        _fresh_mesh=lambda: fresh,
         _h_floor=lambda: 0.01,
         s=SimpleNamespace(refine_ratio=1.5),
     )
     got = CollapseDriver._tip_edge_guard(fake)
+    if not fresh and bad == "jacobian":
+        assert got is None  # the whole-mesh bound belongs to fresh-mesh admission
+        return
     assert got is not None
     assert got["trigger"] == (
         "spline-contact"

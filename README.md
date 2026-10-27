@@ -766,7 +766,9 @@ its signed volume change and its momentum after the planned velocity reset; the 
 momentum and energy changes are accounted. The sliver is also integrated on its own positive quadrature; missing
 points or a remaining guard stop restore the input. Its signed correction is retained in
 checkpoints and budget totals. This operation applies only near the bubble's tip, before
-piercing. Local contacts at the ring's rim can also be met under the same hard fill budgets and
+piercing. After a native inversion failure has rolled the step back, a terminal dip may use the
+same audit once per step; its inversion site is recorded as unknown. Local contacts at the ring's
+rim can also be met under the same hard fill budgets and
 upward-base check. A single local crossing of the rebuild spline on a simple node polygon
 is filled only if its pocket reads as gas. With the inverted-element net's step snapshot, a crossing made by a candidate step is mapped by
 node identity to its simple input on the unchanged mesh; the input is restored before any

@@ -255,12 +255,100 @@ def test_a_fem_tip_edge_is_audited_and_failed_checks_restore_all_levels(
         drv.close()
 
 
-@pytest.mark.parametrize("bad_base", [False, True])
-def test_a_stepped_terminal_dimple_uses_the_same_audit_and_rollback(tmp_path, monkeypatch, bad_base):
+def _lower_an_unrelated_bulk_jacobian(pb):
+    """Deform one interior P2 edge far from either tip, keeping its elements positive."""
+    from faraday_singularity.reconnect import p2_jacobian_bounds
+
+    bulk = pb.get_mesh("liquid")
+    element = next(e for e in bulk.elements() if e.nnode() == 6
+                   and all(e.node_pt(k).x(0) > 1.5 and 0.1 < e.node_pt(k).x(1) < 0.4
+                           for k in range(6)))
+    local = np.array([element.local_coordinate_of_node(k) for k in range(6)])
+    k = next(k for k, point in enumerate(local) if np.any(np.isclose(point, 0.5)))
+    node = element.node_pt(k)
+    point = np.array([node.x(0), node.x(1)])
+    values, cells, _, fields = bulk.to_numpy(False, True, 0, False)[:4]
+    xy = np.asarray(values)[:, [fields["coordinate_x"], fields["coordinate_y"]]].copy()
+    cells = np.asarray(cells)
+    index = int(np.argmin(np.linalg.norm(xy - point, axis=1)))
+    assert np.linalg.norm(xy[index] - point) < 1e-12
+    affected = cells[np.any(cells == index, axis=1)]
+    assert len(affected) == 2  # an interior edge, with no free-surface node moved
+    length = max(np.linalg.norm(np.array([element.node_pt(j).x(0),
+                                         element.node_pt(j).x(1)]) - point)
+                 for j in range(6))
+    for fraction in np.linspace(0, 0.5, 501):
+        xy[index] = point + [0, fraction * length]
+        bounds = p2_jacobian_bounds(xy, affected)
+        if 0.1 < float(np.min(bounds)) < 0.19:
+            break
+    else:
+        pytest.fail("the remote interior edge did not reach a positive low Jacobian bound")
+    displacement = xy[index] - point
+    for t in range(node.ntstorage()):
+        for dim in range(2):
+            node.set_x_at_t(t, dim, node.x_at_t(t, dim) + float(displacement[dim]))
+    pb.invalidate_cached_mesh_data()
+    pb._jacobian_cache = None
+    bound = pb.curved_jacobian_bound(S.RECON.jacobian_min)
+    assert 0 < bound["min"] < S.RECON.jacobian_min
+    assert not bound["on_interface"] and bound["r"] > 1.5
+
+
+def _weaken_the_changed_triangle(pb, point, chord):
+    """Keep a valid dipped triangle whose boundary straightening would lower its bound."""
+    from itertools import product
+    from faraday_singularity.reconnect import p2_jacobian_bounds
+
+    patch = tipcontact.edge_patch(pb, point, chord, np.zeros(2))
+    local = np.linalg.inv(patch["inverse"])[:, 1:3]
+    surface = {(n.x(0), n.x(1)) for n in pb.get_mesh("liquid/interface").nodes()}
+    values, cells, _, fields = pb.get_mesh("liquid").to_numpy(False, True, 0, False)[:4]
+    xy = np.asarray(values)[:, [fields["coordinate_x"], fields["coordinate_y"]]].copy()
+    cells = np.asarray(cells)
+    for k, node in enumerate(patch["nodes"]):
+        if not np.any(np.isclose(local[k], 0.5)) or node.x(0) <= 0 \
+                or (node.x(0), node.x(1)) in surface:
+            continue
+        length = np.linalg.norm(point - chord) / 0.15
+        for dr, dz in product(np.linspace(-0.4, 0.4, 25), repeat=2):
+            displacement = length * np.array([dr, dz])
+            candidate = dict(patch)
+            candidate["positions"] = patch["positions"].copy()
+            candidate["planned_positions"] = patch["planned_positions"].copy()
+            candidate["positions"][k] += displacement
+            candidate["planned_positions"][k] += displacement
+            before = tipcontact.patch_jacobian_bound(candidate, initial=True)
+            after = tipcontact.patch_jacobian_bound(candidate, planned=True)
+            if before >= S.RECON.jacobian_min and 0 < after < 0.19:
+                index = int(np.argmin(np.linalg.norm(xy - patch["positions"][k], axis=1)))
+                trial = xy.copy()
+                trial[index] += displacement
+                affected = cells[np.any(cells == index, axis=1)]
+                if np.min(p2_jacobian_bounds(trial, affected)) <= 0:
+                    continue
+                for level in range(node.ntstorage()):
+                    for dim in range(2):
+                        node.set_x_at_t(level, dim, node.x_at_t(level, dim)
+                                        + float(displacement[dim]))
+                pb.invalidate_cached_mesh_data()
+                pb._jacobian_cache = None
+                assert pb.curved_jacobian_bound(S.RECON.jacobian_min)["min"] > 0
+                return
+    pytest.fail("no valid dipped triangle whose straightening lowers its own bound was found")
+
+
+@pytest.mark.parametrize("failure", [None, "base", "jacobian"])
+@pytest.mark.parametrize("unrelated_low_bound", [False, True])
+def test_a_stepped_terminal_dimple_uses_the_same_audit_and_rollback(
+    tmp_path, monkeypatch, failure, unrelated_low_bound
+):
     with S.pierce_problem(tmp_path / "pb") as pb:
         pb.initialise()
         S.impose(pb)
         record = S.gas_cut_record(pb)
+        if unrelated_low_bound:
+            _lower_an_unrelated_bulk_jacobian(pb)
         loop = next(c for c in pb.interface_segments() if not c["open"])
         P = np.column_stack([loop["r"], loop["z"]])
         point = P[-2]
@@ -274,6 +362,8 @@ def test_a_stepped_terminal_dimple_uses_the_same_audit_and_rollback(tmp_path, mo
             for k in range(2):
                 mid.set_x_at_t(t, k, float(0.5 * (a[k] + b[k]) + 0.15 * normal[k]))
         pb.invalidate_cached_mesh_data()
+        if failure == "jacobian":
+            _weaken_the_changed_triangle(pb, np.array([mid.x(0), mid.x(1)]), 0.5 * (a + b))
         block = EventSettings.from_dict({
             "groove": {"enabled": True, "sigma_V": 1e-8, "sigma_Pz": 1e-6},
             "jetcore": {"enabled": True, "far_kinks": "recentre"}})
@@ -289,7 +379,7 @@ def test_a_stepped_terminal_dimple_uses_the_same_audit_and_rollback(tmp_path, mo
         loop = next(c for c in pb.interface_segments() if not c["open"])
         P = np.column_stack([loop["r"], loop["z"]])
         assert tipcontact.terminal_dimple(P, S.RECON.edge_turn_refine, 0.1) is not None
-        if bad_base:
+        if failure == "base":
             original = dv.base_guard_checked
             monkeypatch.setattr(dv, "base_guard_checked",
                                 lambda *args: dict(original(*args), ok=False))
@@ -302,8 +392,12 @@ def test_a_stepped_terminal_dimple_uses_the_same_audit_and_rollback(tmp_path, mo
         rec = json.loads(next((tmp_path / "run/events").glob("tip_edge_*.json")).read_text())
         assert rec["guard"]["trigger"] == "tip-dimple" and not rec["guard"]["fresh"]
         assert rec["failed_step"] == failed
-        if bad_base:
-            assert stop["trigger"] == "tip-edge-unclosed" and "T_base" in rec["closures"]["hard"]
+        if failure is not None:
+            hard = "T_base" if failure == "base" else "T_guard"
+            assert stop["trigger"] == "tip-edge-unclosed" and rec["closures"]["hard"] == [hard]
+            if failure == "jacobian":
+                assert rec["jacobian"]["before"] >= rec["jacobian"]["limit"]
+                assert 0 < rec["jacobian"]["after"] < rec["jacobian"]["limit"]
             np.testing.assert_array_equal(state_vector(pb), vector)
             np.testing.assert_array_equal(history, [[mid.x_at_t(t, k) for k in range(2)]
                                                     for t in range(mid.ntstorage())])
@@ -311,6 +405,11 @@ def test_a_stepped_terminal_dimple_uses_the_same_audit_and_rollback(tmp_path, mo
         else:
             assert stop is None and rec["closures"]["hard"] == [] and rec["base"]["ok"]
             assert len(drv._tip_edge_balances) == 1
+            if unrelated_low_bound:
+                pb._jacobian_cache = None
+                bound = pb.curved_jacobian_bound(S.RECON.jacobian_min)
+                assert 0 < bound["min"] < S.RECON.jacobian_min
+                assert not bound["on_interface"] and bound["r"] > 1.5
         assert not drv._fresh_mesh()
         assert drv._failed_step_retry(m, failed) is None  # at most once at this step
         drv.close()

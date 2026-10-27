@@ -230,3 +230,20 @@ def patch_budget(patch, *, planned=False, initial=False):
         P = np.array([[n.x(0), n.x(1)] for n in patch["nodes"]])
         U = np.array([[n.value(k) for k in patch["fields"]] for n in patch["nodes"]])
     return triangle_budget(P, U, patch["inverse"])
+
+
+def patch_jacobian_bound(patch, *, planned=False, initial=False) -> float:
+    """Read the changed triangle's Bezier bound in its native local coordinates."""
+    from .reconnect import p2_jacobian_bounds
+
+    if planned or initial:
+        P = patch[("planned_" if planned else "") + "positions"]
+    else:
+        P = np.array([[n.x(0), n.x(1)] for n in patch["nodes"]])
+    # Map the native node order to p2_jacobian_bounds' three vertices and
+    # edge nodes through the same native interpolation used by the budgets.
+    local = np.array([[1., 0.], [0., 1.], [0., 0.], [.5, .5], [0., .5], [.5, 0.]])
+    x, y = local.T
+    basis = np.column_stack([np.ones(6), x, y, x*x, x*y, y*y])
+    positions = basis @ (patch["inverse"] @ (P - P[0]))
+    return float(p2_jacobian_bounds(positions, np.arange(6)[None, :])[0])
