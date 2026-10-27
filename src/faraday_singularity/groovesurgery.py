@@ -47,7 +47,13 @@ The fill is a rebuild the project owns, as the ring surgeries are (``ringsurgery
 7. **Budgets after and closures** (``ringsurgery._ring_closures``, prefix ``G``; for a fill at
    the floor the base of the upward jet besides, ``G_base``, below): G1 the volume the
    liquid gains against the filled volume, G2 the momentum the transfer carries against the filled
-   region's, G3 the projection's momentum balance in the disc (the cutoff identity) and ``G3_box``
+   region's (read cell by cell across the rebuild, ``ringcontact.momentum_change``: a cell whose
+   midpoint the rebuild moved across a free surface counts its liquid part's change, the filled
+   region counted as gas after the rebuild by its midpoint samples and its liquid parts alike, so
+   that the reading is the transfer's change alone;
+   the midpoint rule's value, the box's change less ``Pz_fill``, kept as ``G2_grid``), G3 the
+   projection's momentum balance in the disc (the cutoff
+   identity) and ``G3_box``
    the disc's change of momentum by the projection, hard (``surgery.BudgetUnclosed``,
    ``event-unclosed``), but ``G3_box`` beyond its limit only a flag where the identity G3 resolves
    it, the impulse of the merge (:func:`merge_impulse`); G4-G6 (energies, area) flags; then the
@@ -290,6 +296,7 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
     from .events import CAP_RETRY_HEIGHT, predict_unlocated
     from .groove import GrooveFillRefused, groove_fill_geometry
     from .ring import closed, loop_kept
+    from .ringcontact import axial_sampler, cell_readings, gas_of, momentum_change
     from .ringsurgery import (CORNER_TOL, RING_NOISE_FLOORS, _axis_ends, _base_record, _corners,
                               _focus_regions, _inside, _node_sets, _rebuild, _ring_closures,
                               _transfer_check, _zero_inside)
@@ -397,6 +404,9 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
     box_before = box_integrals(pb, grid, {"fill": g.fill}, cutoff=True)
     box_before.pop("fill")
     rings_before = [Chain(closed(L), ("loop", "loop")) for L in loops]
+    # the cells near a free surface read by their liquid parts, for G2 (ringcontact)
+    cells_before = cell_readings(grid, gas_of([c for _, c in named] + rings_before,
+                                              s.reservoir_depth), axial_sampler(pb))
     poly_before = box_polyline_budgets([c for _, c in named] + rings_before, g.z_c, R_b,
                                        s.reservoir_depth, r_centre=g.r_c)
     U = float(g.U_max) if math.isfinite(g.U_max) else 0.0
@@ -507,6 +517,13 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
         fill.update(_zero_inside(pb, sets, g.fill, (math.inf, -math.inf), 0.0))
         pb.invalidate_cached_mesh_data()
     filled = box_integrals(pb, grid, {"fill": g.fill}, cutoff=True)["fill"]
+    # after the rebuild the filled region read as gas, by the midpoints and the liquid parts
+    # alike: G2 the transfer's change alone
+    filled_gas = shapely.Polygon(g.fill).buffer(0)
+    gas_after = gas_of([c for _, c in new_named] + rings_after, s.reservoir_depth)
+    cells_after = cell_readings(grid, gas_after.union(filled_gas),
+                                axial_sampler(pb, gas=filled_gas))
+    moved = momentum_change(grid, {"_cells": cells_before}, {"_cells": cells_after})
     fill.update(Pz_fill=filled["Pz"], KE_fill=filled["KE"], V_grid=filled["V_grid"],
                 unweighted=filled["unweighted"])
     record["fill"] = fill
@@ -541,7 +558,10 @@ def _groove_fill(pb, events, s, out: Path, record: dict, progress: dict, request
                                "after_projection": box_after}, box, scales,
                               {"A_cl": g.A_cl, "A_rem": g.A_rem},
                               sigma={"V": gs.sigma_V, "Pz": gs.sigma_Pz, "KE": gs.sigma_KE},
-                              prefix="G")
+                              prefix="G", moved_change=moved["change"])
+    # the midpoint rule's G2, which the cell reading replaces, and the reading's split
+    closures["G2_grid"] = abs(box_transfer["Pz"] - box_before["Pz"] - fill["Pz_fill"])
+    closures["G2_split"] = moved
     unweighted_delta = box_after["unweighted"]["Pz"] - box_transfer["unweighted"]["Pz"]
     closures["G3_unweighted"] = {"delta_Pz": unweighted_delta, "value": abs(unweighted_delta),
                                   "limit": closures["limits"]["G3_box"]}

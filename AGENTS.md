@@ -470,7 +470,15 @@ add a second top-level `cases/` tree.
   sample a rebuild moves across a fast free surface weighs nothing; the unweighted sums kept as
   `unweighted`, the unweighted G2 reported as `G2_unweighted`, never a flag,
   `groovesurgery.unweighted_g2`; `test_fill_cutoff.py`, `test_fill_cutoff_identity.py`, runs
-  without a fill b46713a's); G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
+  without a fill b46713a's); G2 read cell by cell across the rebuild
+  (`ringcontact.momentum_change` with `cell_readings` before and after the transfer: a cell whose
+  midpoint the rebuild moved across a free surface counts its revolved liquid part's change, the
+  filled region read as gas after the rebuild by the midpoint samples and the liquid parts alike
+  (`axial_sampler(..., gas=)`), so the reading is the transfer's change alone and
+  G2 is its magnitude; the midpoint value, the box's change less `Pz_fill`, kept as `G2_grid`, the
+  split as `G2_split`; r1f's event 23 at step 13695, one cell 3.5e-3 from the
+  fill, fraction 0.34603 both times, 2.5e-9 of 2.7e-9); G3 and `G3_box` compare two samples on
+  one mesh over the points found both times, so no cell crosses there; G1-G3 and `G3_box` hard (`ringsurgery._ring_closures`, prefix `G`),
   but `G3_box` beyond its limit only a flag where the cutoff identity G3 holds and resolves it (its
   larger side at least `MERGE_RESOLVED` 0.5 of the unweighted disc momentum change,
   recorded as `G3_unweighted`, and at the momentum floor or above;
