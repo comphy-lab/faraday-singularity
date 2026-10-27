@@ -717,7 +717,11 @@ add a second top-level `cases/` tree.
   step is written uncompressed: none of these changes a value written.
 - Runs of one case in fresh processes differ by about 1e-14 relative unless MKL runs on one thread
   (`MKL_NUM_THREADS=1`; `OMP_NUM_THREADS` alone does not do it); compare runs to round-off, or set
-  it when a comparison must be exact.
+  it when a comparison must be exact. Bitwise restart identity is a single-thread property; under
+  multi-threaded Pardiso restarts agree to round-off growth (about 3e-7 relative in momentum_z
+  within two steps of `test_ring_fem.py`'s post-cut continuation). `testCases/conftest.py` sets
+  MKL, OMP and OPENBLAS to one thread, overriding the caller, inherited by the processes the tests
+  start; no assertion depends on the caller's shell.
 - The wave height `h` of a collapse is `h_crest` from `postProcess/collapse_table.py
   --per-episode`: the largest elevation of the axis above the mean level over the crest episode
   before the trough that collapses. It is a wave height only in rows with `crest_jet` 0: when a
