@@ -290,6 +290,35 @@ def plot(results: list[dict], stem: Path) -> None:
     plt.close(fig)
 
 
+def run_labels(runs: list[Path], case_ids: list[str]) -> list[str | None]:
+    """File label of each run: one linear-response file per run directory.
+
+    A case analysed from one directory keeps its own name (label None). The directories of a case
+    analysed from more than one (two solver revisions, say) are numbered by first input position,
+    and a numbered name never takes another case's own name or an earlier numbered name. A
+    directory passed twice reuses its label.
+    """
+    dirs: dict[str, set[Path]] = {}
+    for run, case_id in zip(runs, case_ids):
+        dirs.setdefault(case_id, set()).add(run.resolve())
+    taken = {case_id for case_id, ds in dirs.items() if len(ds) == 1}
+    by_dir: dict[Path, str | None] = {}
+    labels: list[str | None] = []
+    for i, (run, case_id) in enumerate(zip(runs, case_ids)):
+        key = run.resolve()
+        if key not in by_dir:
+            if len(dirs[case_id]) == 1:
+                by_dir[key] = None
+            else:
+                n = i
+                while f"{n:02d}-{case_id}" in taken:
+                    n += 1
+                by_dir[key] = f"{n:02d}-{case_id}"
+                taken.add(by_dir[key])
+        labels.append(by_dir[key])
+    return labels
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -304,15 +333,11 @@ def main() -> int:
                     help="analyse runs that did not reach their planned end time")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    # one linear-response file per run directory: the files of a case analysed from more than one
-    # directory (two solver revisions, say) are numbered by input position
     case_ids = [read_case_id(run) for run in args.runs]
-    dirs: dict[str, set[Path]] = {}
-    for run, case_id in zip(args.runs, case_ids):
-        dirs.setdefault(case_id, set()).add(run.resolve())
+    labels = run_labels(args.runs, case_ids)
     results = [analyse(run, args.out, args.fit_start, args.fit_end, args.allow_incomplete,
-                       label=None if len(dirs[case_id]) == 1 else f"{i:02d}-{case_id}")
-               for i, (run, case_id) in enumerate(zip(args.runs, case_ids))]
+                       label=label)
+               for run, label in zip(args.runs, labels)]
     summary = {"runs": results, "thresholds": thresholds(results)}
     # an ambiguous group gives no threshold but discards neither the per-run comparison nor the
     # other groups
