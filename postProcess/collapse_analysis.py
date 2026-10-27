@@ -44,7 +44,8 @@ are still reported where they exist.
   profile when the jet grows from birth), ``beta`` is fitted as a straight cone over a fixed
   intermediate window from ``r_lo = inner_factor max(r_j, 1/|z''(0)|, h_near)`` to the largest
   radius ``r_hi <= outer_radius`` over which the tangent angle varies by at most ``angle_tol``.
-  Without such a window (``r_lo >= outer_radius`` or ``r_hi < 2 r_lo``) ``beta`` is not measured.
+  Without such a window (``r_lo >= outer_radius`` or ``r_hi < 2 r_lo``), or with fewer than
+  four fit nodes or no rising cone slope (status ``no cone fit``), ``beta`` is not measured.
   The tangent angles at five radii across the window, their spread and the range of
   ``alpha(beta)`` it implies are reported. The median of the driver's per-step ``beta_fit``, from a
   window that moves with the local scale, is kept as a diagnostic only.

@@ -14,6 +14,7 @@ dependencies = [
     "matplotlib>=3.7.5",
     # pyoomph is built with PYOOMPH_USE_MPI=ON (see below) and imports mpi4py at runtime.
     "mpi4py>=3.1",
+    "shapely>=2.1",
 ]
 
 # pyoomph comes from an immutable CoMPhy release commit (tag comphy-2026.09.21.1), not PyPI.

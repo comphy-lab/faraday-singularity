@@ -40,8 +40,9 @@ class RebuiltSurface:
 
     Its nodes are spaced ``h/2`` out to ``r = 0.5``, ``h`` the focus size of the last rebuild
     (``h_axis`` before any), so that ``h_near = h``, and move up at ``SPEED``. With ``auto_every``,
-    pyoomph's own remeshing rebuilds the mesh after every ``auto_every``-th solve, at the focus the
-    driver last set.
+    element distortion asks for a rebuild after every ``auto_every``-th solve once a focus is set:
+    pyoomph makes it inside the solve while ``do_call_remeshing_when_necessary`` is on, and
+    otherwise only flags it for the driver (``take_distortion_flags``), as ``FaradayProblem`` does.
     """
 
     def __init__(self, surface, auto_every: int | None = None):
@@ -54,6 +55,9 @@ class RebuiltSurface:
         self.nd = SimpleNamespace(radius=3.8317, depth=DEPTH)
         self.template = SimpleNamespace(focus=None)
         self.h_mesh = self.mesh_settings.h_axis
+        self.do_call_remeshing_when_necessary = True
+        self.flags: list[dict] = []
+        self.pyoomph_rebuilds = 0
 
     def get_current_time(self, dimensional=False, as_float=True):
         return self.t
@@ -62,7 +66,15 @@ class RebuiltSurface:
         self.t = t_end
         self.solves += 1
         if self.auto_every and self.solves % self.auto_every == 0 and self.template.focus:
-            self.force_remesh()
+            if self.do_call_remeshing_when_necessary:
+                self.pyoomph_rebuilds += 1
+                self.force_remesh()
+            else:
+                self.flags.append({"trigger": "expansion", "ratio": 1.8})
+
+    def take_distortion_flags(self):
+        flags, self.flags = self.flags, []
+        return flags
 
     def force_remesh(self):
         self.remesh_count += 1  # FaradayProblem.actions_after_remeshing
@@ -135,8 +147,10 @@ def _rows(outdir: Path) -> dict[str, np.ndarray]:
 
 
 def _rebuilds(outdir: Path) -> tuple[list[dict], list[dict]]:
-    """The refining and the coarsening rebuilds of the driver, in order."""
-    remesh = [e for e in _read_events(outdir) if e["event"] == "remesh"]
+    """The refining and the coarsening rebuilds of the driver's rule, in order (not those that
+    element distortion asked for)."""
+    remesh = [e for e in _read_events(outdir)
+              if e["event"] == "remesh" and e.get("reason") != "distortion"]
     return ([e for e in remesh if e["focus_size"] < e["h_near_before"]],
             [e for e in remesh if e["focus_size"] > e["h_near_before"]])
 
@@ -181,10 +195,11 @@ def test_refined_focus_is_not_coarsened_at_a_frozen_time(tmp_path, hold):
 
 @pytest.mark.parametrize("auto_every", [None, 3])
 def test_coarsening_follows_once_the_hold_has_passed(tmp_path, auto_every):
-    # the apex flattens long before the hold of the last refinement has passed; pyoomph's own
-    # remeshing (every third solve) neither ends nor extends that hold
-    s, pb, _ = _run(tmp_path, _flattening_trough, auto_every=auto_every, t_end=0.012,
-                    dt_max=2e-4, state_dt=1.0)
+    # the apex flattens long before the hold of the last refinement has passed; the rebuilds that
+    # element distortion asks for (every third solve), which the driver makes once a focus is set,
+    # neither end nor extend that hold
+    s, pb, status = _run(tmp_path, _flattening_trough, auto_every=auto_every, t_end=0.012,
+                         dt_max=2e-4, state_dt=1.0)
     tab = _rows(tmp_path / "a")
     refine, coarsen = _rebuilds(tmp_path / "a")
     assert [e["step"] for e in refine] == [1, 2]
@@ -197,8 +212,16 @@ def test_coarsening_follows_once_the_hold_has_passed(tmp_path, auto_every):
     assert coarsen[0]["time"] >= held and coarsen[0]["step"] == tab["step"][t >= held][0]
     assert coarsen[1]["step"] == coarsen[0]["step"] + s.min_steps_between_remesh
     assert not _wants_coarsening(tab, s)[-1]
-    if auto_every:
-        assert pb.remesh_count == len(refine) + len(coarsen) + pb.solves // auto_every
+    distortion = [e for e in _read_events(tmp_path / "a")
+                  if e["event"] == "remesh" and e.get("reason") == "distortion"]
+    assert status["distortion_remeshes"] == len(distortion) and status["pyoomph_remeshes"] == 0
+    if auto_every:  # a focus is set from the first step on: every flag is the driver's rebuild
+        assert len(distortion) == pb.solves // auto_every and pb.pyoomph_rebuilds == 0
+        assert pb.remesh_count == len(refine) + len(coarsen) + len(distortion)
+        assert all(e["trigger"] == "expansion" and e["flagged_substeps"] == 1
+                   and e["focus_size"] <= e["focus_size_before"] for e in distortion)
+    else:
+        assert not distortion
 
 
 def test_refinement_is_not_held(tmp_path):

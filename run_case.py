@@ -8,7 +8,8 @@ Example::
 
 Times in the case file are in forcing periods ``2 pi/Omega``. A case with a ``collapse`` block runs
 the collapse driver (``src/faraday_singularity/driver.py``) up to ``completion.t_max`` or until it
-stops at its conservative neck-radius or fold-gap cutoff, with the fixed step of
+stops at its conservative neck-radius or fold-gap cutoff or, if the case sets a finite
+``collapse.post_birth_aspect``, once a born jet is unambiguous, with the fixed step of
 ``time_stepping`` as its largest step. A
 Newton failure that the driver classifies as the approach to a pinch-off or to the singularity is
 such a stop, and the run is ``completed``; the stop is recorded under ``collapse.stop`` in
@@ -18,6 +19,81 @@ pyoomph's own command-line parser (e.g. ``--omp 4``). Each output directory rece
 ``run_status.json``, ``diagnostics.txt`` (axis height and velocity, mode amplitude, volume, area,
 kinetic energy, dissipation and remesh count after every step), pyoomph's per-step integrals and
 free-surface snapshots (``liquid__interface/``).
+
+Three keys of the ``collapse`` block are not driver settings. ``keep_stop_state`` (default false)
+keeps the state at a neck-radius stop as ``states/stop_<step>.dump``, outside the rotation of dumps:
+the landing state of a reconnection. ``landing``, a list of cut radii, keeps for each radius
+``delta`` the first state whose neck has closed to ``delta/1.05`` as ``states/landing_<delta>.dump``
+(``driver.CollapseDriver``); a radius the run cannot reach before its neck-radius stop, below 1.05
+times ``max(neck_stop, neck_stop_elements h_floor)``, is refused before any output (but in a cut or
+post-cut restart, where ``landing`` is inactive: below). A ``reconnect``
+block (``reconnect.ReconnectSettings``) builds the problem with the reconnection handler and the
+pressure-impulse projection, both inert until a cut, but compiled into it: the computed trajectory
+then differs from that of the ordinary case at round-off (deterministically; from the third step,
+by about 1e-14 relative, in the tests), and the step control carries the difference on. Two runs of
+one case in fresh processes also differ by about 1e-14 unless MKL, whose threaded solve is the
+source, runs on one thread (``MKL_NUM_THREADS=1``; ``OMP_NUM_THREADS`` alone does not do it); with
+it they have agreed to the byte. The block makes the cut only at a restart that adds or changes it
+(below). Without these keys the problem, the settings and every output are those of an ordinary case: the
+tests run the driver of this commit against that of commit ``9e0d8a1`` and compare every output.
+
+A restart (``--restart-from``) continues the run of the same case. It may also continue it under a
+derived case, one that differs from the parent's only in ``case_id``, the description
+``completion.value``, the collapse keys ``keep_stop_state``, ``landing``, ``neck_stop``,
+``state_dt`` and ``state_keep``, and ``collapse.reconnect.tau_end`` (``DERIVED_KEYS``: what the run
+keeps and where it stops, not the equations it solves): the parent's case is read from its
+``parameters.json``, whose recorded hash must be the manifest's, and the restart manifest records
+the parent's case hash and the keys that differ. This is how landing states are made from an
+existing run. The restart has one of three modes (``restart_admission``), recorded as
+``restart_mode`` in the manifest and in ``parameters.json``:
+
+* ``ordinary``: as above; a reconnect block, if any, must be the parent's own (``tau_end`` aside).
+* ``cut``: the derived case also adds or changes the ``collapse.reconnect`` block
+  (``CUT_DERIVED_KEYS``), and the state is a landing state from before any cut (a
+  ``landing_<delta>`` dump, or the ``stop_<step>`` dump of a neck-radius stop) whose recorded neck
+  radius puts ``delta`` within the cut's landing window; both are checked before any output. The
+  ``precut_<delta>`` dump of a cut run is a landing state too: a restart from it under any case with
+  a reconnect block, the cut's own included, is a cut. At its start the run cuts the neck
+  (``surgery.cut``: ``cut_diagnostics.json``, the kept ``precut`` and ``postcut`` dumps) and
+  continues under the collapse driver in its post-cut mode: the stops before a second change of
+  topology on both chains, a step that follows the tips and jets of both chains and the capillary
+  time of the smallest tip, ``tau = t - t_cut`` and ``tau_p = t - t_p`` in every output,
+  ``chains.txt`` (both chains and the jets of the three tips) and the profiles of both chains,
+  rotating dumps at least each time ``tau`` doubles and a dump of the state it ends on
+  (``driver.py``). A refused or failed cut, whatever failed in
+  it, ends the run as ``failed``, with the record and the stage reached in ``cut_diagnostics.json``
+  and under ``cut`` in ``run_status.json``, which names the ``precut`` dump once it was written;
+  nothing is loaded back into the problem.
+* ``post-cut``: a state written after the cut (the ``postcut`` dump, or a rotating dump of a run
+  after the cut, the one it ended on included), under the case of that cut or one derived from it
+  in ``DERIVED_KEYS``; the case's reconnect settings must be those the cut recorded but for
+  ``tau_end``, which it may raise (or remove) to go on after a run that ended there, and the state's
+  time after the cut must precede it. The driver restores the cut (``surgery.restore_cut``) and
+  continues in the post-cut mode.
+
+In both modes after a cut the case's ``landing`` and ``keep_stop_state`` (inherited from the landing
+run) are inactive, as ``parameters.json`` records (``inactive_after_cut``): one cut per run. Its cut
+radii are therefore not checked against its neck-radius stop either, so that a cut or continuation
+case may change ``neck_stop`` (``DERIVED_KEYS``); the check applies to every other run, before any
+output.
+
+The ``collapse.reconnect_events`` block (``events.EventSettings``) governs the run after the cut and
+needs a ``reconnect`` block. Only a cut restart, which may add, drop or change it with the reconnect
+block (``CUT_EVENTS_DERIVED_KEYS``), and a post-cut continuation, which may add or change it
+(``POST_CUT_DERIVED_KEYS``), take it; a run from the start or an ordinary restart with it is
+refused before any output. A state written with the block continues only under a case with it, and
+the keys of a class of events of which the state has made one must be those it recorded, unless the
+state is the one before an event (``precut_e<k>``), from which they apply anew
+(``_check_events``). ``parameters.json`` and the manifest record the block (``reconnect_events``),
+and ``run_status.json`` the events the run made and the end of its window (``events``,
+``window_end``, from the driver's result), or, for a run that failed in the cut of a liquid neck it
+made, that event (``event``).
+An unknown key of the ``collapse`` block is refused with a message before any output, as is an
+invalid block: an unknown or invalid key of it, liquid events without ``post.open_neck_stop`` false
+or without ``post.neck_floor``, or a ``post.minimum_dt`` above oomph-lib's default or above half the
+step-size floor after the cut (``events.minimum_dt_after_cut``), or a
+``jetcore.core_elements_per_scale`` below the run's elements per scale after the cut
+(``jetcore.core_ratio``).
 """
 
 from __future__ import annotations
@@ -60,12 +136,17 @@ def _shared_memory_btl() -> str | None:
 if "OMPI_MCA_btl" not in os.environ and (_btl := _shared_memory_btl()) is not None:
     os.environ["OMPI_MCA_btl"] = _btl
 
-from faraday_singularity.driver import CollapseDriver, CollapseSettings  # noqa: E402
+from faraday_singularity.driver import CollapseDriver, CollapseSettings, check_landing  # noqa: E402
 from faraday_singularity.cases import validate_case  # noqa: E402
+from faraday_singularity.events import (EVENT_SCHEMA, EVENTS_BLOCK, PRECUT_EVENT,  # noqa: E402
+                                        EventSettings, events_done, minimum_dt_after_cut,
+                                        split_events_block)
 from faraday_singularity.mesh import MeshSettings  # noqa: E402
 from faraday_singularity.parameters import CaseParameters, nondimensionalise  # noqa: E402
 from faraday_singularity.provenance import (component_commit, create_run_manifest,  # noqa: E402
                                             pyoomph_revision)
+from faraday_singularity.reconnect import (CONTINUATION_KEYS, ReconnectSettings,  # noqa: E402
+                                           split_collapse_block, tau_end_reached)
 
 MESH_KEYS = ("h_interface", "h_axis", "h_max", "grading", "interface_points")
 CASE_FIELDS_USED = ("schema", "case_id", "geometry.kind", "time_stepping.scheme",
@@ -85,11 +166,95 @@ def case_has_field(case: dict, field: str) -> bool:
     return True
 
 
-def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = False) -> dict:
-    """Validate restart custody before output, preserving explicitly imported legacy lineage."""
+# Keys a case derived from a parent run may change at a restart: the name, a description the runner
+# does not read, and the collapse keys that decide what the run keeps (the kept states, the cadence
+# and number of rotating dumps, which write the state and do not change it) and where it stops, not
+# the equations it solves. Of the reconnect block only tau_end, which decides where a run after its
+# cut ends (reconnect.CONTINUATION_KEYS): adding, dropping or changing the block otherwise compiles
+# or removes the projection and the handler, whose trajectory then departs from the ordinary one at
+# round-off, from the third step in the tests (a cut, which changes it outright, is another matter).
+# Every other reconnect key is a cut key, the guard of the interface after the cut and the checks
+# of its curved elements included (edge_turn_*, midside_*, jacobian_min, high_order_threshold,
+# quality_floor, inverted_element_remesh, apex_extent, apex_lookahead, rebuild_spline): a case that
+# changes one cuts again from a landing state (CUT_DERIVED_KEYS), and no continuation takes it.
+DERIVED_KEYS = ("case_id", "completion.value", "collapse.keep_stop_state", "collapse.landing",
+                "collapse.neck_stop", "collapse.state_dt", "collapse.state_keep") + tuple(
+                    "collapse.reconnect." + k for k in CONTINUATION_KEYS)
+# A restart that cuts the neck of a landing state at its start: its case adds (or changes) the
+# reconnect block, which governs only what follows the cut. The reconnection prototype cuts the
+# state it loads too, so its case may also add or change that block.
+CUT_DERIVED_KEYS = DERIVED_KEYS + ("collapse.reconnect",)
+PROTOTYPE_DERIVED_KEYS = CUT_DERIVED_KEYS
+# The block of the events after the cut (events.EventSettings), which governs only what follows the
+# cut: a cut restart may add, drop or change it with the reconnect block, and a continuation after
+# the cut may add it or change it, within what events.EventSettings.refused_changes allows (the keys
+# of a class of events are fixed once an event of the class was made). The prototype takes no such
+# block.
+EVENTS_KEY = "collapse." + EVENTS_BLOCK
+CUT_EVENTS_DERIVED_KEYS = CUT_DERIVED_KEYS + (EVENTS_KEY,)
+POST_CUT_DERIVED_KEYS = DERIVED_KEYS + (EVENTS_KEY,)
+# Restart modes: continue a run before any cut; cut at the start, then continue after the cut;
+# continue a run from a state written after its cut.
+ORDINARY, CUT, POST_CUT = "ordinary", "cut", "post-cut"
+
+
+def case_differences(a, b, prefix: str = "") -> list[str]:
+    """Dotted keys at which two case objects differ (a key in one only counts once)."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = []
+        for key in sorted(set(a) | set(b), key=str):
+            name = f"{prefix}.{key}" if prefix else str(key)
+            if key not in a or key not in b:
+                out.append(name)
+            else:
+                out += case_differences(a[key], b[key], name)
+        return out
+    return [] if a == b else [prefix]
+
+
+def derived_case_keys(parent_case: dict, case: dict, allowed=DERIVED_KEYS) -> list[str]:
+    """The keys in which ``case`` differs from ``parent_case``; refuses any outside ``allowed``."""
+    diffs = case_differences(parent_case, case)
+    foreign = [k for k in diffs if not any(k == d or k.startswith(d + ".") for d in allowed)]
+    if foreign:
+        raise SystemExit("restart parent belongs to a different case: it differs in "
+                         + ", ".join(foreign))
+    return diffs
+
+
+def recorded_parent_case(parent: Path, case_sha256: str) -> dict:
+    """The case a parent run recorded in its ``parameters.json``, if that file names the hash."""
+    path = parent / "parameters.json"
+    try:
+        recorded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        recorded = None
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("case"), dict) or \
+            recorded.get("provenance", {}).get("case_sha256") != case_sha256:
+        raise SystemExit("restart parent belongs to a different case, and its parameters.json "
+                         "does not record that case to compare with")
+    return recorded["case"]
+
+
+def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = False,
+                   derived_keys=DERIVED_KEYS, post_cut: bool = False) -> dict:
+    """Validate restart custody before output, preserving explicitly imported legacy lineage.
+
+    A parent with a normalised manifest may have run the same case or one from which ``case`` is
+    derived in ``derived_keys``. A state written after a cut is refused unless ``post_cut``: only
+    this runner continues one (:func:`restart_admission`), the prototype cuts states before any
+    cut."""
     state = state.resolve()
     if not state.is_file() or not state.with_suffix(".json").is_file():
         raise SystemExit("restart needs both its state dump and driver metadata")
+    try:
+        meta = json.loads(state.with_suffix(".json").read_text())
+    except ValueError:
+        meta = None
+    if isinstance(meta, dict) and meta.get("cut") is not None and not post_cut:
+        raise SystemExit("the state was written after a cut: one cut per run, so this entry point "
+                         "takes a state from before any cut; continue a post-cut state with "
+                         "simulationCases/run_faraday.py and the case of the cut")
     parent = state.parent.parent
     manifest_path = parent / "run-manifest.json"
     case_hash = hashlib.sha256(case_path.read_bytes()).hexdigest()
@@ -119,18 +284,173 @@ def restart_record(state: Path, case: dict, case_path: Path, *, legacy: bool = F
             raise SystemExit("restart has no parent run-manifest.json; legacy imports need --legacy-restart-from")
         recorded_path = manifest_path
         recorded = json.loads(manifest_path.read_text())
-        if recorded.get("case_sha256") != case_hash:
-            raise SystemExit("restart parent belongs to a different case")
+        parent_case_hash = str(recorded.get("case_sha256", ""))
+        derived = None
+        if parent_case_hash != case_hash:
+            derived = derived_case_keys(recorded_parent_case(parent, parent_case_hash), case,
+                                        derived_keys)
         if recorded.get("schema") != "pyoomph-runner-manifest-v1" or not re.fullmatch(
                 r"[0-9a-f]{40}", str(recorded.get("component_commit", ""))):
             raise SystemExit("restart parent needs a normalised manifest and a clean source commit")
         parent_format = "pyoomph-runner-manifest-v1"
         parent_commit = recorded["component_commit"]
-    return {"path": str(state), "sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
-            "metadata_sha256": hashlib.sha256(state.with_suffix(".json").read_bytes()).hexdigest(),
-            "parent_record": {"path": str(recorded_path),
-                              "sha256": hashlib.sha256(recorded_path.read_bytes()).hexdigest(),
-                              "format": parent_format, "component_commit": parent_commit}}
+    out = {"path": str(state), "sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+           "metadata_sha256": hashlib.sha256(state.with_suffix(".json").read_bytes()).hexdigest(),
+           "parent_record": {"path": str(recorded_path),
+                             "sha256": hashlib.sha256(recorded_path.read_bytes()).hexdigest(),
+                             "format": parent_format, "component_commit": parent_commit}}
+    if not legacy and derived is not None:  # a restart of the same case records what it did
+        out["parent_record"].update(case_sha256=parent_case_hash, derived_keys=derived)
+    return out
+
+
+def _derives_reconnect(record: dict) -> bool:
+    """Whether the case adds, drops or changes the parent's reconnect block in more than the keys a
+    continuation may change (``CONTINUATION_KEYS``): a cut."""
+    keys = record["parent_record"].get("derived_keys", [])
+    allowed = {"collapse.reconnect." + k for k in CONTINUATION_KEYS}
+    return any((k == "collapse.reconnect" or k.startswith("collapse.reconnect."))
+               and k not in allowed for k in keys)
+
+
+def landing_neck(meta: dict) -> float | None:
+    """The neck radius recorded with a landing state: a ``landing_<delta>`` dump, a ``stop_<step>``
+    dump of a neck-radius stop, or the ``precut_<delta>`` dump of a cut (the state it started from);
+    None for any other dump."""
+    landing, stop, neck = meta.get("landing"), meta.get("stop"), meta.get("neck")
+    if isinstance(landing, dict):
+        return landing.get("r_neck")
+    if isinstance(stop, dict) and stop.get("trigger") == "neck-radius":
+        return stop.get("r_neck")
+    if meta.get("cut_stage") == "precut" and isinstance(neck, dict):
+        return neck.get("r_neck")
+    return None
+
+
+def _check_cut_landing(meta: dict, reconnect) -> None:
+    """Refuse a cut of a state that is no landing state, or whose neck puts ``delta`` outside the
+    cut's landing window."""
+    r_n = landing_neck(meta)
+    if not isinstance(r_n, (int, float)) or isinstance(r_n, bool) or not r_n > 0.0:
+        raise SystemExit("a cut starts from a landing state, states/landing_<delta>.dump, the "
+                         "states/stop_<step>.dump of a neck-radius stop or the "
+                         "states/precut_<delta>.dump of a cut, with its neck radius")
+    ratio = reconnect.delta / r_n
+    if not reconnect.min_landing_ratio <= ratio <= reconnect.max_landing_ratio:
+        raise SystemExit(
+            f"collapse.reconnect.delta {reconnect.delta:.6g} is {ratio:.4g} times the neck radius "
+            f"{r_n:.6g} of the landing state; a cut needs {reconnect.min_landing_ratio} to "
+            f"{reconnect.max_landing_ratio}: restart from the landing state of this delta")
+
+
+def _check_post_cut(meta: dict, reconnect) -> None:
+    """Refuse to continue a state written after a cut under other reconnect settings than the cut's
+    (but for ``CONTINUATION_KEYS``), or once its time after the cut has reached ``tau_end``."""
+    cut = meta["cut"]
+    if not reconnect.continues_cut(cut.get("settings")):
+        raise SystemExit("the case's collapse.reconnect differs from the settings of the cut that "
+                         "wrote the state; a continuation may change only "
+                         + ", ".join(f"collapse.reconnect.{k}" for k in CONTINUATION_KEYS))
+    t, t_cut = meta.get("time"), cut.get("t_cut") if isinstance(cut, dict) else None
+    if all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+           for x in (t, t_cut)) and tau_end_reached(t - t_cut, reconnect.tau_end):
+        raise SystemExit(f"the state lies {t - t_cut:.6g} after its cut, at the case's "
+                         f"collapse.reconnect.tau_end {reconnect.tau_end:.6g}, where its run "
+                         "stops: raise tau_end (or remove it) to continue")
+
+
+def _check_events(meta: dict, events) -> None:
+    """Refuse to continue a state written after a cut under an events block it cannot take: a
+    state written with the block (``events_settings``) under a case without it, which would fall
+    back to the stops of the cut alone, or under one that changes the keys of a class of events of
+    which the state has made one, unless the state is the one before an event (``precut_e<k>``,
+    ``cut_stage`` ``precut-event``), from which they apply anew (events.EventSettings.
+    refused_changes), and a state of the ring stage (its dump holds ``ring``) under a block whose
+    ring is not enabled. A state written before the block existed takes any block."""
+    recorded = meta.get("events_settings")
+    if events is None:
+        if recorded is not None:
+            raise SystemExit(f"the state was written with collapse.{EVENTS_BLOCK}; continuing it "
+                             "needs a case with that block")
+        return
+    if meta.get("ring") is not None and not events.ring.enabled:
+        # a state of the ring stage (ring.py): the class rule alone would admit a block without
+        # the ring from a later precut_e<k> of the stage
+        raise SystemExit(f"the state is one of the ring stage (its dump holds ring): continuing "
+                         f"it needs collapse.{EVENTS_BLOCK}.ring.enabled")
+    recut_from = None
+    if meta.get("cut_stage") == PRECUT_EVENT:
+        recut_from = (meta.get("event") or {}).get("k")
+        if not isinstance(recut_from, int) or isinstance(recut_from, bool) or recut_from < 1:
+            raise SystemExit("the state before an event records no event number")
+    refused = events.refused_changes(recorded, events_done(meta.get("events")), recut_from)
+    if refused:
+        raise SystemExit(f"collapse.{EVENTS_BLOCK} changes the keys of a class of events of which "
+                         "the state has made one: " + ", ".join(refused)
+                         + "; restart from the state before an event (precut_e<k>) to change them")
+
+
+def restart_admission(state: Path, case: dict, case_path: Path, reconnect, *,
+                      legacy: bool = False, events=None) -> tuple[dict, str]:
+    """The custody record of a restart and its mode, checked before any output.
+
+    * ``post-cut``: the state was written after a cut (the ``postcut`` dump or a rotating dump of a
+      run after a cut). The case must hold the reconnect block of that cut (its settings equal
+      those the cut recorded but for ``tau_end``, which the case may raise or remove) and be the
+      parent's or derived from it in ``DERIVED_KEYS``; the state's time after the cut must precede
+      the case's ``tau_end``.
+    * ``cut``: a state from before any cut, under a case that adds or changes the reconnect block
+      (``CUT_DERIVED_KEYS``): the run cuts the neck at its start. The state must be a landing
+      state, whose recorded neck radius ``r_n`` puts ``delta/r_n`` within the cut's
+      ``[min_landing_ratio, max_landing_ratio]``. The ``precut`` dump of a cut run is such a state:
+      under any case with a reconnect block (the cut's own, to make the same cut again) a restart
+      from it is a cut, never an ordinary restart.
+    * ``ordinary``: any other restart, with ``DERIVED_KEYS``; with a reconnect block the parent had
+      too, the run goes on before any cut.
+
+    Legacy imports (``legacy``) are ordinary restarts of cases without a reconnect block.
+
+    The events block (``events``, the case's ``collapse.reconnect_events``) applies after the cut
+    only: a cut restart may add, drop or change it (``CUT_EVENTS_DERIVED_KEYS``), a post-cut
+    continuation may add or change it (``POST_CUT_DERIVED_KEYS``) within :func:`_check_events`, and
+    an ordinary restart, before any cut, refuses it."""
+    try:
+        meta = json.loads(state.resolve().with_suffix(".json").read_text())
+    except (OSError, ValueError):
+        meta = None
+    meta = meta if isinstance(meta, dict) else {}
+    if legacy:
+        if reconnect is not None or meta.get("cut") is not None:
+            raise SystemExit("a case with collapse.reconnect, or a state written after a cut, "
+                             "restarts only with --restart-from from a normalised run")
+        return restart_record(state, case, case_path, legacy=True), ORDINARY
+    if meta.get("cut") is not None:
+        if reconnect is None:
+            raise SystemExit("the state was written after a cut; continuing it needs the case of "
+                             "that cut, with its collapse.reconnect block")
+        _check_post_cut(meta, reconnect)
+        _check_events(meta, events)
+        return restart_record(state, case, case_path, post_cut=True,
+                              derived_keys=POST_CUT_DERIVED_KEYS), POST_CUT
+    if meta.get("cut_stage") == "precut":
+        # the state a cut started from: cut it again, never continue it before a cut
+        if reconnect is None:
+            raise SystemExit("the state is the precut state of a cut, which only a cut continues: "
+                             "restart it under a case with a collapse.reconnect block")
+        record = restart_record(state, case, case_path, derived_keys=CUT_EVENTS_DERIVED_KEYS)
+        _check_cut_landing(meta, reconnect)
+        return record, CUT
+    if reconnect is None:
+        return restart_record(state, case, case_path), ORDINARY
+    record = restart_record(state, case, case_path, derived_keys=CUT_EVENTS_DERIVED_KEYS)
+    if not _derives_reconnect(record):  # the parent's own reconnect block: no cut
+        if events is not None or any(k == EVENTS_KEY or k.startswith(EVENTS_KEY + ".") for k in
+                                     record["parent_record"].get("derived_keys", [])):
+            raise SystemExit(f"collapse.{EVENTS_BLOCK} applies after a cut, and this restart makes "
+                             "none (the case keeps the parent's collapse.reconnect)")
+        return record, ORDINARY
+    _check_cut_landing(meta, reconnect)
+    return record, CUT
 
 
 def load_case(path: Path) -> dict:
@@ -157,12 +477,40 @@ def load_case(path: Path) -> dict:
     return case
 
 
-class Terminated(Exception):
-    """Raised from the SIGTERM handler so that the run status records the interruption."""
+class Terminated(BaseException):
+    """Raised from the SIGTERM handler so that the run status records the interruption. Like
+    ``KeyboardInterrupt`` it is no ``Exception``, so that nothing that handles failures (a cut that
+    records a failed outcome, say) takes it for one."""
 
 
 def _raise_terminated(signum, _frame):
     raise Terminated(f"signal {signum}")
+
+
+def cut_failure_status(error) -> dict:
+    """The ``cut`` block of ``run_status.json`` for a refused or failed cut (``surgery.CutRefused``,
+    ``surgery.CutFailed``): the outcome and the stage reached, from the record the exception
+    carries, and the ``precut`` dump once it was written (refusals from the plan on, every
+    failure)."""
+    record = getattr(error, "record", None) or {}
+    precut = getattr(error, "precut", None) or (record.get("precut_state") or {}).get("path")
+    return {"outcome": record.get("outcome"), "failed_at": record.get("failed_at"),
+            "diagnostics": "cut_diagnostics.json", "precut": precut}
+
+
+def event_failure_status(error) -> dict | None:
+    """The ``event`` block of ``run_status.json`` for a run that failed in the cut of a liquid neck
+    the driver made within it (``surgery.CutFailed`` from ``surgery.liquid_cut``, whose record has
+    the schema of an event, ``events.EVENT_SCHEMA``): the event's number, kind, class, outcome and
+    stage reached, its record and the ``precut_e<k>`` dump; None for any other failure."""
+    record = getattr(error, "record", None)
+    if not isinstance(record, dict) or record.get("schema") != EVENT_SCHEMA:
+        return None
+    k = record.get("k")
+    return {"k": k, "kind": record.get("kind"), "class": record.get("class"),
+            "outcome": record.get("outcome"), "failed_at": record.get("failed_at"),
+            "record": f"events/event_{int(k):03d}.json" if isinstance(k, int) else None,
+            "precut": getattr(error, "precut", None)}
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -173,8 +521,8 @@ def write_json(path: Path, data: dict) -> None:
 
 def provenance(case_path: Path) -> dict:
     # one reading of the source for the run record and the manifest: provenance.component_commit
-    # (a COMMIT file of an archived tree, else git HEAD of ROOT's own work tree, dirty when
-    # tracked files differ)
+    # (Git HEAD of ROOT's own work tree, dirty with tracked or non-ignored untracked changes;
+    # a bare COMMIT export does not establish a verified source)
     source = component_commit(ROOT)
     known = source != "unknown"
     info = {"case_sha256": hashlib.sha256(case_path.read_bytes()).hexdigest(),
@@ -195,7 +543,7 @@ def manifest_commit(info: dict) -> str:
     """The manifest's commit, from the one source reading in ``provenance``'s record."""
     if info["component_commit"] is None:
         return "unknown"
-    return info["component_commit"] + ("-dirty" if info["component_dirty"] else "")
+    return info["component_commit"] + ("" if info["component_dirty"] is False else "-dirty")
 
 
 def main() -> int:
@@ -212,6 +560,9 @@ def main() -> int:
     restarts.add_argument("--legacy-restart-from", type=Path,
                          help="explicitly import a legacy state with verified saved parameters")
     ap.add_argument("--check", action="store_true", help="validate without creating output")
+    ap.add_argument("--step-timing", action="store_true",
+                    help="collapse cases: write step_timing.txt, the wall time of the parts of "
+                         "each step (no key of the case; it changes no value)")
     args, _ = ap.parse_known_args()
 
     case = load_case(args.case)
@@ -237,11 +588,42 @@ def main() -> int:
     dt_out = period * float(case["output"]["cadence"])
     t_end = periods * period
     settings = None
+    reconnect = None
+    events = None
+    keep_stop_state = False
+    landing = ()
     if collapse:
-        block = dict(case["collapse"])
+        try:
+            # the events block first: it is no key of the cut nor of the driver
+            block, events_block = split_events_block(case["collapse"])
+            block, recon_block, keep_stop_state, landing = split_collapse_block(block)
+            if recon_block is not None:
+                reconnect = ReconnectSettings.from_dict(recon_block)
+            if events_block is not None:
+                if reconnect is None:
+                    raise ValueError(f"collapse.{EVENTS_BLOCK} needs a collapse.reconnect block: it "
+                                     "governs the run after a cut")
+                events = EventSettings.from_dict(events_block)
+        except ValueError as exc:
+            raise SystemExit(f"{args.case}: {exc}")
         if "snapshot_dt_periods" in block:
             block["snapshot_dt"] = block.pop("snapshot_dt_periods") * period
-        settings = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
+        try:
+            settings = CollapseSettings.from_dict(block, t_end=t_end, dt_max=dt)
+        except (ValueError, TypeError) as exc:  # an unknown key is a TypeError of the dataclass
+            raise SystemExit(f"{args.case}: collapse: {exc}")
+        if events is not None:  # oomph-lib's smallest step after the cut, against the floor then
+            try:
+                minimum_dt_after_cut(events.post, settings.dt_min if events.post.dt_min is None
+                                     else events.post.dt_min)
+                # the core's elements per scale, at least the run's (jetcore.core_ratio)
+                from faraday_singularity.jetcore import core_ratio
+
+                core_ratio(events.jetcore.core_elements_per_scale,
+                           settings.elements_per_scale if reconnect.elements_per_scale is None
+                           else reconnect.elements_per_scale)
+            except ValueError as exc:
+                raise SystemExit(f"{args.case}: {exc}")
 
     if not math.isfinite(periods) or periods <= 0 or not math.isfinite(dt_out) or dt_out <= 0:
         raise SystemExit("completion time and output cadence must be positive and finite")
@@ -250,11 +632,19 @@ def main() -> int:
     source_state = args.restart or args.legacy_restart_from
     parent_record = None
     restart_meta = None
+    restart_mode = None
+    inactive = {}
     if source_state is not None:
         if not collapse:
             raise SystemExit("restarts require a collapse case")
-        parent_record = restart_record(source_state, case, args.case,
-                                       legacy=args.legacy_restart_from is not None)
+        parent_record, restart_mode = restart_admission(
+            source_state, case, args.case, reconnect, legacy=args.legacy_restart_from is not None,
+            events=events)
+        if restart_mode in (CUT, POST_CUT):
+            # one cut per run: what the case keeps for a cut is the landing run's, not this run's
+            inactive = {k: v for k, v in (("landing", list(landing)),
+                                          ("keep_stop_state", keep_stop_state)) if v}
+            landing, keep_stop_state = (), False
         metadata_bytes = source_state.with_suffix(".json").read_bytes()
         if hashlib.sha256(metadata_bytes).hexdigest() != parent_record["metadata_sha256"]:
             raise SystemExit("restart metadata changed during admission")
@@ -270,8 +660,19 @@ def main() -> int:
         if args.outdir.resolve().is_relative_to(parent_root):
             raise SystemExit("restart output cannot be inside its parent run")
         args.restart = source_state
+    if events is not None and restart_mode not in (CUT, POST_CUT):
+        raise SystemExit(f"{args.case}: collapse.{EVENTS_BLOCK} applies after a cut: only a cut "
+                         "or post-cut restart takes it")
+    if collapse and restart_mode not in (CUT, POST_CUT):
+        # the cut radii this run lands; after a cut the case's landing is the landing run's,
+        # inactive (inactive_after_cut), so its radii are not this run's to reach before its stop
+        try:
+            check_landing(landing, settings)
+        except ValueError as exc:
+            raise SystemExit(f"{args.case}: {exc}")
     if args.check:
-        print(json.dumps({"valid": True, "case_id": case["case_id"], "restart": parent_record}))
+        print(json.dumps({"valid": True, "case_id": case["case_id"], "restart": parent_record,
+                          "restart_mode": restart_mode}))
         return 0
     args.outdir.mkdir(parents=True, exist_ok=True)
     recorded_provenance = provenance(args.case)
@@ -299,6 +700,11 @@ def main() -> int:
                 "effective_time_stepping": {"dt_max": dt, "t_end": t_end, "dt_out": dt_out}}
     if parent_record is not None:
         manifest["restart_from"] = parent_record
+        manifest["restart_mode"] = restart_mode
+    if reconnect is not None:
+        manifest["reconnect"] = reconnect.to_dict()
+    if events is not None:
+        manifest["reconnect_events"] = events.to_dict()
     create_run_manifest(args.outdir, manifest)
     with (args.outdir / "progress.jsonl").open("a") as stream:
         stream.write(json.dumps({"event": "start", "wall_time": time.time()}) + "\n")
@@ -313,8 +719,19 @@ def main() -> int:
         "collapse": asdict(settings) if settings is not None else None,
         "provenance": recorded_provenance,
         "restart": str(args.restart.resolve()) if args.restart is not None else None,
+        "restart_mode": restart_mode,
         "argv": sys.argv,
     }
+    if inactive:
+        info["inactive_after_cut"] = inactive
+    if reconnect is not None:
+        info["reconnect"] = reconnect.to_dict()
+    if events is not None:
+        info["reconnect_events"] = events.to_dict()
+    if keep_stop_state:
+        info["keep_stop_state"] = True
+    if landing:
+        info["landing"] = list(landing)
     write_json(args.outdir / "parameters.json", info)
 
     from faraday_singularity.problem import FaradayProblem
@@ -323,8 +740,12 @@ def main() -> int:
     status = {"state": "running", "started": time.time()}
     write_json(args.outdir / "run_status.json", status)
     problem = None
+    driver = None
+    cut_error = None
     try:
-        problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, mesh_output=args.mesh_output)
+        extra = {"reconnect": reconnect} if reconnect is not None else {}
+        problem = FaradayProblem(nd, mesh=mesh, remesh=remesh, mesh_output=args.mesh_output,
+                                 **extra)
         problem.set_output_directory(str(args.outdir))
         problem.write_states = write_states
         with problem:
@@ -336,7 +757,14 @@ def main() -> int:
                 problem.start_diagnostics(args.outdir / "diagnostics.txt")
                 problem.run(t_end, timestep=dt, outstep=dt_out, newton_solver_tolerance=tol)
             else:
-                driver = CollapseDriver(problem, settings, args.outdir)
+                driver = CollapseDriver(problem, settings, args.outdir,
+                                        **({"keep_stop_state": True} if keep_stop_state else {}),
+                                        **({"landing": landing} if landing else {}),
+                                        **({"reconnect": reconnect}
+                                           if restart_mode in (CUT, POST_CUT) else {}),
+                                        **({"events": events, "leg_info": {"commit": commit}}
+                                           if events is not None else {}),
+                                        **({"step_timing": True} if args.step_timing else {}))
                 try:
                     if args.restart is not None:
                         from pyoomph.output.states import copy_state_file
@@ -350,8 +778,27 @@ def main() -> int:
                         copy_state_file(str(args.restart), str(local))
                         problem.load_state(str(local))
                         driver.restore(restart_meta)
-                    problem.start_diagnostics(args.outdir / "diagnostics.txt")
-                    status["collapse"] = driver.run(tol)
+                    if restart_mode == CUT:
+                        from faraday_singularity.surgery import CutFailed, CutRefused, cut
+
+                        try:
+                            record = cut(problem, reconnect, args.outdir, driver=driver)
+                        except (CutRefused, CutFailed) as exc:
+                            # the run ends here; after a failure the problem may be half rebuilt,
+                            # so nothing is loaded back into it (states/precut_* holds the state)
+                            cut_error = exc
+                        else:
+                            status["cut"] = {"outcome": "cut", "t_cut": record["t_cut"],
+                                             "t_p": record["pinch"]["t_p"],
+                                             "diagnostics": "cut_diagnostics.json",
+                                             "precut": record["precut_state"]["path"],
+                                             "postcut": record["postcut_state"]["path"]}
+                    if cut_error is None:
+                        problem.start_diagnostics(args.outdir / "diagnostics.txt")
+                        status["collapse"] = driver.run(tol)
+                        if events is not None:  # the events after the cut, and the window
+                            for key in ("events", "window_end"):
+                                status[key] = status["collapse"].get(key)
                 finally:
                     driver.close()
         status["state"] = "completed"
@@ -360,11 +807,24 @@ def main() -> int:
         state = "interrupted" if interrupted or not isinstance(exc, Exception) else "failed"
         status.update(state=state, detail=f"{type(exc).__name__}: {exc}", ended=time.time(),
                       remesh_count=getattr(problem, "remesh_count", None))
+        counts = getattr(driver, "distortion_counts", None)
+        if counts is not None:  # the rebuilds element distortion asked for before the failure
+            status.update(counts())
+        event = event_failure_status(exc)
+        if event is not None:  # a liquid cut within the run failed
+            status["event"] = event
         write_json(args.outdir / "run_status.json", status)
         raise
     finally:
         if problem is not None:
             problem.close_diagnostics()
+    if cut_error is not None:
+        status.update(state="failed", detail=f"{type(cut_error).__name__}: {cut_error}",
+                      ended=time.time(), remesh_count=getattr(problem, "remesh_count", None),
+                      cut=cut_failure_status(cut_error))
+        write_json(args.outdir / "run_status.json", status)
+        print(json.dumps(status), file=sys.stderr)
+        return 1
     status["ended"] = time.time()
     status["wall_seconds"] = status["ended"] - status["started"]
     status["remesh_count"] = problem.remesh_count

@@ -145,8 +145,8 @@ def _sharp_then_flat_trough(t, r, t_flat=0.045):
 class PrescribedDriver(CollapseDriver):
     """Measurement given by ``fields(t)``; everything else as in the real driver."""
 
-    def __init__(self, pb, settings, outdir, fields):
-        super().__init__(pb, settings, outdir)
+    def __init__(self, pb, settings, outdir, fields, **kw):
+        super().__init__(pb, settings, outdir, **kw)
         self.fields = fields
 
     def measure(self) -> dict:
@@ -1261,3 +1261,1162 @@ def test_restore_keeps_an_old_backoff_for_refinement_only(tmp_path):
     assert drv.state.last_remesh_step == 110 - s.remesh_backoff
     assert drv.state.refine_blocked_until == 110 + s.min_steps_between_remesh
 
+
+
+# --- the optional stop once a born jet is unambiguous ----------------------------------------
+
+
+def _jet_rising_after(t, t_birth=0.5, r_j=0.1, speed=1.0):
+    """A trough until ``t_birth``, then a jet of base radius ``r_j`` born standing 0.11 r_j above its
+    base, whose apex rises at ``speed``: its aspect is 0.11 + 10 (t - t_birth)."""
+    if t < t_birth:
+        return {"axis_curvature": 2.0}
+    return {"jet_born": True, "axis_lowest": False, "axis_curvature": -1.0, "r_j": r_j,
+            "z_b": 0.0, "z_axis": 0.11 * r_j + speed * (t - t_birth)}
+
+
+def _birth_and_stop(tmp_path, **kw):
+    drv = PrescribedDriver(FakeProblem(), _settings(t_end=0.7, dt_max=0.01, **kw), tmp_path,
+                           _jet_rising_after)
+    result = drv.run(1e-9)
+    drv.close()
+    events = _read_events(tmp_path)
+    born = next(e for e in events if e["event"] == "jet-born")
+    return result, born, events[-1]
+
+
+def test_jet_stop_is_off_by_default(tmp_path):
+    result, _, stop = _birth_and_stop(tmp_path)
+    assert result["stop"] == {"reason": "end-time"} and stop["reason"] == "end-time"
+    assert math.isinf(CollapseSettings(t_end=1.0, dt_max=0.01).post_birth_aspect)
+
+
+def test_jet_stop_once_the_jet_stands_above_the_threshold(tmp_path):
+    result, born, stop = _birth_and_stop(tmp_path, post_birth_aspect=0.5)
+    # the aspect passes 0.5 at t - t_birth > 0.039: the fourth step of 0.01 after birth
+    assert result["stop"]["reason"] == "jet-confirmed" and result["stop"]["trigger"] == "jet-aspect"
+    assert result["steps"] - born["step"] == 4 == stop["step"] - result["stop"]["born_step"]
+    assert result["stop"]["aspect"] > 0.5 and result["jet_born"]
+    tab = _rows(tmp_path)
+    aspect = (tab["z_axis"][-2:] - tab["z_b"][-2:]) / tab["r_j"][-2:]  # rows after birth
+    assert aspect[-1] > 0.5 >= aspect[-2]
+
+
+def test_jet_stop_waits_the_least_number_of_steps_after_birth(tmp_path):
+    # a threshold the jet meets at birth: the stop still waits post_birth_steps accepted steps
+    result, born, _ = _birth_and_stop(tmp_path, post_birth_aspect=0.05, post_birth_steps=6)
+    assert result["stop"]["reason"] == "jet-confirmed"
+    assert result["steps"] - born["step"] == 6
+
+
+def test_neck_stop_takes_precedence_over_the_jet_stop(tmp_path):
+    def fields(t):
+        m = _jet_rising_after(t)
+        if t >= 0.53:
+            m["r_neck"], m["z_neck"] = 5e-4, 1.0
+        return m
+
+    drv = PrescribedDriver(FakeProblem(), _settings(t_end=0.7, dt_max=0.01, post_birth_aspect=0.1,
+                                                    post_birth_steps=3), tmp_path, fields)
+    result = drv.run(1e-9)
+    drv.close()
+    assert result["stop"]["reason"] == "pinch-off-approach"
+
+
+@pytest.mark.parametrize("kw", [{"post_birth_aspect": 0.0}, {"post_birth_aspect": math.nan},
+                                {"post_birth_aspect": True}, {"post_birth_steps": 0},
+                                {"post_birth_steps": 1.5}])
+def test_jet_stop_settings_are_validated(kw):
+    with pytest.raises(ValueError):
+        _settings(**kw)
+
+
+def test_restore_keeps_the_birth_step(tmp_path):
+    drv = PrescribedDriver(FakeProblem(), _settings(t_end=0.53, dt_max=0.01), tmp_path,
+                           _jet_rising_after)
+    drv.run(1e-9)
+    drv.save_state()
+    drv.close()
+    born = next(e for e in _read_events(tmp_path) if e["event"] == "jet-born")
+    meta = json.loads(sorted((tmp_path / "states").glob("*.json"))[-1].read_text())
+    assert meta["born_step"] == born["step"]
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    out = tmp_path / "restored"
+    again = PrescribedDriver(pb, _settings(t_end=0.7, dt_max=0.01, post_birth_aspect=0.5), out,
+                             _jet_rising_after)
+    again.restore(meta)
+    result = again.run(1e-9)
+    again.close()
+    assert result["stop"]["reason"] == "jet-confirmed"
+    assert result["stop"]["born_step"] == born["step"]
+
+
+def _born_dump(step=50, time=0.55, **extra):
+    return {"step": step, "cycle": 0, "cavity_seen": True, "born": True, "neck_seen": False,
+            "max_curvature": 2.0, "max_curvature_time": 0.4, "snapshots": 3, "time": time,
+            "remesh_count": 0, "focus": None, "dt_prev": 0.01, **extra}
+
+
+def _restored(tmp_path, meta, **kw):
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, _settings(t_end=0.7, dt_max=0.01, **kw), tmp_path, _jet_rising_after)
+    drv.restore(meta)
+    result = drv.run(1e-9)
+    drv.close()
+    return result
+
+
+def test_a_restart_that_already_qualifies_stops_before_advancing(tmp_path):
+    # aspect 0.61 at t = 0.55, forty steps after birth: no further step is taken
+    result = _restored(tmp_path, _born_dump(born_step=10), post_birth_aspect=0.5)
+    assert result["stop"]["reason"] == "jet-confirmed" and result["steps"] == 50
+
+
+def test_a_dump_without_the_birth_step_waits_from_the_restart(tmp_path):
+    result = _restored(tmp_path, _born_dump(), post_birth_aspect=0.5, post_birth_steps=3)
+    assert result["stop"]["reason"] == "jet-confirmed"
+    assert result["steps"] == 53 and result["stop"]["born_step"] == 50
+
+
+def test_jet_stop_is_checked_after_a_remesh(tmp_path):
+    # the jet stands still at aspect 0.11 until a rebuild at t >= 0.53 re-reads it at 0.2
+    pb = FakeProblem()
+
+    def fields(t):
+        if t < 0.5:
+            return {"axis_curvature": 2.0}
+        rebuilt = pb.remesh_count > 0
+        return {"jet_born": True, "axis_lowest": False, "axis_curvature": -1.0, "r_j": 0.1,
+                "z_b": 0.0, "z_axis": 0.02 if rebuilt else 0.011,
+                "h_near": 0.1 if t >= 0.53 and not rebuilt else 0.05}
+
+    drv = PrescribedDriver(pb, _settings(t_end=0.7, dt_max=0.01, post_birth_aspect=0.15), tmp_path,
+                           fields)
+    result = drv.run(1e-9)
+    drv.close()
+    events = _read_events(tmp_path)
+    (remesh,) = [e for e in events if e["event"] == "remesh"]
+    assert result["stop"]["reason"] == "jet-confirmed"
+    assert result["steps"] == remesh["step"] and result["stop"]["aspect"] == pytest.approx(0.2)
+
+
+# --- landing states for a study in the cut radius ------------------------------------------------
+
+
+def _closing_neck(t):
+    """A neck closing at a constant rate, by 0.15 to 1.2 % of its radius per step of 1e-3."""
+    return {"r_neck": 2e-3 - 3e-3 * t, "z_neck": 1.0}
+
+
+def _landing_settings():
+    return _settings(t_end=1.0, dt_max=1e-3, neck_stop=1e-4, h_floor=1e-6, state_dt=0.1,
+                     state_keep=100)
+
+
+def test_landing_states_for_a_list_of_cut_radii(tmp_path):
+    from faraday_singularity.reconnect import LANDING_RATIO, MAX_LANDING_RATIO
+
+    deltas = (2.5e-4, 1e-3, 5e-4)
+    drv = PrescribedDriver(FakeProblem(), _landing_settings(), tmp_path, _closing_neck,
+                           landing=deltas)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "pinch-off-approach"
+    landings = [e for e in _read_events(tmp_path) if e["event"].startswith("landing")]
+    assert [e["event"] for e in landings] == ["landing"] * 3
+    assert [e["delta"] for e in landings] == [1e-3, 5e-4, 2.5e-4]
+    for e in landings:
+        assert LANDING_RATIO <= e["delta_over_r_neck"] < MAX_LANDING_RATIO
+        # the first state past delta / LANDING_RATIO: the step before had not reached it
+        assert e["r_neck"] + 3e-6 > e["delta"] / LANDING_RATIO
+        meta = json.loads(Path(e["path"]).with_suffix(".json").read_text())
+        assert Path(e["path"]).name == f"landing_{e['delta']:.6g}.dump"
+        assert meta["landing"]["delta"] == e["delta"] and meta["time"] == e["time"]
+        assert e["delta"] in meta["landed"]
+    # rotating dumps carry the radii kept so far
+    rotating = [json.loads(f.read_text()) for f in sorted((tmp_path / "states").glob("state_*.json"))]
+    assert rotating and all("landed" in m for m in rotating)
+
+
+def test_landing_after_a_restart_and_a_missed_landing(tmp_path):
+    s = _landing_settings()
+    drv = PrescribedDriver(FakeProblem(), s, tmp_path / "a", _closing_neck, landing=(1e-3, 5e-4))
+    drv.run(1e-9)
+    drv.close()
+    meta = json.loads((tmp_path / "a" / "states" / "landing_0.001.json").read_text())
+    assert meta["landed"] == [1e-3]
+    # resumed from the first landing state with one more radius: the kept one is not kept again
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, s, tmp_path / "b", _closing_neck, landing=(1e-3, 5e-4, 2.5e-4))
+    drv.restore(meta)
+    drv.run(1e-9)
+    drv.close()
+    kept = sorted(f.name for f in (tmp_path / "b" / "states").glob("landing_*.dump"))
+    assert kept == ["landing_0.00025.dump", "landing_0.0005.dump"]
+    full, rest = _rows(tmp_path / "a"), _rows(tmp_path / "b")
+    k = int(np.searchsorted(full["step"], meta["step"]))
+    for name in ("step", "cycle", "time", "dt", "r_neck"):  # the run continues as it was
+        assert np.array_equal(rest[name][1:], full[name][k + 1:], equal_nan=True), name
+    # a radius the neck has already passed by more than MAX_LANDING_RATIO is no landing
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, s, tmp_path / "c", _closing_neck, landing=(1.2e-3,))
+    drv.restore(meta)
+    drv.run(1e-9)
+    drv.close()
+    missed = [e for e in _read_events(tmp_path / "c") if e["event"].startswith("landing")]
+    assert [e["event"] for e in missed] == ["landing-missed"]
+    assert missed[0]["delta_over_r_neck"] > missed[0]["max_landing_ratio"]
+    assert not list((tmp_path / "c" / "states").glob("landing_*"))
+
+
+def test_dumps_without_landing_have_no_landing_record(tmp_path):
+    drv = PrescribedDriver(FakeProblem(), _landing_settings(), tmp_path, _closing_neck)
+    drv.run(1e-9)
+    drv.close()
+    metas = [json.loads(f.read_text()) for f in (tmp_path / "states").glob("*.json")]
+    assert metas and all("landed" not in m for m in metas)
+    # nor the other keys of a reconnection: the dumps of other runs keep their keys
+    assert all("neck_samples" not in m and "resume_at" not in m for m in metas)
+    assert not any(e["event"].startswith("landing") for e in _read_events(tmp_path))
+
+
+def test_landing_radii_below_the_neck_stop_are_refused(tmp_path):
+    """A run stops at the first state with r_n < max(neck_stop, neck_stop_elements h_floor); a cut
+    radius below LANDING_RATIO times that can never land, and is refused before any output."""
+    s = _settings(neck_stop=3e-4, h_floor=2e-5)
+    with pytest.raises(ValueError, match=r"0\.00025, 0\.000125"):
+        PrescribedDriver(FakeProblem(), s, tmp_path / "a", _closing_neck,
+                         landing=(1e-3, 5e-4, 2.5e-4, 1.25e-4))
+    assert not (tmp_path / "a").exists()
+    s = _settings(neck_stop=1e-4, h_floor=1e-4)  # the limit is neck_stop_elements h_floor = 3e-4
+    with pytest.raises(ValueError, match="neck_stop"):
+        CollapseDriver(FakeProblem(), s, tmp_path / "b", landing=(3e-4,))
+    CollapseDriver(FakeProblem(), s, tmp_path / "c", landing=(3.2e-4,)).close()
+
+
+def test_radii_left_at_the_stop_are_recorded_and_landed_by_a_continuation(tmp_path):
+    s = _settings(t_end=0.4, dt_max=1e-3, neck_stop=1e-4, h_floor=1e-6, state_dt=0.1,
+                  state_keep=100)
+    drv = PrescribedDriver(FakeProblem(), s, tmp_path / "a", _closing_neck, landing=(1e-3, 5e-4))
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "end-time"
+    landings = [e for e in _read_events(tmp_path / "a") if e["event"].startswith("landing")]
+    assert [(e["event"], e["delta"]) for e in landings] == [("landing", 1e-3),
+                                                           ("landing-missed", 5e-4)]
+    assert landings[1]["reason"] == "stopped-first" and landings[1]["stop_reason"] == "end-time"
+    assert out["landing"] == {"radii": [1e-3, 5e-4], "kept": [1e-3],
+                              "missed": [{"delta": 5e-4, "reason": "stopped-first"}]}
+    # the radius left at the stop is not recorded as landed: a continuation lands it
+    assert drv.state.landed == [1e-3]
+    meta = json.loads((tmp_path / "a" / "states" / "landing_0.001.json").read_text())
+    assert meta["landed"] == [1e-3]
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, _landing_settings(), tmp_path / "b", _closing_neck,
+                           landing=(1e-3, 5e-4))
+    drv.restore(meta)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["landing"]["kept"] == [5e-4] and out["landing"]["missed"] == []
+    assert (tmp_path / "b" / "states" / "landing_0.0005.dump").is_file()
+
+
+def test_a_rebuild_that_narrows_the_neck_below_the_stop_still_lands(tmp_path):
+    """The smallest admitted radius, delta = 1.06 neck_limit: the neck is just wider than
+    delta/1.05 after the step, and the rebuild of that step measures it below the neck limit, which
+    stops the run. The state after the rebuild is offered for landing too."""
+    s = _landing_settings()  # neck limit 1e-4
+    delta = 1.06e-4
+    pb = FakeProblem()
+
+    def fields(t):
+        r = 2e-3 - 3e-3 * t
+        return {"r_neck": r - (2e-6 if pb.remesh_count else 0.0), "z_neck": 1.0,
+                "h_near": 0.2 if r <= 1.015e-4 else 0.05}
+
+    drv = PrescribedDriver(pb, s, tmp_path, fields, landing=(delta,))
+    out = drv.run(1e-9)
+    drv.close()
+    events = _read_events(tmp_path)
+    (remesh,) = [e for e in events if e["event"] == "remesh"]
+    (landing,) = [e for e in events if e["event"] == "landing"]
+    assert out["stop"]["reason"] == "pinch-off-approach" and landing["step"] == remesh["step"]
+    assert landing["r_neck"] < s.neck_limit and 1.05 <= landing["delta_over_r_neck"] <= 1.1
+    meta = json.loads(Path(landing["path"]).with_suffix(".json").read_text())
+    assert "resume_at" not in meta and meta["remesh_count"] == 1  # kept after the rebuild
+
+
+def _neck_with_rebuild_from(r_from: float, strict: bool = False):
+    """``_closing_neck`` on a surface coarser than the focus wants once the neck is narrower than
+    ``r_from`` (``<=``, or ``<`` with ``strict``): a refining rebuild is due from that step on, and
+    does not take effect (``remesh-ineffective``), so it is tried again after the backoff."""
+    def fields(t):
+        f = _closing_neck(t)
+        if f["r_neck"] < r_from or (not strict and f["r_neck"] == r_from):
+            f["h_near"] = 0.2
+        return f
+    return fields
+
+
+def test_restart_from_a_landing_state_makes_its_remesh_check_first(tmp_path):
+    """The neck passes delta/1.05 at a step whose remesh check rebuilds the mesh. The landing state
+    is kept before that check (``resume_at``), and a restart from it makes the check before its
+    first step, as the parent did: both step from the rebuilt mesh, and the rebuilds after it fall
+    on the same steps."""
+    from faraday_singularity.reconnect import LANDING_RATIO
+
+    s = _landing_settings()
+    delta = 1e-3
+    fields = _neck_with_rebuild_from(delta / LANDING_RATIO)
+    pb = FakeProblem()
+    drv = PrescribedDriver(pb, s, tmp_path / "a", fields, landing=(delta,))
+    drv.run(1e-9)
+    drv.close()
+    events = _read_events(tmp_path / "a")
+    (landing,) = [e for e in events if e["event"] == "landing"]
+    remesh = [e["step"] for e in events if e["event"] == "remesh"]
+    assert remesh[0] == landing["step"] and len(remesh) >= 3
+    meta = json.loads(Path(landing["path"]).with_suffix(".json").read_text())
+    assert meta["resume_at"] == "remesh-check" and meta["remesh_count"] == 0
+    pb2 = FakeProblem()
+    pb2.t = meta["time"]  # load_state
+    drv2 = PrescribedDriver(pb2, s, tmp_path / "b", fields, landing=(delta,))
+    drv2.restore(meta)
+    drv2.run(1e-9)
+    drv2.close()
+    resumed = _read_events(tmp_path / "b")
+    assert resumed[0]["event"] == "restart" and resumed[0]["resume_at"] == "remesh-check"
+    assert [e["step"] for e in resumed if e["event"] == "remesh"] == remesh
+    full, rest = _rows(tmp_path / "a"), _rows(tmp_path / "b")
+    k = int(np.searchsorted(full["step"], meta["step"]))
+    for name in ("step", "time", "dt", "remesh_count", "r_neck"):
+        first = 1 if name == "dt" else 0  # the restart row records no step
+        assert np.array_equal(rest[name][first:], full[name][k + first:], equal_nan=True), name
+    assert pb2.remesh_count == pb.remesh_count
+    # rotating dumps are written at the end of a step: a restart from one steps at once
+    rotating = [json.loads(f.read_text()) for f in (tmp_path / "a" / "states").glob("state_*.json")]
+    assert rotating and all("resume_at" not in m for m in rotating)
+
+
+def test_restart_from_a_stop_state_with_a_lower_neck_stop_matches_a_run_with_it(tmp_path):
+    """Following the neck further from the kept stop state (a derived case with a lower
+    ``neck_stop``) gives the run that had the lower stop from the start, rebuilds included: the
+    stop state was kept before the remesh check of its step."""
+    hi, lo = (_settings(t_end=1.0, dt_max=1e-3, neck_stop=x, h_floor=1e-6, state_dt=0.1,
+                        state_keep=100) for x in (5e-4, 1e-4))
+    fields = _neck_with_rebuild_from(5e-4, strict=True)  # from the step that stops the parent
+    drv = PrescribedDriver(FakeProblem(), hi, tmp_path / "a", fields, keep_stop_state=True)
+    out = drv.run(1e-9)
+    drv.close()
+    stop = Path(out["stop"]["kept_state"])
+    meta = json.loads(stop.with_suffix(".json").read_text())
+    assert meta["resume_at"] == "remesh-check" and meta["neck_samples"][-1][0] == meta["time"]
+    # the stop state records the pinch-time fit of its neck samples (a linearly closing neck here)
+    assert set(meta["pinch"]) >= {"t_p", "alpha", "t_window", "r_window", "samples"}
+    assert meta["pinch"]["t_window"][1] == meta["time"]
+    ref = PrescribedDriver(FakeProblem(), lo, tmp_path / "ref", fields)
+    ref.run(1e-9)
+    ref.close()
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, lo, tmp_path / "b", fields)
+    drv.restore(meta)
+    drv.run(1e-9)
+    drv.close()
+    full, rest = _rows(tmp_path / "ref"), _rows(tmp_path / "b")
+    k = int(np.searchsorted(full["step"], meta["step"]))
+    for name in ("step", "time", "dt", "remesh_count", "r_neck"):
+        first = 1 if name == "dt" else 0
+        assert np.array_equal(rest[name][first:], full[name][k + first:], equal_nan=True), name
+    steps = [e["step"] for e in _read_events(tmp_path / "ref") if e["event"] == "remesh"]
+    assert steps and steps[0] == meta["step"]
+    assert [e["step"] for e in _read_events(tmp_path / "b") if e["event"] == "remesh"] == steps
+
+
+def test_pinch_time_from_the_neck_samples_of_a_landing_state(tmp_path):
+    """The landing state carries the latest neck samples; the pinch time fitted to them over the
+    last factor PINCH_FIT_SPAN of the radius recovers that of a power-law neck."""
+    from faraday_singularity.driver import NECK_SAMPLES, PINCH_FIT_SPAN
+
+    t_p, A, alpha = 0.9, 4e-3, 0.56
+
+    def fields(t):
+        return {"r_neck": A * (t_p - t) ** alpha, "z_neck": 1.0}
+
+    s = _landing_settings()
+    drv = PrescribedDriver(FakeProblem(), s, tmp_path / "a", fields, landing=(5e-4,))
+    drv.run(1e-9)
+    drv.close()
+    (landing,) = [e for e in _read_events(tmp_path / "a") if e["event"] == "landing"]
+    meta = json.loads(Path(landing["path"]).with_suffix(".json").read_text())
+    samples = meta["neck_samples"]
+    assert len(samples) == NECK_SAMPLES and samples[-1] == [landing["time"], landing["r_neck"]]
+    pb = FakeProblem()
+    pb.t = meta["time"]
+    drv = PrescribedDriver(pb, s, tmp_path / "b", fields)
+    drv.restore(meta)
+    fit = drv.pinch_time()
+    drv.close()
+    assert fit["t_p"] == pytest.approx(t_p, abs=1e-3 * (t_p - landing["time"]))
+    assert fit["alpha"] == pytest.approx(alpha, rel=1e-2)
+    assert fit["t_window"][1] == landing["time"] and fit["r_window"][1] == landing["r_neck"]
+    assert fit["r_window"][0] <= PINCH_FIT_SPAN * fit["r_window"][1] and fit["samples"] >= 10
+    assert fit["samples"] < NECK_SAMPLES  # the window, not the whole series
+    # the landing state and its event record that fit
+    assert meta["pinch"] == {**fit, "t_window": list(fit["t_window"]),
+                             "r_window": list(fit["r_window"])}
+    assert landing["t_p"] == fit["t_p"] and landing["alpha_p"] == fit["alpha"]
+    # no neck samples: no pinch time
+    fresh = PrescribedDriver(FakeProblem(), s, tmp_path / "c", fields)
+    assert math.isnan(fresh.pinch_time()["t_p"])
+    fresh.close()
+
+
+# --- the post-cut mode: a run after a cut, on two prescribed chains -------------------------------
+
+
+R_C = 3.8317059702075125
+CUT_GRADING = 0.3  # the grading of the cut's sizing, the mesh's
+
+
+class CutProblem(FakeProblem):
+    """The two chains after a cut, at rest unless ``speed(chain, r, z)`` gives an axial speed: an
+    open chain from a cap on the axis (tip radius of curvature 1e-3, at z = 4.69) to the wall, and
+    an elliptic bubble below it from z = 4.68 - 2b to 4.68 (tip radius a^2/b), whose width is
+    multiplied by ``width(t)``."""
+
+    def __init__(self, a=0.01, b=0.2, speed=None, width=None, **kw):
+        super().__init__(**kw)
+        self.a, self.b = a, b
+        self.speed = speed or (lambda chain, r, z: np.zeros_like(r))
+        self.width = width or (lambda t: 1.0)
+        self.cut = None
+
+    def _chain(self, name, r, z, ends):
+        return {"open": name == "open", "end_types": ends, "r": r, "z": z,
+                "u_r": np.zeros_like(r), "u_z": self.speed(name, r, z)}
+
+    def interface_segments(self):
+        th = np.linspace(0.0, math.pi, 801)
+        br = self.a * self.width(self.t) * np.sin(th)
+        br[[0, -1]] = 0.0
+        bz = 4.68 - self.b - self.b * np.cos(th)
+        phi = np.linspace(0.0, 0.5 * math.pi, 201)
+        A, B = 2e-3, 4e-3  # tip radius A^2/B
+        cr, cz = A * np.sin(phi), 4.69 + B * (1.0 - np.cos(phi))
+        s = np.linspace(0.0, 1.0, 401)[1:]
+        line = np.column_stack([A + (0.5 - A) * s, cz[-1] + (5.0 - cz[-1]) * s])
+        s = np.linspace(0.0, 1.0, 101)[1:]
+        wall = np.column_stack([0.5 + (R_C - 0.5) * s, 5.0 + s])
+        P = np.vstack([np.column_stack([cr, cz]), line, wall])
+        return [self._chain("bubble", br, bz, ("axis", "axis")),
+                self._chain("open", P[:, 0], P[:, 1], ("axis", "fixed"))]
+
+    def interface_arrays(self):
+        c = self.interface_segments()[1]
+        return c["r"], c["z"], c["u_r"], c["u_z"]
+
+    def axial_velocity_at(self, points):
+        return [0.0] * len(points), True
+
+    def cut_observables(self):
+        return {"volume": 1.0, "kinetic_energy": 0.0, "momentum_z": 0.0, "divergence_sq": 0.0}
+
+
+def _cut_driver(tmp_path, pb, recon, **kw):
+    """A driver in the post-cut mode, right after a cut at t = 0 with pinch time -1e-6."""
+    from faraday_singularity.reconnect import Chain, cut_geometry
+
+    drv = CollapseDriver(pb, _settings(**{"t_end": 1.0, "dt_max": 1.0, "max_steps": 3, **kw}),
+                         tmp_path, reconnect=recon)
+    chains = [Chain(np.column_stack([c["r"], c["z"]]), c["end_types"])
+              for c in pb.interface_segments()]
+    geom = cut_geometry(chains, 3.0, gas_before=1.0)
+    pb.cut = {"delta": recon.delta, "rmin": recon.delta, "r_neck": 0.95e-3, "z_neck": 4.685,
+              "t_cut": 0.0, "pinch": {"t_p": -1e-6}, "geometry": geom.to_dict(),
+              "sizing": {"h_tip": recon.tip_size * recon.delta,
+                         "h_bridge": recon.bridge_size * recon.delta,
+                         "curvature": recon.curvature_sizing, "grading": CUT_GRADING},
+              "settings": json.loads(json.dumps(recon.to_dict()))}
+    drv.reset_after_cut(pb.cut)
+    return drv
+
+
+def _chains_rows(outdir: Path) -> dict[str, np.ndarray]:
+    path = outdir / "chains.txt"
+    cols = path.read_text().splitlines()[0][2:].split("\t")
+    data = np.loadtxt(path, ndmin=2)
+    return {c: data[:, k] for k, c in enumerate(cols)}
+
+
+def test_after_a_cut_the_step_follows_the_capillary_time_of_the_sharpest_tip(tmp_path):
+    """At rest, the step is set by the capillary time of the sharpest of the three tips, here the
+    bubble's (radius 5e-4), which the open chain the driver measures does not see."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    drv = _cut_driver(tmp_path, CutProblem(), recon)
+    out = drv.run(1e-9)
+    drv.close()
+    rows = _chains_rows(tmp_path)
+    assert rows["R_tip_min"][0] == pytest.approx(5e-4, rel=1e-3)
+    assert rows["R_bubble_bottom"][0] == pytest.approx(rows["R_bubble_top"][0], rel=1e-9)
+    assert rows["R_cavity_tip"][0] == pytest.approx(1e-3, rel=1e-3)
+    assert rows["dt_capillary"][0] == pytest.approx(0.2 * rows["R_tip_min"][0] ** 1.5, rel=1e-12)
+    assert np.all(rows["dt"][1:] == pytest.approx(rows["dt_capillary"][:-1], rel=1e-12))
+    assert math.isinf(rows["dt_courant"][0]) and out["stop"]["reason"] == "max-steps"
+    # the ordinary rule alone, on the open chain, would allow the open cap's longer time
+    assert 0.2 * 1e-3 ** 1.5 > 2 * rows["dt"][1]
+
+
+def test_after_a_cut_the_step_follows_every_node_of_both_chains(tmp_path):
+    """A fast bubble tip, outside the open chain the driver measures and far from the cut, sets the
+    step through its Courant number."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    def speed(chain, r, z):
+        return np.where(z < 4.29, 100.0, 0.0) if chain == "bubble" else np.zeros_like(r)
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3, courant=0.1)
+    drv = _cut_driver(tmp_path, CutProblem(speed=speed), recon)
+    drv.run(1e-9)
+    drv.close()
+    rows = _chains_rows(tmp_path)
+    assert np.all(rows["courant_chain"] == 1) and np.all(rows["U_courant"] == 100.0)
+    assert rows["dt_courant"][0] == pytest.approx(0.1 * rows["h_courant"][0] / 100.0, rel=1e-12)
+    assert rows["dt_courant"][0] < rows["dt_capillary"][0]
+    assert np.all(rows["dt"][1:] == pytest.approx(rows["dt_courant"][:-1], rel=1e-12))
+
+
+def test_after_a_cut_outputs_carry_tau_and_tau_p_and_end_at_tau_end(tmp_path):
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6, dt_growth=2.0, tau_end=2.5e-6)
+    pb = CutProblem()
+    drv = _cut_driver(tmp_path, pb, recon, growth=2.0, max_steps=100)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "tau-end" and out["stop"]["tau"] == pytest.approx(2.5e-6)
+    assert out["cut"]["t_cut"] == 0.0 and out["cut"]["t_p"] == -1e-6
+    assert out["cut"]["tau_p"] == pytest.approx(out["cut"]["tau"] + 1e-6, abs=1e-18)
+    rows = _chains_rows(tmp_path)
+    assert list(rows["dt"]) == pytest.approx([0.0, 1e-6, 1.5e-6])  # the last one up to tau_end
+    assert np.allclose(rows["tau"], rows["time"]) and np.allclose(rows["tau_p"], rows["time"] + 1e-6)
+    table = _rows(tmp_path)
+    assert np.allclose(table["tau"], table["time"]) and np.allclose(table["tau_p"],
+                                                                   table["time"] + 1e-6)
+    events = _read_events(tmp_path)
+    assert events[0]["event"] == "cut" and events[-1]["event"] == "stop"
+    assert all("tau" in e and "tau_p" in e for e in events)
+    for prof in sorted((tmp_path / "profiles").glob("profile_*[0-9].txt")):
+        bubble = prof.with_name(prof.stem + "_bubble.txt")
+        head, head_b = (json.loads(f.read_text().splitlines()[0][2:]) for f in (prof, bubble))
+        assert head["chain"] == "open" and head_b["chain"] == "bubble"
+        assert head["tau_p"] == pytest.approx(head["tau"] + 1e-6, abs=1e-18)
+        assert np.loadtxt(bubble).shape == (801, 4)
+    # no landing or stop states after a cut
+    with pytest.raises(ValueError, match="one cut per run"):
+        CollapseDriver(pb, _settings(), tmp_path / "x", reconnect=recon, landing=(5e-3,))
+
+
+def test_after_a_cut_the_bubble_stops_are_checked(tmp_path):
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    pb = CutProblem(width=lambda t: 1.0 if t <= 0.0 else 0.05)  # drains after the first step
+    drv = _cut_driver(tmp_path, pb, recon)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "bubble-vanishing" and out["steps"] == 1
+    assert out["stop"]["tau"] > 0.0
+
+
+def test_after_a_cut_no_newton_failure_ends_the_run_cleanly(tmp_path):
+    """Before a cut this failure, with a neck narrower than neck_guard, would be a pinch-off
+    approach; after one it is a failed run."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    drv = _cut_driver(tmp_path, CutProblem(fail_at=2), recon)
+    with pytest.raises(RuntimeError, match="OomphException"):
+        drv.run(1e-9)
+    drv.close()
+
+
+def test_a_post_cut_state_needs_the_reconnect_settings_of_its_cut(tmp_path):
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    pb = CutProblem()
+    drv = _cut_driver(tmp_path / "a", pb, recon, state_dt=0.0)
+    drv.run(1e-9)
+    drv.close()
+    meta = json.loads(max((tmp_path / "a" / "states").glob("state_*.json")).read_text())
+    assert meta["cut"]["t_cut"] == 0.0 and meta["tau"] == meta["time"]
+    with pytest.raises(RuntimeError, match="reconnect settings"):
+        CollapseDriver(CutProblem(), _settings(), tmp_path / "b").restore(meta)
+    other = ReconnectSettings(delta=1e-3, dt0=2e-3)
+    with pytest.raises(ValueError, match="differ from those of the cut"):
+        CollapseDriver(CutProblem(), _settings(), tmp_path / "c", reconnect=other).restore(meta)
+    # nor does a driver without them run after a cut
+    plain = CollapseDriver(pb, _settings(), tmp_path / "d")
+    with pytest.raises(RuntimeError, match="needs the reconnect settings"):
+        plain.reset_after_cut(pb.cut)
+    with pytest.raises(RuntimeError, match="runs after a cut"):
+        CollapseDriver(CutProblem(), _settings(), tmp_path / "e", reconnect=recon).run(1e-9)
+
+
+class KinkingCutProblem(CutProblem):
+    """``CutProblem`` whose bubble, from solve ``kink_at`` on, has a kink of three nodes whose spline
+    loops while the nodes do not (``test_reconnect_geometry.kinked``), and whose element distortion
+    flags that solve for a rebuild, which the driver makes after the step."""
+
+    def __init__(self, kink_at=2, **kw):
+        super().__init__(**kw)
+        self.kink_at, self.solves = kink_at, 0
+        self.do_call_remeshing_when_necessary = True
+        self.flags = []
+
+    def run(self, t_end, **kw):
+        super().run(t_end, **kw)
+        self.solves += 1
+        if self.solves == self.kink_at and not self.do_call_remeshing_when_necessary:
+            self.flags.append({"trigger": "quality", "ratio": 0.13})
+
+    def take_distortion_flags(self):
+        flags, self.flags = self.flags, []
+        return flags
+
+    def force_remesh(self):
+        from faraday_singularity.reconnect import Chain, check_chains
+
+        # the check every rebuild after a cut makes first (mesh.FaradayCylinderMesh)
+        check_chains([Chain(np.column_stack([c["r"], c["z"]]), tuple(c["end_types"]))
+                      for c in self.interface_segments()])
+        super().force_remesh()
+
+    def interface_segments(self):
+        from test_reconnect_geometry import kinked
+
+        segs = super().interface_segments()
+        if self.solves >= self.kink_at:
+            b = segs[0]
+            P = kinked(np.column_stack([b["r"], b["z"]]), 300)
+            segs[0] = self._chain("bubble", P[:, 0], P[:, 1], ("axis", "axis"))
+        return segs
+
+
+def test_after_a_cut_a_kink_the_rebuild_would_meet_stops_the_run_cleanly(tmp_path):
+    """The step at which the bubble's spline begins to loop (its nodes still simple) is also flagged
+    for a rebuild by element distortion. A rebuild from those nodes would raise
+    InterfaceSelfIntersection (a failed run, as the first production cut did); the driver checks
+    the stops first and ends the run cleanly, self-contact-approach with trigger spline-contact,
+    reported as a kink at the scale of the mesh, without the rebuild, and dumps the state."""
+    from faraday_singularity.mesh import Focus
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-3)
+    pb = KinkingCutProblem(kink_at=2)
+    pb.template.focus = Focus(size=6.25e-5, radius=0.02, grading=0.2)  # as the cut leaves it
+    drv = _cut_driver(tmp_path, pb, recon, max_steps=5)
+    out = drv.run(1e-9)
+    drv.close()
+    stop = out["stop"]
+    assert out["steps"] == 2 and stop["reason"] == "self-contact-approach"
+    assert stop["trigger"] == "spline-contact" and stop["chain"] == "bubble"
+    assert stop["contact"] == "kink" and stop["span"] == 3
+    assert stop["distortion_rebuild_skipped"] == 1
+    events = _read_events(tmp_path)
+    # the rebuilds of the rule at the first step (this stand-in's mesh does not follow them) are
+    # the only ones: none at the kinked step, and no rebuild for distortion
+    rebuilds = [e for e in events if e["event"] == "remesh"]
+    assert [e["step"] for e in rebuilds] == [1] and "reason" not in rebuilds[0]
+    assert pb.remesh_count == 1 and out["distortion_remeshes"] == 0
+    assert Path(stop["end_state"]).is_file()
+    assert events[-1]["event"] == "stop" and events[-1]["trigger"] == "spline-contact"
+
+
+# --- after a cut: the spacing the remesh rule reads, the dumps, a continuation ------------------
+
+
+def _with_midside_nodes(vertices, arc=None, speed=None) -> np.ndarray:
+    """The parameters of the nodes of quadratic elements from those of their vertices: each element
+    gains a midside node half way between its vertices, as a mesh's interface has it, in its
+    parameter or, given the arc length ``arc`` of the parameter and its derivative ``speed``, in
+    arc length."""
+    v = np.asarray(vertices, dtype=float)
+    m = 0.5 * (v[:-1] + v[1:])
+    if arc is not None:
+        target = 0.5 * (arc(v[:-1]) + arc(v[1:]))
+        for _ in range(8):
+            m = m - (arc(m) - target) / speed(m)
+    return np.concatenate([np.column_stack([v[:-1], m]).ravel(), v[-1:]])
+
+
+class CutSurfaceProblem(CutProblem):
+    """An open chain that is a trough ``z = 4.69 + r^2/(2 R)`` on the axis (apex radius ``R``) out
+    to ``r = 0.2``, above a spherical bubble of radius ``R_b`` (0.1, blunter than the trough: the
+    trough sets the local scale) whose top lies at 4.68, with the nodes of both chains spaced as on
+    a mesh after the cut, quadratic elements (a midside node half way between two vertices) as
+    long as the finer of the cut's sizing, ``h_tip + CUT_GRADING d`` with ``d`` the distance to
+    the nearest tip and to the bridge, and the focus of the last rebuild at the finer end of the
+    element: the focus size near the axis (``radius``), or with regions the size of the finest
+    region that holds the node and ``outside`` elsewhere. A rebuild cannot coarsen the focus
+    beyond ``coarsest``, as where the mesh also follows the curvature. With ``dimple = (D, w)`` a
+    jet hangs from the bubble's top into it, ``z -> z - D exp(-(r/w)^2)`` on its upper half, and
+    with ``bottom = (D, w)`` its bottom rises into one, ``z -> z + D exp(-(r/w)^2)`` on its lower
+    half; ``bubble_spacing`` spaces the bubble's nodes that many times wider than the mesh rule."""
+
+    def __init__(self, h_tip, focus_size, R=0.08, coarsest=math.inf, R_b=0.1, dimple=None,
+                 bottom=None, bubble_spacing=1.0, outside=0.01, **kw):
+        super().__init__(**kw)
+        self.h_tip, self.R, self.coarsest, self.R_b = h_tip, R, coarsest, R_b
+        self.dimple, self.bottom, self.bubble_spacing = dimple, bottom, bubble_spacing
+        self.focus_size = focus_size  # as the cut's remesh left it
+        self.outside = outside
+        self.mesh_focus = None  # the focus of the last rebuild, with regions
+        self._bubble = None
+
+    def force_remesh(self):
+        super().force_remesh()
+        focus = self.template.focus
+        self.focus_size = min(focus.size, self.coarsest)
+        self.mesh_focus = focus if focus.regions else None
+
+    def focus_at(self, r, z):
+        """The focus size of the last rebuild at ``(r, z)``."""
+        f = self.mesh_focus
+        if f is None:
+            return self.focus_size
+        sizes = [g.size for g in f.regions
+                 if (r <= g.radius if g.axial else math.hypot(r - g.r, z - g.z) <= g.radius)]
+        return min(min(sizes) if sizes else self.outside, self.coarsest)
+
+    def bubble_point(self, x):
+        R_b = self.R_b
+        r, z = R_b * math.sin(x), 4.68 - R_b - R_b * math.cos(x)
+        if self.dimple is not None and x > 0.5 * math.pi:
+            D, w = self.dimple
+            z -= D * math.exp(-((r / w) ** 2))
+        if self.bottom is not None and x < 0.5 * math.pi:
+            D, w = self.bottom
+            z += D * math.exp(-((r / w) ** 2))
+        return r, z
+
+    def bubble_chain(self):
+        from faraday_singularity.reconnect import cut_size_field
+
+        key = (self.focus_size, self.mesh_focus)
+        if self._bubble is not None and self._bubble[0] == key:
+            return self._bubble[1]
+        sizing = {"h_tip": self.h_tip, "h_bridge": self.h_tip, "grading": CUT_GRADING}
+        tips = [self.bubble_point(0.0)[1], self.bubble_point(math.pi)[1], 4.69]
+        def size(x):
+            r, z = self.bubble_point(x)
+            return self.bubble_spacing * min(self.focus_at(r, z),
+                                             float(cut_size_field([r], [z], tips, sizing)[0]))
+
+        th = [0.0]
+        while th[-1] < math.pi:
+            x = th[-1]
+            r, z = self.bubble_point(x)
+            # an element as long as the size at its finer end, from vertex to vertex
+            h = min(size(x), size(x + size(x) / self.R_b))
+            dx = h / self.R_b
+            for _ in range(4):
+                r1, z1 = self.bubble_point(x + dx)
+                dx *= h / math.hypot(r1 - r, z1 - z)
+            th.append(x + dx)
+        th[-1] = math.pi
+        P = np.array([self.bubble_point(x) for x in _with_midside_nodes(th)])
+        P[[0, -1], 0] = 0.0
+        seg = self._chain("bubble", P[:, 0], P[:, 1], ("axis", "axis"))
+        self._bubble = (key, seg)
+        return seg
+
+    def interface_segments(self):
+        bubble = self.bubble_chain()
+        def size(r):
+            z = 4.69 + r * r / (2.0 * self.R)
+            return min(self.focus_at(r, z), self.h_tip + CUT_GRADING * math.hypot(r, z - 4.69))
+
+        R = self.R
+
+        def arc(r):
+            return 0.5 * (r * np.sqrt(1 + (r / R) ** 2) + R * np.arcsinh(r / R))
+
+        def speed(r):
+            return np.sqrt(1 + (r / R) ** 2)
+
+        rs = [0.0]
+        while rs[-1] < 0.2:
+            r = rs[-1]
+            # an element of arc length as long as the size at its finer end
+            h = min(size(r), size(r + size(r)))
+            s, x = arc(r) + h, r + h / speed(r)
+            for _ in range(8):
+                x -= (arc(x) - s) / speed(x)
+            rs.append(float(x))
+        rs = _with_midside_nodes(rs, arc=arc, speed=speed)
+        P = np.column_stack([rs, 4.69 + rs * rs / (2.0 * R)])
+        s = np.linspace(0.0, 1.0, 101)[1:]
+        P = np.vstack([P, np.column_stack([P[-1, 0] + (R_C - P[-1, 0]) * s, P[-1, 1] + s])])
+        return [bubble, self._chain("open", P[:, 0], P[:, 1], ("axis", "fixed"))]
+
+
+def _surface_cut(tmp_path, coarsest=math.inf, problem=None, recon=None, **kw):
+    """A run after a cut at delta = 0.01 on ``CutSurfaceProblem`` (with the keywords ``problem``,
+    and ``recon`` for the reconnect settings): its tip is meshed at h_tip = 6.25e-4, the cut's
+    focus is as fine, and the trough asks for a focus of 0.01."""
+    from faraday_singularity.mesh import Focus
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(**{"delta": 1e-2, "dt0": 1e-6, **(recon or {})})
+    size = recon.focus_size * recon.delta
+    pb = CutSurfaceProblem(recon.tip_size * recon.delta, size, coarsest=coarsest,
+                           **(problem or {}))
+    pb.template.focus = Focus(size=size, radius=0.2, grading=0.2)
+    drv = _cut_driver(tmp_path, pb, recon, **kw)
+    out = drv.run(1e-9)
+    drv.close()
+    return drv.s, pb, out
+
+
+def _remesh_regions(event: dict) -> dict:
+    return {g["name"]: g for g in event["regions"]}
+
+
+@pytest.mark.parametrize("R", [0.08, 4e-3, 2e-3])
+def test_after_a_cut_the_tips_the_cut_made_are_meshed_at_their_own_scale(tmp_path, R):
+    """The tips the cut made, the cavity's and the bubble's top, are meshed at their own scale,
+    between the landing run's h_floor (1e-5) and the cut's focus size (focus_size cut radii,
+    6.25e-4 here), the coarsest size they may have, not a fixed one: a broad trough on the open
+    chain (R = 0.08, ell/8 = 0.01) does not coarsen them; a sharper one (R = 4e-3, ell/8 = 5e-4)
+    lies within the rule's tolerance (refine_ratio 1.5) of the cut's 6.25e-4, so no rebuild is
+    made; a sharp one (R = 2e-3, ell/8 = 2.5e-4) refines the cavity's tip in its own region, 20 ell
+    wide, while the rest of the cut's region (cavity_tip_cut, 20 cut radii) and the bubble's top
+    keep the cut's focus size. The driver's focus follows the rule, floored at h_floor only."""
+    s, pb, _ = _surface_cut(tmp_path, max_steps=12, problem={"R": R})
+    tab, rows = _rows(tmp_path), _chains_rows(tmp_path)
+    h_cut = 6.25e-4
+    remesh = [e for e in _read_events(tmp_path) if e["event"].startswith("remesh")]
+    assert tab["h_focus"][0] == pytest.approx(R / s.elements_per_scale)
+    if R > 2.5e-3:
+        assert not remesh and np.all(tab["remesh_count"] == 0)
+        for tip in ("cavity_tip", "bubble_top"):  # the longest element in each tip's region
+            assert rows[f"h_{tip}"] == pytest.approx(np.full(len(rows["step"]), h_cut), rel=2e-2)
+        r, z, _, _ = pb.interface_arrays()  # the tip is still meshed at h_tip
+        assert 2 * math.hypot(r[1] - r[0], z[1] - z[0]) == pytest.approx(6.25e-4, rel=1e-3)
+        return
+    assert [(e["event"], e["step"], e["asked_by"]) for e in remesh] == [
+        ("remesh", 1, ["cavity_tip"])]
+    g = _remesh_regions(remesh[0])
+    assert g["cavity_tip"]["target"] == pytest.approx(R / 8) == g["cavity_tip"]["new_size"]
+    assert g["cavity_tip"]["radius"] == pytest.approx(20 * R)
+    for name in ("cavity_tip_cut", "bubble_top"):
+        assert g[name]["new_size"] == pytest.approx(h_cut)
+        assert g[name]["radius"] == pytest.approx(0.2)
+    assert rows["h_cavity_tip"][-1] == pytest.approx(R / 8, rel=5e-2)
+    assert rows["h_bubble_top"][-1] == pytest.approx(h_cut, rel=2e-2)
+
+
+def test_after_a_cut_a_feature_coarsens_in_its_own_region(tmp_path):
+    """The bubble's bottom rising into a broad jet (base radius about 0.024, a target of 3.1e-3)
+    is coarsened from the cut's 6.25e-4 in its own region, by the bounded factor (1.5 here), while
+    the tips the cut made keep the cut's focus size; the rebuilds stop once the bottom's shortest
+    element reaches coarsen_ratio (0.6 here) times its target."""
+    s, _, _ = _surface_cut(tmp_path, max_steps=12, problem={"bottom": (9e-3, 0.03)},
+                           recon={"focus_radius": 5.0}, coarsen_ratio=0.6, max_coarsen_factor=1.5)
+    events = _read_events(tmp_path)
+    remesh = [e for e in events if e["event"] == "remesh"]
+    rows = _chains_rows(tmp_path)
+    assert rows["jet_born_bubble_bottom"][0] == 0 and rows["r_j_bubble_bottom"][0] > 0.02
+    assert [e["step"] for e in remesh] == [1, 2, 3]
+    assert not [e for e in events if e["event"] == "remesh-ineffective"]
+    for e in remesh:
+        g = _remesh_regions(e)
+        assert e["asked_by"] == ["bubble_bottom"]
+        bottom = g["bubble_bottom"]
+        bound = bottom["size"] if math.isfinite(bottom["size"]) else bottom["h_min"]
+        assert bottom["new_size"] == pytest.approx(min(bottom["target"], s.max_coarsen_factor * bound))
+        for tip in ("cavity_tip", "bubble_top"):
+            assert g[tip]["new_size"] == pytest.approx(6.25e-4)
+    bottom = _remesh_regions(remesh[-1])["bubble_bottom"]
+    assert bottom["new_size"] == pytest.approx(6.25e-4 * 1.5**3, rel=2e-3)  # from its shortest
+    assert bottom["new_size"] >= s.coarsen_ratio * bottom["target"]
+    assert rows["size_cavity_tip"][-1] == pytest.approx(6.25e-4)
+    assert rows["h_bubble_bottom"][-1] == pytest.approx(bottom["new_size"], rel=5e-2)
+
+
+def test_after_a_cut_a_coarsening_that_does_not_coarsen_waits(tmp_path, monkeypatch):
+    """A coarsening the mesh cannot follow (here beyond 1.25e-3) is not tried again on every step:
+    it waits remesh_backoff steps, as a refinement does, and the dumps after the cut keep that."""
+    s, _, _ = _surface_cut(tmp_path / "a", coarsest=1.25e-3, max_steps=50, state_dt=0.0,
+                           state_keep=1000, problem={"bottom": (9e-3, 0.03)},
+                           recon={"focus_radius": 5.0}, coarsen_ratio=0.6)
+    events = _read_events(tmp_path / "a")
+    wait = s.remesh_backoff + s.min_steps_between_remesh
+    assert [e["step"] for e in events if e["event"] == "remesh"] == [1, 2, 2 + wait, 2 + 2 * wait]
+    ineffective = [e for e in events if e["event"] == "remesh-ineffective"]
+    assert [e["step"] for e in ineffective] == [2, 2 + wait, 2 + 2 * wait]
+    for e in ineffective:
+        assert e["direction"] == "coarsen" and e["coarsen_blocked_until"] == e["step"] + wait
+        assert e["asked_by"] == ["bubble_bottom"]
+    meta = json.loads((tmp_path / "a" / "states" / "state_00000030.json").read_text())
+    assert meta["coarsen_blocked_until"] == 2 + 2 * wait
+    assert {g["name"] for g in meta["focus"]["regions"]} == {"cavity_tip", "bubble_top",
+                                                             "bubble_bottom"}
+    # a restart keeps the wait and the regions (restore_cut needs the finite-element problem; here
+    # it only puts the record back)
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
+        restore_cut=lambda problem, record: setattr(problem, "cut", record)))
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    pb = CutSurfaceProblem(6.25e-4, 1.25e-3, coarsest=1.25e-3, bottom=(9e-3, 0.03))
+    pb.t = meta["time"]
+    drv = CollapseDriver(pb, s, tmp_path / "b",
+                         reconnect=ReconnectSettings.from_dict(meta["cut"]["settings"]))
+    drv.restore(meta)
+    assert drv.state.coarsen_blocked_until == 2 + 2 * wait
+    assert pb.template.focus.to_dict() == meta["focus"]
+    drv.close()
+
+
+def test_after_a_cut_dumps_follow_each_doubling_of_tau_and_the_end_state(tmp_path):
+    """The state_dt of a landing run (0.1 by default) can exceed the whole run after a cut. After
+    the cut the rotating dumps follow at least each time tau doubles, the first at the first step,
+    and the state the run ends on is dumped too; before a cut the cadence is state_dt alone."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    drv = _cut_driver(tmp_path / "a", CutProblem(), recon, max_steps=10, state_keep=100)
+    out = drv.run(1e-9)
+    drv.close()
+    assert drv.s.state_dt == 0.1
+    states = tmp_path / "a" / "states"
+    metas = [json.loads(p.read_text()) for p in sorted(states.glob("state_*.json"))]
+    assert [m["step"] for m in metas] == [1, 2, 4, 7, 10]
+    assert out["stop"] == {"reason": "max-steps", "end_state": str(states / "state_00000010.dump")}
+    tau = _chains_rows(tmp_path / "a")["tau"]
+    for a, b in zip(metas[:-2], metas[1:-1]):  # the first step at least that tau after a dump
+        assert tau[b["step"]] - a["tau"] >= a["tau"] > tau[b["step"] - 1] - a["tau"]
+    assert metas[-1]["tau"] == pytest.approx(tau[-1]) and "resume_at" not in metas[-1]
+    # before a cut: every state_dt only, and no dump of the end state
+    drv = PrescribedDriver(FakeProblem(), _settings(t_end=0.255, dt_max=0.01, state_keep=100),
+                           tmp_path / "b", lambda t: {})
+    out = drv.run(1e-9)
+    drv.close()
+    times = [json.loads(p.read_text())["time"]
+             for p in sorted((tmp_path / "b" / "states").glob("state_*.json"))]
+    assert len(times) == 3 and np.all(np.diff(times) >= 0.1 - 1e-12)
+    assert out["stop"] == {"reason": "end-time"} and times[-1] < 0.25
+
+
+def test_after_a_cut_a_run_that_ended_at_tau_end_continues_under_a_later_tau_end(tmp_path,
+                                                                               monkeypatch):
+    """The end state of a run that stopped at tau_end continues under the same reconnect settings
+    with a later tau_end (the bubble-collapse time that ends the acceptance window is not known in
+    advance); any other setting than the cut's is refused."""
+    import dataclasses
+
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6, dt_growth=2.0, tau_end=2.5e-6)
+    out = _cut_driver(tmp_path / "a", CutProblem(), recon, growth=2.0, max_steps=100).run(1e-9)
+    assert out["stop"]["reason"] == "tau-end"
+    meta = json.loads(Path(out["stop"]["end_state"]).with_suffix(".json").read_text())
+    assert meta["step"] == out["steps"] and meta["tau"] == pytest.approx(2.5e-6)
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
+        restore_cut=lambda problem, record: setattr(problem, "cut", record)))
+    settings = _settings(t_end=1.0, dt_max=1.0, growth=2.0, max_steps=100)
+    pb = CutProblem()
+    pb.t = meta["time"]
+    drv = CollapseDriver(pb, settings, tmp_path / "b",
+                         reconnect=dataclasses.replace(recon, tau_end=6e-6))
+    drv.restore(meta)
+    later = drv.run(1e-9)
+    drv.close()
+    assert later["stop"]["reason"] == "tau-end" and later["stop"]["tau"] == pytest.approx(6e-6)
+    assert later["steps"] > meta["step"] and later["cut"]["tau_end"] == 6e-6
+    assert _chains_rows(tmp_path / "b")["tau"][0] == pytest.approx(2.5e-6)
+    with pytest.raises(ValueError, match="differ from those of the cut"):
+        CollapseDriver(CutProblem(), settings, tmp_path / "c",
+                       reconnect=dataclasses.replace(recon, dt0=2e-6)).restore(meta)
+
+
+# --- after a cut: the jets of the bubble's tips, and the bubble in the local scale --------------
+
+
+class JetBubbleProblem(CutProblem):
+    """The open chain of ``CutProblem`` above a spherical bubble of radius ``R_b`` whose top is
+    pushed down into a jet, ``z -> z - D_t exp(-(r/w_t)^2)`` on its upper half (the jet the bridge
+    drives into the bubble), and whose bottom rises into one, ``z -> z + D_b exp(-(r/w_b)^2)`` on
+    its lower half (as a jet from the cavity bottom left inside the bubble). In the liquid ``u_z``
+    is ``-W_t`` above the bubble's centre and ``W_b`` below it."""
+
+    R_b, D_t, w_t, D_b, w_b, W_t, W_b = 0.1, 0.01, 2e-3, 0.005, 4e-3, 3.0, 2.0
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.zc = 4.68 - self.R_b
+
+    def upper(self, r):
+        return self.zc + np.sqrt(self.R_b**2 - r**2) - self.D_t * np.exp(-((r / self.w_t) ** 2))
+
+    def lower(self, r):
+        return self.zc - np.sqrt(self.R_b**2 - r**2) + self.D_b * np.exp(-((r / self.w_b) ** 2))
+
+    def interface_segments(self):
+        th = np.linspace(0.0, math.pi, 8001)
+        r = self.R_b * np.sin(th)
+        r[[0, -1]] = 0.0
+        z = np.where(th > 0.5 * math.pi, self.upper(r), self.lower(r))
+        return [self._chain("bubble", r, z, ("axis", "axis")), super().interface_segments()[1]]
+
+    def axial_velocity_at(self, points):
+        return [-self.W_t if z > self.zc else self.W_b for _, z in points], True
+
+
+def test_after_a_cut_the_jets_of_the_bubble_tips_are_measured(tmp_path, monkeypatch):
+    """chains.txt holds, for each of the three tips, the jet-base radius and height, the flux, the
+    mean speed and We_j, measured as for the open chain: the bubble's top mirrored, so the jet the
+    bridge drives down into the bubble has its base at the highest point of the bubble's top near
+    the axis, and Q_j and V_j positive along each jet. The jets are tracked (events, dumps)."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    pb = JetBubbleProblem()
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-7)
+    drv = _cut_driver(tmp_path / "a", pb, recon, state_dt=0.0, state_keep=100)
+    out = drv.run(1e-9)
+    drv.close()
+    assert out["stop"]["reason"] == "max-steps"
+    rows = _chains_rows(tmp_path / "a")
+    r = np.linspace(1e-6, 0.05, 500001)
+    for tip, profile, sign, W in (("bubble_top", pb.upper, -1.0, pb.W_t),
+                                  ("bubble_bottom", pb.lower, 1.0, pb.W_b)):
+        k = int(np.argmax(-sign * profile(r)))  # the base: highest on the top, lowest at the bottom
+        assert np.all(rows[f"jet_born_{tip}"] == 1)
+        assert rows[f"r_j_{tip}"] == pytest.approx(np.full(len(rows["step"]), r[k]), rel=1e-3)
+        assert rows[f"z_b_{tip}"] == pytest.approx(np.full(len(rows["step"]), profile(r[k])),
+                                                   abs=1e-7)
+        assert np.all(rows[f"V_j_{tip}"] == pytest.approx(W, rel=1e-12))  # along the jet
+        assert rows[f"Q_j_{tip}"] == pytest.approx(W * math.pi * rows[f"r_j_{tip}"] ** 2,
+                                                   rel=1e-12)
+        assert rows[f"We_j_{tip}"] == pytest.approx(W**2 * rows[f"r_j_{tip}"], rel=1e-12)
+    # the open chain's jet, as collapse.txt has it: a cap, no jet
+    table = _rows(tmp_path / "a")
+    assert np.all(rows["jet_born_cavity_tip"] == 0) and np.all(np.isnan(rows["V_j_cavity_tip"]))
+    assert np.array_equal(rows["r_j_cavity_tip"], table["r_j"])
+    # the bubble's scale is its narrower jet, not the sharper radius of its top tip (1/(2 D_t/w_t^2
+    # - 1/R_b), mesh-dependent at a chain's end), which bounds the step; the open cap's radius 1e-3
+    # is the smaller scale here
+    R_top = 1.0 / (2 * pb.D_t / pb.w_t**2 - 1.0 / pb.R_b)
+    assert rows["R_bubble_top"][0] == pytest.approx(R_top, rel=2e-2) == rows["R_tip_min"][0]
+    assert rows["dt_capillary"][0] == pytest.approx(0.2 * R_top**1.5, rel=5e-2)
+    assert rows["ell_bubble"][0] == min(rows["r_j_bubble_top"][0], rows["r_j_bubble_bottom"][0])
+    assert table["ell"][0] == pytest.approx(min(rows["R_cavity_tip"][0], rows["ell_bubble"][0]))
+    events = _read_events(tmp_path / "a")
+    born = [e for e in events if e["event"] == "tip-jet-born"]
+    assert [e["tip"] for e in born] == ["bubble_bottom", "bubble_top"]
+    assert all(e["step"] == 0 and e["tau"] == 0.0 for e in born)
+    meta = json.loads(max((tmp_path / "a" / "states").glob("state_*.json")).read_text())
+    assert meta["tip_born"] == {"bubble_bottom": True, "bubble_top": True}
+    # a continuation keeps them (restore_cut needs the finite-element problem; here it only puts
+    # the record back)
+    monkeypatch.setitem(sys.modules, "faraday_singularity.surgery", SimpleNamespace(
+        restore_cut=lambda problem, record: setattr(problem, "cut", record)))
+    again = JetBubbleProblem()
+    again.t = meta["time"]
+    drv = CollapseDriver(again, _settings(t_end=1.0, dt_max=1.0, max_steps=meta["step"] + 1),
+                         tmp_path / "b", reconnect=recon)
+    drv.restore(meta)
+    assert drv.state.tip_born == {"bubble_bottom": True, "bubble_top": True}
+    drv.run(1e-9)
+    drv.close()
+    assert not [e for e in _read_events(tmp_path / "b") if e["event"].startswith("tip-jet")]
+
+
+def test_after_a_cut_a_jet_into_the_bubble_sets_the_scale_and_the_mesh_of_its_tip(tmp_path):
+    """While the open chain's trough asks for a focus of 0.01, a thin jet hanging into the bubble
+    from its top (base radius about 8.6e-4) sets the local scale, and with it the step and the
+    driver's focus (ell/8, floored at h_floor only), and the mesh of the bubble's top, a tip the cut
+    made, follows its scale: the first rebuild refines its region (to ell/8, by at most the bounded
+    factor) and the region of the jet's base (its apex radius over 8), while the rest of the cut's
+    region keeps the cut's focus size."""
+    s, _, _ = _surface_cut(tmp_path, max_steps=1, problem={"dimple": (3e-4, 3e-4)})
+    tab, rows = _rows(tmp_path), _chains_rows(tmp_path)
+    assert rows["jet_born_bubble_top"][0] == 1 and rows["r_j_bubble_top"][0] < 1e-3
+    assert tab["ell"][0] == rows["ell_bubble"][0] == rows["r_j_bubble_top"][0]
+    assert rows["R_apex_bubble_top"][0] > rows["r_j_bubble_top"][0]  # a broad base: no scale
+    assert tab["h_focus"][0] == pytest.approx(tab["ell"][0] / 8)
+    remesh = [e for e in _read_events(tmp_path) if e["event"] == "remesh"]
+    assert [e["step"] for e in remesh] == [1]
+    assert remesh[0]["asked_by"] == ["bubble_top", "jet_base_bubble_top"]
+    g = _remesh_regions(remesh[0])
+    top = g["bubble_top"]
+    assert top["target"] == pytest.approx(rows["r_j_bubble_top"][0] / 8)
+    assert top["new_size"] == pytest.approx(max(top["target"], top["h_max"] / s.max_refine_factor))
+    base = g["jet_base_bubble_top"]
+    assert base["target"] == pytest.approx(rows["R_apex_bubble_top"][0] / 8) == base["new_size"]
+    assert (base["r"], base["z"]) == pytest.approx((rows["r_j_bubble_top"][0],
+                                                    rows["z_b_bubble_top"][0]))
+    assert base["radius"] == pytest.approx(8 * rows["R_apex_bubble_top"][0])
+    assert g["bubble_top_cut"]["new_size"] == pytest.approx(6.25e-4)
+    assert g["cavity_tip"]["new_size"] == pytest.approx(6.25e-4)
+
+
+def test_after_a_cut_a_jet_on_the_bubble_bottom_refines_its_own_region(tmp_path):
+    """The bubble's bottom is the landing's cavity bottom, no tip the cut made: a thin jet rising
+    from it (base radius about 1.9e-3, a target of 2.4e-4) refines the mesh in its own region, by
+    the bounded factor, and the tips the cut made keep the cut's focus size."""
+    s, _, _ = _surface_cut(tmp_path, max_steps=4, problem={"bottom": (2e-4, 1e-3)},
+                           recon={"focus_radius": 5.0})
+    rows = _chains_rows(tmp_path)
+    assert rows["r_j_bubble_bottom"][0] == pytest.approx(1.92e-3, rel=0.05)
+    remesh = [e for e in _read_events(tmp_path) if e["event"] == "remesh"]
+    assert remesh and remesh[0]["step"] == 1 and remesh[0]["asked_by"] == ["bubble_bottom"]
+    first = _remesh_regions(remesh[0])
+    bottom = first["bubble_bottom"]
+    assert bottom["new_size"] == pytest.approx(max(bottom["target"],
+                                                   bottom["h_max"] / s.max_refine_factor))
+    for tip in ("cavity_tip", "bubble_top"):
+        assert first[tip]["new_size"] == pytest.approx(6.25e-4)
+    last = _remesh_regions(remesh[-1])["bubble_bottom"]
+    assert last["new_size"] == pytest.approx(last["target"])
+    assert rows["h_bubble_bottom"][-1] == pytest.approx(last["target"], rel=0.1)
+    assert rows["size_bubble_top"][-1] == pytest.approx(6.25e-4)
+
+
+def test_after_a_cut_the_remesh_rule_reads_the_coarser_chain(tmp_path):
+    """The spacing near the collapse is read on both chains where the focus sets it, and the
+    coarser counts: here the bubble's nodes lie three times farther apart than the open chain's."""
+    _surface_cut(tmp_path, max_steps=0, problem={"bubble_spacing": 3.0})
+    tab = _rows(tmp_path)
+    assert tab["h_near"][0] == pytest.approx(3 * 6.25e-4, rel=1e-2)
+    _surface_cut(tmp_path / "b", max_steps=0)
+    assert _rows(tmp_path / "b")["h_near"][0] == pytest.approx(6.25e-4, rel=1e-2)
+
+
+@pytest.mark.parametrize("keep", [0, -1, 1.5, True])
+def test_state_keep_is_at_least_one(keep):
+    with pytest.raises(ValueError, match="state_keep"):
+        _settings(state_keep=keep)
+
+
+def test_after_a_cut_the_end_state_named_by_the_stop_is_kept(tmp_path):
+    """With a single rotating dump the state a run after a cut ends on, which its stop record names
+    and a continuation starts from, is the dump the rotation keeps."""
+    from faraday_singularity.reconnect import ReconnectSettings
+
+    recon = ReconnectSettings(delta=1e-3, dt0=1e-6)
+    out = _cut_driver(tmp_path, CutProblem(), recon, max_steps=5, state_keep=1).run(1e-9)
+    end = Path(out["stop"]["end_state"])
+    assert out["stop"]["reason"] == "max-steps" and end.name == "state_00000005.dump"
+    assert end.is_file() and end.with_suffix(".json").is_file()
+    assert sorted(p.name for p in (tmp_path / "states").iterdir()) == [
+        "state_00000005.dump", "state_00000005.json"]
