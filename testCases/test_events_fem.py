@@ -228,18 +228,30 @@ def _events_rows_as_midpoint(text: str, run: Path) -> str:
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
-def _same_outputs(a: Path, b: Path) -> list[str]:
+def _same_outputs(a: Path, b: Path, *, strip=None, head_only=()) -> list[str]:
     """Every file of two run directories (but pyoomph's own, under ``_*``) the same: to the byte,
     but the wall-time column of ``collapse.txt`` and the wall times of the JSON records; and the
     files gmsh wrote for them (``_gmsh``) the same, by name and hash, none deleted in one only.
     Where two runs differ, the cell-read closures alone are read as the midpoint rule's
     (CELL_READ_CLOSURES: ``<P>2`` from ``<P>2_grid``; in events.txt the CELL_READ_COLUMN of
-    those surgeries' rows only, from their records)."""
+    those surgeries' rows only, from their records, each table's such rows checked against its own
+    records always).
+
+    For a run of ``b`` with a part of the block that ``a``'s lacks (``test_jetcore_identity``,
+    ``test_groove_identity``): ``strip`` removes from every JSON record, and from every line of
+    ``events.jsonl`` (then compared line by line), what that part adds by design, before the
+    strict and the midpoint comparisons; ``head_only`` the files ``b`` alone writes. Every other
+    rule is the same for every caller."""
+    filtered = strip is not None
+    strip = strip if filtered else (lambda j: j)
     assert _gmsh_files(a) == _gmsh_files(b)
-    names = sorted(f.relative_to(a).as_posix() for f in a.rglob("*") if f.is_file()
-                   and not f.relative_to(a).parts[0].startswith("_"))
-    assert names == sorted(f.relative_to(b).as_posix() for f in b.rglob("*") if f.is_file()
-                           and not f.relative_to(b).parts[0].startswith("_"))
+
+    def files(run):
+        return sorted(f.relative_to(run).as_posix() for f in run.rglob("*") if f.is_file()
+                      and not f.relative_to(run).parts[0].startswith("_"))
+
+    names = files(a)
+    assert files(b) == sorted(names + list(head_only))
     for name in names:
         x, y = a / name, b / name
         if name == "collapse.txt":
@@ -251,8 +263,11 @@ def _same_outputs(a: Path, b: Path) -> list[str]:
                 cu, cv = u.split("\t"), v.split("\t")
                 assert cu[:wall] + cu[wall + 1:] == cv[:wall] + cv[wall + 1:], name
         elif name.endswith(".json"):
-            jx, jy = (_without_wall(json.loads(f.read_text())) for f in (x, y))
+            jx, jy = (strip(_without_wall(json.loads(f.read_text()))) for f in (x, y))
             assert jx == jy or _as_midpoint(jx) == _as_midpoint(jy), name
+        elif name == "events.jsonl" and filtered:
+            lx, ly = ([strip(json.loads(u)) for u in f.read_text().splitlines()] for f in (x, y))
+            assert lx == ly, name
         elif name == "events.txt":
             # each table's cell-read rows checked against their own records, always (a table
             # that keeps a reference's F2 against its own record fails even when byte-identical)

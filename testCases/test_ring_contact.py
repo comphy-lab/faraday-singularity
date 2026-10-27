@@ -1544,6 +1544,23 @@ def test_the_identity_comparator_maps_only_the_cell_read_closures(tmp_path):
     assert (stale / "events.txt").read_bytes() == (ref / "events.txt").read_bytes()
     with pytest.raises(AssertionError, match="events.txt row 1"):
         fem_pins._same_outputs(ref, stale)
+    # a filtered caller (test_jetcore_identity, test_groove_identity): the same rules, its part's
+    # keys removed from the records, its own files in the head only
+    def strip(x):
+        if isinstance(x, dict):
+            return {k: strip(v) for k, v in x.items() if k != "jetcore"}
+        return [strip(v) for v in x] if isinstance(x, list) else x
+    part = {k: dict(v, jetcore={"enabled": True}) for k, v in head_records.items()}
+    for name, f2 in (("part", 0.02), ("part-bad", 999.0)):
+        d = run(name, rows(cell / 2e-10, f2), part)
+        (d / "jetcore.txt").write_text("# the part's own table\n")
+        if f2 == 0.02:
+            fem_pins._same_outputs(ref, d, strip=strip, head_only=["jetcore.txt"])
+        else:  # an unrelated row's F2 change is rejected through the filtered call too
+            with pytest.raises(AssertionError, match="events.txt"):
+                fem_pins._same_outputs(ref, d, strip=strip, head_only=["jetcore.txt"])
+    with pytest.raises(AssertionError):  # the part's keys are not removed without the filter
+        fem_pins._same_outputs(ref, tmp_path / "part", head_only=["jetcore.txt"])
     # a zero scale: the reference's relative value null, the head's rebuilt null too
     ref0 = run("ref0", [{"k": 1, "kind": "piercing", "F2": None}],
                {1: {"kind": "piercing", "closures": closures("R", 0.0, P_ref=0.0)}})

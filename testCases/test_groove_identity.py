@@ -87,36 +87,9 @@ def _without_groove(x):
 
 def _same_solution(ref: Path, head: Path) -> list[str]:
     """``test_events_fem._same_outputs`` for a run of ``head`` with ``groove.enabled`` against one
-    of ``ref`` without it: every file the same, the JSON records and the lines of
-    ``events.jsonl`` but for :func:`_without_groove`, the meshes gmsh wrote by name and hash."""
-    assert fem_pins._gmsh_files(ref) == fem_pins._gmsh_files(head)
-
-    def files(run):
-        return sorted(f.relative_to(run).as_posix() for f in run.rglob("*") if f.is_file()
-                      and not f.relative_to(run).parts[0].startswith("_"))
-
-    names = files(ref)
-    assert files(head) == names
-    for name in names:
-        x, y = ref / name, head / name
-        if name == "collapse.txt":
-            hx, *rx = x.read_text().splitlines()
-            hy, *ry = y.read_text().splitlines()
-            wall = hx[2:].split("\t").index("wall")
-            assert hx == hy and len(rx) == len(ry), name
-            for u, v in zip(rx, ry):
-                cu, cv = u.split("\t"), v.split("\t")
-                assert cu[:wall] + cu[wall + 1:] == cv[:wall] + cv[wall + 1:], name
-        elif name.endswith(".json"):
-            assert _without_groove(json.loads(x.read_text())) == _without_groove(
-                json.loads(y.read_text())), name
-        elif name == "events.jsonl":
-            a = [_without_groove(json.loads(u)) for u in x.read_text().splitlines()]
-            b = [_without_groove(json.loads(u)) for u in y.read_text().splitlines()]
-            assert a == b, name
-        else:
-            assert x.read_bytes() == y.read_bytes(), name
-    return names
+    of ``ref`` without it: its rules, the records and the lines of ``events.jsonl`` read
+    without what :func:`_without_groove` removes."""
+    return fem_pins._same_outputs(ref, head, strip=_without_groove, head_only=())
 
 
 def test_with_groove_enabled_and_no_groove_the_finite_element_run_is_89f7f49s(tmp_path):
