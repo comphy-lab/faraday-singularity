@@ -216,7 +216,8 @@ def _zero_inside(problem, sets: dict, polygon, z_range, shrink: float) -> dict:
 
 
 def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict | None, scales: dict,
-                   areas: dict, sigma: dict | None = None, prefix: str = "R") -> dict:
+                   areas: dict, sigma: dict | None = None, prefix: str = "R",
+                   moved_change: float | None = None) -> dict:
     """The closures of a ring surgery within its box, each against its limit (``RING_BUDGET_LIMITS``
     times its scale, never below the floor of ``RING_NOISE_FLOORS``, a multiple of the ring's noise
     ``sigma``: ``V``, ``Pz``, ``KE``, zero where not given): R1 the liquid volume the box gained
@@ -240,7 +241,15 @@ def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict | None, scales: 
     the projection moved little momentum across that boundary; neither alone discriminates where
     the impulse stays within a thin column whose sides cancel (the identity's sides then lie far
     below ``P_ref``, its relative error set by the quadrature of the box's grid; below the floor it
-    states only that the momentum it misses is below the box's noise)."""
+    states only that the momentum it misses is below the box's noise).
+
+    ``moved_change``: the box's momentum the transfer moved apart from the fill, read cell by
+    cell across the rebuild (``ringcontact.momentum_change``: a cell whose midpoint the rebuild
+    moved across a free surface counts its liquid part's change; the filled region counted as
+    gas after the rebuild, by its midpoint samples and its liquid parts alike, so that no reading
+    holds the fill), which R2 then is, in place of
+    the midpoint rule's ``after_transfer - before - Pz_fill`` (a groove fill's G2); R2 not finite
+    either way stays a miss."""
     V, Pz_fill, KE_fill = fill["V"], fill["Pz"], fill["KE"]
     P_ref, KE_ref = scales["P_ref"], scales["KE_ref"]
     before, moved, after = box["before"], box["after_transfer"], box["after_projection"]
@@ -256,6 +265,8 @@ def _ring_closures(fill: dict, poly: dict, box: dict, phi: dict | None, scales: 
               "R4": abs(after["KE"] - moved["KE"]),
               "R5": abs(poly["after"]["A"] - poly["before"]["A"] - dA),
               "R6": abs(moved["KE"] - before["KE"] - KE_fill)}
+    if moved_change is not None:  # the cell reading never replaces a value that is not finite
+        values["R2"] = abs(moved_change) if math.isfinite(values["R2"]) else math.nan
     # the fill's volume signed in R1's balance, its magnitude R1's scale (a removal, such as a
     # lip's rupture, is a negative fill, sheetsurgery.sheet_rupture)
     scale = {"R1": abs(V), "R2": P_ref,

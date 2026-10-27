@@ -320,27 +320,50 @@ def sample(problem, grid: dict, reservoir_depth: float) -> dict:
     midpoint sample, and for each cell within a diagonal of a free surface its liquid fraction
     and its velocity at its liquid part's centroid), which the record does not keep
     (:func:`plain_sample`)."""
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
-
-    from .reconnect import Chain, closed_section
+    from .reconnect import Chain
     from .ring import closed
-    from .surgery import _named_chains, box_integrals, box_polyline_budgets, sample_fields
+    from .surgery import _named_chains, box_integrals, box_polyline_budgets
 
     named, _ = _named_chains(problem)
     loops = [np.column_stack([x["r"], x["z"]]) for x in problem.interface_loops()]
     chains = [c for _, c in named] + [Chain(closed(L), ("loop", "loop")) for L in loops]
-    gas = unary_union([Polygon(closed_section(c.points, c.end_types, reservoir_depth)).buffer(0)
-                       for c in chains])
-
-    def sampler(r, z):
-        f, found = sample_fields(problem, r, z, ("velocity_y",))
-        return np.where(found, f["velocity_y"], 0.0), found
-
+    gas = gas_of(chains, reservoir_depth)
+    sampler = axial_sampler(problem)
     return {"box": box_integrals(problem, grid, cutoff=True),
             "poly": box_polyline_budgets(chains, grid["z"], grid["R"], reservoir_depth,
                                          r_centre=grid["r_c"]), "loops": len(loops),
             "_cells": cell_readings(grid, gas, sampler)}
+
+
+def gas_of(chains, reservoir_depth: float):
+    """The gas the polylines of ``chains`` (``reconnect.Chain``) bound, as one shapely geometry
+    (each closed through the gas as ``reconnect.closed_section`` closes it)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from .reconnect import closed_section
+
+    return unary_union([Polygon(closed_section(c.points, c.end_types, reservoir_depth)).buffer(0)
+                        for c in chains])
+
+
+def axial_sampler(problem, gas=None):
+    """``sampler(r, z)`` for :func:`cell_readings`: the liquid's axial velocity at the points
+    (zero outside it) and whether each lies in the liquid; with ``gas`` (a shapely geometry) its
+    points counted as gas whatever the field holds there (a fill's filled region after its
+    rebuild, read as gas by every reading: midpoints and liquid parts alike)."""
+    import shapely
+
+    from .surgery import sample_fields
+
+    def sampler(r, z):
+        f, found = sample_fields(problem, r, z, ("velocity_y",))
+        if gas is not None:
+            found = found & ~np.asarray(shapely.contains_xy(gas, np.asarray(r, dtype=float),
+                                                            np.asarray(z, dtype=float)),
+                                        dtype=bool)
+        return np.where(found, f["velocity_y"], 0.0), found
+    return sampler
 
 
 def plain_sample(sampled: dict) -> dict:
@@ -444,7 +467,12 @@ def momentum_change(grid: dict, before: dict, after: dict) -> dict:
     the lip's refine moved one heavy cell's midpoint (dV 1.4e-11 at 2.7e-3 from the lip, 330-380
     in u_z) across the free surface of the plug, the surface through the cell's middle both
     times: 3.9e-9 and 3.6e-9 of the grid's change, the matched cells 1.8e-10 and -4.1e-11, the
-    limit 1.62e-9."""
+    limit 1.62e-9.
+
+    A groove fill reads its G2 so with the filled region counted as gas after the rebuild, in
+    its midpoint samples (:func:`axial_sampler`) and in its liquid parts alike
+    (``groovesurgery``): the change is then the transfer's alone, none of the fill's liquid in
+    any reading on either side."""
     cb, ca = before["_cells"], after["_cells"]
     w = np.asarray(grid["dV"], dtype=float) * np.asarray(grid["phi"], dtype=float)
     both = cb["found"] & ca["found"]

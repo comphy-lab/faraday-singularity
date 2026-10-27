@@ -1192,3 +1192,153 @@ def test_a_retry_that_folds_again_is_never_accepted(tmp_path, monkeypatch, filla
         assert result["stop"]["trigger"] == "stepped-contact-unhandled" and not calls
         assert result["stop"]["contact"]["pre_step_phase"] == "liquid"
         assert len(pb.steps) == 2 and pb.shape is None
+
+
+def test_a_fills_g2_reads_its_cells_by_their_liquid_parts_the_fill_read_as_gas():
+    """The groove fill's G2 (r1f at f5, step 13695, event 23 at the floor, r 3.0e-3): the
+    rebuild moved one cell's midpoint across a free surface 3.5e-3 from the fill (its liquid
+    fraction 0.34603 to 0.34603, u_z 713): its whole cell, 2.51e-9 of the grid's 2.70e-9 against
+    1.62e-9, the cells in the liquid both times 1.9e-10. G2 reads every cell by its liquid part
+    with the filled region counted as gas after the rebuild (review F1: a crossed cell whose
+    footprint holds part of the fill, its midpoint outside it, would otherwise carry the fill's
+    momentum into the transfer's and hide a loss). A constant field closes; a transfer loss of
+    three limits is a miss; a value that is not finite is a miss."""
+    import shapely
+    from shapely.geometry import box as rect
+
+    from faraday_singularity.ringsurgery import _ring_closures
+    from faraday_singularity.surgery import site_grid
+
+    grid = site_grid(3.0e-3, 4.611, 4e-3)
+    w = grid["dV"] * grid["phi"]
+    k = int(np.argmax(w))
+    zc = float(grid["zz"][k])
+    sigma = {"V": 1.13e-13, "Pz": 3.24e-10, "KE": 1e-9}
+    limit = 5.0 * sigma["Pz"]
+    cell = contact._cells(grid, [k])[0]
+    # the fill: a pocket of gas in the liquid below the far surface, inside cell k's footprint,
+    # away from its midpoint (no midpoint of any cell in it)
+    x0, y0, x1, y1 = cell.bounds
+    fill = rect(x0 + 0.05 * (x1 - x0), y0 + 0.05 * (y1 - y0), x0 + 0.45 * (x1 - x0),
+                zc - 0.1 * (y1 - y0))
+    assert not shapely.contains_xy(fill, grid["r"], grid["zz"]).any()
+    assert fill.within(cell) and fill.area > 0.1 * cell.area
+
+    def side(eps, filled, du=0.0, u=lambda r, z: 713.0 + 0.0 * r):
+        gas = rect(0.0, zc + eps, 1.0, 10.0)
+        fem_gas = gas if filled else gas.union(fill)
+
+        def sampler(r, z):
+            r, z = np.asarray(r), np.asarray(z)
+            found = ~shapely.contains_xy(fem_gas, r, z) & (z < zc + eps)
+            return np.where(found, u(r, z) + du, 0.0), found
+        # the reading's gas: before the rebuild its own; after it the fill read as gas
+        return contact.cell_readings(grid, gas.union(fill), sampler), sampler
+
+    def g2(before, after, Pz_fill, change=None):
+        moved = contact.momentum_change(grid, {"_cells": before}, {"_cells": after})
+        Pb = float(np.sum(w * before["uz"]))
+        Pa = float(np.sum(w * after["uz"]))
+        box = {x: {"Pz": P, "KE": 0.0} for x, P in (("before", Pb), ("after_transfer", Pa),
+                                                     ("after_projection", Pa))}
+        poly = {"before": {"V_liquid": 1e-6, "A": 1.0}, "after": {"V_liquid": 1e-6, "A": 1.0}}
+        c = _ring_closures({"V": 0.0, "Pz": Pz_fill, "KE": 0.0}, poly, box, None,
+                           {"P_ref": 1e-12, "KE_ref": 1e-12}, {"A_cl": 0.0, "A_rem": 0.0},
+                           sigma=sigma, prefix="G",
+                           moved_change=moved["change"] if change is None else change)
+        return c, moved, abs(Pa - Pb - Pz_fill)
+
+    before, _ = side(-1e-9, filled=False)  # cell k's midpoint gas before, liquid after
+    after, sampler = side(1e-9, filled=True)
+    assert not before["found"][k] and after["found"][k]
+    Pz_fill = 0.0  # the fill holds no midpoint: the midpoint rule reads none of its momentum
+    # the fill's own momentum, in cell k's liquid part, exceeds the limit: it could hide a loss
+    from faraday_singularity.axisrepair import polygon_quadrature_points
+    X, dV, _ = polygon_quadrature_points(fill)
+    fill_P = float(grid["phi"][k] * np.sum(dV * 713.0))
+    assert fill_P > limit
+    c, moved, grid_g2 = g2(before, after, Pz_fill)
+    assert grid_g2 > limit  # the midpoint rule's whole cell
+    assert c["G2"] < 1e-2 * limit and "G2" not in c["hard"]  # a constant field closes
+    assert moved["largest_crossed"]["resolved"]
+    # a transfer loss, about the fill's own momentum in size: a miss
+    du = -fill_P / float(np.sum(w[after["found"]]))
+    lost, _ = side(1e-9, filled=True, du=3.0 * limit / fill_P * du)
+    c, _, _ = g2(before, lost, Pz_fill)
+    assert "G2" in c["hard"] and c["G2"] > 2.0 * limit
+    # not finite: a miss, never read as closed
+    c, _, _ = g2(before, after, Pz_fill, change=math.nan)
+    assert "G2" in c["hard"] and math.isnan(c["G2"])
+    bad = dict(after, uz=np.where(after["found"], math.nan, 0.0))
+    c, _, _ = g2(before, bad, Pz_fill)
+    assert "G2" in c["hard"]
+
+
+def test_a_large_fills_interior_midpoints_are_gas_to_g2(monkeypatch):
+    """Review F1 (round 2): a fill far wider than a cell has midpoints beyond a diagonal of its
+    boundary, with no liquid-part reading; the finite element finds them in the liquid after the
+    rebuild. G2 reads the filled region as gas after the rebuild in its midpoint samples too
+    (``ringcontact.axial_sampler(..., gas=)``), so its interior adds nothing: a constant field
+    closes, an imposed transfer loss of the old liquid misses even with the fill's own momentum
+    beside it, and a value that is not finite misses."""
+    import shapely
+    from shapely.geometry import box as rect
+
+    import faraday_singularity.surgery as smod
+    from faraday_singularity.ringsurgery import _ring_closures
+    from faraday_singularity.surgery import site_grid
+
+    grid = site_grid(3.0e-3, 4.611, 4e-3)
+    w = grid["dV"] * grid["phi"]
+    z_top = 4.611 + 1.2e-3  # the free surface above the fill
+    groove = rect(2.7e-3, 4.6106, 3.3e-3, 4.6114)  # an open gas groove, many cells wide
+    inside = np.asarray(shapely.contains_xy(groove, grid["r"], grid["zz"]), dtype=bool)
+    from scipy.spatial import cKDTree
+    B = shapely.get_coordinates(shapely.segmentize(groove.boundary, 1e-6))
+    d, _ = cKDTree(B).query(np.column_stack([grid["r"], grid["zz"]])[inside])
+    diag = np.hypot(grid["R"] / grid["n"], grid["rho"][inside] * 2 * math.pi / grid["n"])
+    assert int(np.count_nonzero(d > 2 * diag)) > 500  # interior midpoints beyond the band
+    plane = rect(0.0, z_top, 1.0, 10.0)
+    sigma = {"V": 1.13e-13, "Pz": 3.24e-10, "KE": 1e-9}
+    limit = 5.0 * sigma["Pz"]
+
+    def field(fem_gas, du=0.0):
+        def sample_fields(problem, r, z, names):
+            r, z = np.asarray(r, dtype=float), np.asarray(z, dtype=float)
+            found = ~np.asarray(shapely.contains_xy(fem_gas, r, z), dtype=bool)
+            u = 713.0 + 40.0 * (r - 3.0e-3) / 1e-3
+            return {"velocity_y": np.where(found, u + du * (~np.asarray(
+                shapely.contains_xy(groove, r, z), dtype=bool)), np.nan)}, found
+        monkeypatch.setattr(smod, "sample_fields", sample_fields)
+
+    def readings(fem_gas, gas, du=0.0, fill_gas=None):
+        field(fem_gas, du)
+        return contact.cell_readings(grid, gas, contact.axial_sampler(None, gas=fill_gas))
+
+    def g2(du=0.0, change=None):
+        before = readings(plane.union(groove), plane.union(groove))
+        after = readings(plane, plane.union(groove), du=du, fill_gas=groove)
+        moved = contact.momentum_change(grid, {"_cells": before}, {"_cells": after})
+        field(plane, du)
+        f, found = smod.sample_fields(None, grid["r"], grid["zz"], ("velocity_y",))
+        Pa = float(np.sum(np.where(found, w * f["velocity_y"], 0.0)))
+        Pb = float(np.sum(w * before["uz"]))
+        P_fill = float(np.sum(np.where(inside & found, w * f["velocity_y"], 0.0)))
+        box = {x: {"Pz": P, "KE": 0.0} for x, P in (("before", Pb), ("after_transfer", Pa),
+                                                     ("after_projection", Pa))}
+        poly = {"before": {"V_liquid": 1e-6, "A": 1.0}, "after": {"V_liquid": 1e-6, "A": 1.0}}
+        c = _ring_closures({"V": 0.0, "Pz": P_fill, "KE": 0.0}, poly, box, None,
+                           {"P_ref": 1e-12, "KE_ref": 1e-12}, {"A_cl": 0.0, "A_rem": 0.0},
+                           sigma=sigma, prefix="G",
+                           moved_change=moved["change"] if change is None else change)
+        return c, moved, P_fill
+
+    c, moved, P_fill = g2()
+    assert P_fill > 100 * limit  # the fill's own momentum, which no reading may hold
+    assert c["G2"] < 1e-2 * limit and "G2" not in c["hard"]  # a constant field closes
+    assert moved["cells_crossed"] == 0  # the interior midpoints are gas on both sides
+    du = -3.0 * limit / float(np.sum(np.where(~inside, w, 0.0)))  # a loss in the old liquid
+    c, _, _ = g2(du=du)
+    assert "G2" in c["hard"] and c["G2"] > 2.0 * limit
+    c, _, _ = g2(change=math.nan)
+    assert "G2" in c["hard"]
