@@ -542,8 +542,11 @@ PINCH_FIT_SPAN = 1.5  # the pinch time is fitted to the latest samples with r_n 
 # is rebuilt at once with that element in a far kink of its own at the size its turn asks for
 # (kink_ring_r<n>_far, refined; every other region as it was), at most this many times per state
 # (CollapseDriver._ring_refine); the base of the upward jet must stay within HEAD_FOLD_BASE_TOL
-# across each such rebuild (base_guard)
-RING_REFINE_TRIES = 3
+# across each such rebuild (base_guard). Six: r1 (fix18 at 928dbd6, step 10612) and r1h (h8 at
+# ef8edca, step 10745) stopped after three, a closing gas fold of the ring refined by halves (r1:
+# 3.4e-5, 1.6e-5, 4.5e-6) and its last mesh still carrying an element above the floor (r1: 1.8e-6,
+# a curved Jacobian; r1h: 2.2e-6, a midside node), which a restart's fourth refine met (r1)
+RING_REFINE_TRIES = 6
 # the largest turn of the ring's element the refine meets, on a stepped or a fresh mesh (beyond it
 # the element folds back on itself, and the run stops as the guard stops it)
 RING_REFINE_TURN_MAX = 150.0
